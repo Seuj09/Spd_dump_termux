@@ -19,6 +19,17 @@ apt update && apt upgrade -y
 
 Wait until it install and then install the drivers
 
-sudo apt-get install build-essential libusb-1.0-0-dev git
+sudo apt-get install build-essential libusb-1.0-0-dev git wget curl unzip zip
 
+curl -L -O https://github.com/Seuj09/Spd_dump_termux/releases/download/Release/spreadtrum_flash_termux.zip
 
+unzip spreadtrum_flash_termux.zip
+
+cd spreadtrum_flash_termux
+
+chmod +x spd_dump
+chmod +x menu.sh
+# Usage
+Run the menu then choose your phone, and chipset. A menu will appear and choose the option you want
+
+./menu.sh
