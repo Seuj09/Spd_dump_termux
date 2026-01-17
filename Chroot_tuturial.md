@@ -66,7 +66,9 @@ busybox chroot $UBUNTUPATH /bin/su - root
 Press ESC then :qw to save and exit
 
 after going back to termux type
+
 chmod +x start.sh
+
 ./start.sh
 
 command will change from # to root@localhost#/
