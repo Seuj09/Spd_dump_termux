@@ -12,3 +12,13 @@ REQUIREMENTS:
 •TERMUX
 
 •INTERNET CONNECTION
+
+First Setup Chroot by following the guide above and then update the respositories
+
+apt update && apt upgrade -y 
+
+Wait until it install and then install the drivers
+
+sudo apt-get install build-essential libusb-1.0-0-dev git
+
+
