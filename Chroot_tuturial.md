@@ -32,6 +32,8 @@ Create a new file called start.sh and add this script(youll have to google how t
 vi start.sh
 
 Type I(dont enter) then paste this
+(start from #!/bin/sh to busybox chroot $UBUNTUPATH /bin/su - root
+)
 
 #!/bin/sh
 
