@@ -35,6 +35,9 @@ chmod +x spd_dump
 chmod +x menu.sh
 chmod +x gen_spl-unlock
 chmod +x gen_spl-unlock-legacy
+chmod +x gen_fdl1-dl
+chmod +x misc-fastbootd.bin
+chmod +x misc-wipe.bin
 ```
 
 # Usage
