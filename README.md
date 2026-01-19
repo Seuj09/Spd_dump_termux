@@ -13,7 +13,7 @@ REQUIREMENTS:
 
 •INTERNET CONNECTION
 
-First Setup Chroot by following the guide above and then update the respositories
+First Setup Chroot by [following this tuturial](Chroot_tuturial.md)
 ```
 apt update && apt upgrade -y 
 ```
