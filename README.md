@@ -33,6 +33,8 @@ cd spreadtrum_flash_termux
 ```
 chmod +x spd_dump
 chmod +x menu.sh
+chmod +x gen_spl-unlock
+chmod +x gen_spl-unlock-legacy
 ```
 
 # Usage
