@@ -11,21 +11,68 @@ use it to run the `spd_dump` tools.
 ## Requirements
 
 - A **rooted** phone (root access via Magisk/SuperSU).
-- **Termux** installed (from [GitHub](https://github.com/termux/termux-app) or [F-Droid](https://f-droid.org/en/packages/com.termux/)).
-- **busybox** and a downloader (`wget` or `curl`).
+- **Termux** installed (from [GitHub](https://github.com/termux/termux-app) or
+  [F-Droid](https://f-droid.org/en/packages/com.termux/)).
+- A **busybox** binary reachable from the **root shell** (see Step 0).
+- A downloader (`wget` or `curl`).
 - An internet connection.
+
+---
+
+## Step 0 — Install busybox for the root shell
+
+> ⚠️ `pkg install busybox` only works **inside Termux**. Its binary lives at
+> `/data/data/com.termux/files/usr/bin/busybox`, which is **not** on the `PATH`
+> of the root shell you get after `su`. The `mount`/`chroot` commands in
+> `setup.sh` and `start.sh` run as root, so they need a `busybox` the root
+> shell can find.
+
+**Recommended:** install a **Magisk busybox module** (e.g. *Busybox for
+Android NDK* by osm0sis). It places `busybox` at `/system/xbin/busybox`, which
+both scripts auto-detect.
+
+Verify it is reachable from root:
+
+```sh
+su
+busybox | head -1
+```
+
+If that prints the busybox banner, you are good to go. The scripts probe
+several common module locations and fall back to whatever is on `PATH`, so a
+non-standard path still works.
+
+---
+
+## Step 1 — Get the scripts
+
+Download `setup.sh` into `/data/local/tmp` (it writes `start.sh` for you):
+
+```sh
+su
+cd /data/local/tmp
+curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/setup.sh
+chmod +x setup.sh
+```
+
+> If you only need the entry script (e.g. the chroot is already set up), grab
+> `start.sh` the same way:
+>
+> ```sh
+> curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/start.sh
+> chmod +x start.sh
+> ```
 
 ---
 
 ## Method 1 — Automated (`setup.sh`) *(recommended)*
 
-One command does everything: download the rootfs, extract it, write the
-`start.sh` entry script, and run the first-time in-chroot setup.
+One command downloads the rootfs, extracts it, writes `start.sh`, and runs the
+first-time in-chroot setup:
 
 ```sh
-# In Termux:
-pkg update && pkg install -y busybox wget
-su                                   # grant root to Termux
+su
+cd /data/local/tmp
 sh setup.sh
 ```
 
@@ -36,29 +83,21 @@ su
 sh /data/local/tmp/start.sh
 ```
 
-Your prompt will change to `root@localhost:~#` — you're now inside Ubuntu.
+Your prompt will change to `root@localhost:~#` — you are now inside Ubuntu.
 
 ---
 
 ## Method 2 — Manual
 
-### 1. Install Termux and busybox
-
-Install Termux, then inside it:
+### 1. Create the chroot directory
 
 ```sh
-pkg update && pkg install -y busybox
-su          # grant root permission to Termux
-```
-
-### 2. Create the chroot directory
-
-```sh
+su
 mkdir -p /data/local/tmp/chrootubuntu
 cd /data/local/tmp/chrootubuntu
 ```
 
-### 3. Download the Ubuntu 22.04 rootfs
+### 2. Download the Ubuntu 22.04 rootfs
 
 ```sh
 busybox wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-arm64.tar.gz
@@ -71,7 +110,7 @@ busybox curl -o ubuntu-base-22.04-base-arm64.tar.gz \
   https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-arm64.tar.gz
 ```
 
-### 4. Extract and create mountpoints
+### 3. Extract and create mountpoints
 
 ```sh
 tar xf ubuntu-base-22.04-base-arm64.tar.gz
@@ -79,37 +118,28 @@ mkdir -p dev/shm sdcard
 cd ..
 ```
 
-### 5. Create the entry script (`start.sh`)
+### 4. Get the entry script (`start.sh`)
 
-Create `/data/local/tmp/start.sh` with the content below (or copy the
-`start.sh` provided in this repo):
+Either download it (recommended):
 
 ```sh
-#!/bin/sh
-set -eu
-UBUNTUPATH="/data/local/tmp/chrootubuntu"
-mkdir -p "$UBUNTUPATH/sdcard" "$UBUNTUPATH/dev/shm"
-busybox mount -o remount,dev,suid /data
-busybox mount --bind /dev  "$UBUNTUPATH/dev"
-busybox mount --bind /sys  "$UBUNTUPATH/sys"
-busybox mount --bind /proc "$UBUNTUPATH/proc"
-busybox mount -t devpts devpts "$UBUNTUPATH/dev/pts" 2>/dev/null || true
-busybox mount -t tmpfs -o size=256M tmpfs "$UBUNTUPATH/dev/shm" 2>/dev/null || true
-busybox mount --bind /sdcard "$UBUNTUPATH/sdcard" 2>/dev/null || true
-busybox chroot "$UBUNTUPATH" /bin/su - root
+curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/start.sh
+chmod +x start.sh
 ```
 
-> To create the file with `vi`: `vi start.sh`, press `i` to insert, paste the
-> text, then `Esc` → `:wq` → `Enter`.
+Or create `/data/local/tmp/start.sh` yourself with the content from
+[`start.sh`](start.sh) in this repo.
 
-Make it executable and run it:
+> To create it with `vi`: `vi start.sh`, press `i` to insert, paste the text,
+> then `Esc` → `:wq` → `Enter`.
+
+### 5. Run it
 
 ```sh
-chmod +x start.sh
 ./start.sh
 ```
 
-Your prompt changes from `$` to `root@localhost:~#` — you're in Ubuntu now.
+Your prompt changes from `$` to `root@localhost:~#` — you are in Ubuntu now.
 
 ### 6. First-time in-chroot setup
 
@@ -142,14 +172,18 @@ and download the `spd_dump` package.
 
 | Problem | Fix |
 | --- | --- |
-| `busybox: not found` | `pkg install busybox` |
+| `busybox: not found` (as root) | Install a busybox **module** — see Step 0 |
+| `busybox: not found` (in Termux) | `pkg install busybox` |
 | `Permission denied` / mount fails | Run as root: type `su` first |
 | `setuid` / `sudo` broken in chroot | Ensure `busybox mount -o remount,dev,suid /data` ran |
 | No internet inside chroot | Re-run the `resolv.conf` step above |
 | Wrong architecture download | Set `ARCH=armhf` (or `amd64`) before running `setup.sh` |
+| Scripts not found | Follow **Step 1** to download them into `/data/local/tmp` |
 
 ## Notes
 
-- The rootfs and scripts live under `/data/local/tmp/` (a writable, non-PIE
-  area reachable via `su`).
+- The rootfs and scripts live under `/data/local/tmp/` (a writable area
+  reachable via `su`).
 - `start.sh` is safe to re-run; it re-binds the mounts before entering.
+- `setup.sh` is safe to re-run; existing downloads and the extracted rootfs
+  are reused.
