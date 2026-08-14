@@ -1,6 +1,6 @@
 # Spd_dump_termux
 
-Use the `spd_dump` tool on a rooted device.
+Use the `spd_dump` tool on a rooted device — **arm64 build for Termux**.
 
 ## ⚠️ Disclaimer
 
@@ -41,22 +41,18 @@ sudo apt-get install build-essential libusb-1.0-0-dev git wget curl unzip zip
 ### 3. Download and extract the tools
 
 ```bash
-curl -L -O https://github.com/Seuj09/Spd_dump_termux/releases/download/Release/spreadtrum_flash_termux.zip
-unzip spreadtrum_flash_termux.zip
+curl -L -O https://github.com/Seuj09/Spd_dump_termux/releases/download/Release/spreadtrum_flash_termux_arm64.zip
+unzip spreadtrum_flash_termux_arm64.zip
 cd spreadtrum_flash_termux
 ```
 
-### 4. Make the binaries executable
-
-```bash
-chmod +x spd_dump
-chmod +x menu.sh
-chmod +x gen_spl-unlock
-chmod +x gen_spl-unlock-legacy
-chmod +x gen_fdl1-dl
-chmod +x misc-fastbootd.bin
-chmod +x misc-wipe.bin
-```
+> The host binaries and scripts already ship with the executable bit set inside
+> the zip. If you ever need to re-set it:
+>
+> ```bash
+> chmod +x spd_dump chsize gen_fdl1-dl gen_spl-unlock gen_spl-unlock-legacy \
+>          pacextractor unpac menu.sh extrac.sh misc-fastbootd.bin misc-wipe.bin
+> ```
 
 ## Usage
 
@@ -66,3 +62,27 @@ the option you want:
 ```bash
 ./menu.sh
 ```
+
+## Limitations
+
+- **`spdfl` is not included.** It is a closed-source x86-64 binary with no
+  public source, so it cannot run on arm64. Use `./menu.sh` instead — the menu
+  drives `spd_dump` directly.
+- **`pacextractor` and `unpac` are still x86-64.** They have no public source,
+  so they could not be rebuilt for arm64. They are only used by `extrac.sh` for
+  PAC-archive extraction; the main flash/unlock flow does not depend on them.
+- **V35 device folders are empty.** The new tool's per-device directories ship
+  without `fdl*.bin` firmware, so device coverage is unchanged from the original
+  tool. If your device isn't listed, you'll need to supply its `fdl` firmware
+  yourself.
+
+## Credits
+
+- **[TomKing062](https://github.com/TomKing062/CVE-2022-38694_unlock_bootloader)** —
+  the open-source CVE-2022-38694 unlock-bootloader toolchain, source of the
+  arm64 `spd_dump`, `chsize`, `gen_fdl1-dl`, `gen_spl-unlock`, and
+  `gen_spl-unlock-legacy` binaries and the unlock method.
+- **[Massatriof16](https://github.com/Massatriof16/recovery-collections)** —
+  the Spreadtrum Flash V35 tool, which provided the tool layout used here.
+- The **Spreadtrum/Unisoc reverse-engineering community** for the underlying
+  flashing research and `fdl` firmware.
