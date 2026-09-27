@@ -55,6 +55,35 @@ static void pause_ms(int ms)
 	nanosleep(&ts, NULL);
 }
 
+/* Parse env ints; clamp to [lo, hi]. Junk/missing → def. */
+static int env_int(const char *name, int def, int lo, int hi)
+{
+	const char *s;
+	char *end = NULL;
+	long v;
+
+	s = getenv(name);
+	if (!s || !*s)
+		return def;
+	errno = 0;
+	v = strtol(s, &end, 10);
+	if (errno || end == s || (end && *end))
+		return def;
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return (int)v;
+}
+
+static long long mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
 static void wr16be(uint8_t *p, unsigned v)
 {
 	p[0] = (uint8_t)(v >> 8);
@@ -379,17 +408,83 @@ static int reopen_if_gone(struct spd *io)
 int spd_check_baud(struct spd *io, int nbytes, int tries)
 {
 	int i;
+	int brom = (nbytes == 1);
+	int pause;
+	int hello_to;
+	int wall_ms;
+	int brom_trace;
+	long long t0 = 0;
+
+	/* BootROM hello (raw 1×0x7e): patient defaults + wall; tries arg ignored. */
+	if (brom) {
+		tries = env_int("SPDHOST_BROM_TRIES", 15, 1, 100);
+		pause = env_int("SPDHOST_BROM_PAUSE_MS", 500, 0, 5000);
+		{
+			int brom_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
+			hello_to = io->usb.timeout_ms > brom_to ? io->usb.timeout_ms : brom_to;
+		}
+		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 15000, 1000, 120000);
+		brom_trace = io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1);
+		t0 = mono_ms();
+		if (brom_trace)
+			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d wall=%d @%lldms\n",
+				tries, pause, hello_to, wall_ms, t0);
+	} else {
+		pause = 200;
+		hello_to = io->usb.timeout_ms;
+		wall_ms = 0;
+		brom_trace = 0;
+	}
+
 	for (i = 0; i < tries; i++) {
 		int n;
+		int rc;
+		int saved_to;
+		long long now;
+
+		if (brom) {
+			now = mono_ms();
+			if (now - t0 >= wall_ms) {
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+					wall_ms, i);
+				return -1;
+			}
+			if (brom_trace)
+				fprintf(stderr, "brom: try %d start @%lldms\n", i + 1, now - t0);
+		}
 		if (i)
-			pause_ms(200);
+			pause_ms(pause);
+		if (brom) {
+			now = mono_ms();
+			if (now - t0 >= wall_ms) {
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+					wall_ms, i);
+				return -1;
+			}
+		}
 		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
-		if (spd_send(io) < 0) {
+		/* Hello-only timeout for send; do not leave global usb.timeout_ms raised. */
+		saved_to = io->usb.timeout_ms;
+		io->usb.timeout_ms = hello_to;
+		rc = spd_send(io);
+		io->usb.timeout_ms = saved_to;
+		if (brom && brom_trace)
+			fprintf(stderr, "brom: try %d send rc=%d @%lldms\n",
+				i + 1, rc, mono_ms() - t0);
+		if (rc < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
 			return -1;
 		}
-		n = spd_recv(io, io->usb.timeout_ms);
+		n = spd_recv(io, hello_to);
+		if (brom && brom_trace) {
+			if (n == 0)
+				fprintf(stderr, "brom: try %d recv timeout @%lldms\n",
+					i + 1, mono_ms() - t0);
+			else
+				fprintf(stderr, "brom: try %d recv n=%d @%lldms\n",
+					i + 1, n, mono_ms() - t0);
+		}
 		if (n < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
@@ -397,6 +492,14 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 		}
 		if (n == 0) {
 			fprintf(stderr, "check baud %d: timeout\n", i + 1);
+			if (brom) {
+				now = mono_ms();
+				if (now - t0 >= wall_ms) {
+					fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+						wall_ms, i + 1);
+					return -1;
+				}
+			}
 			continue;
 		}
 		if (spd_type(io) != BSL_REP_VER) {
@@ -404,9 +507,9 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 			continue;
 		}
 		{
-			unsigned n = 0;
-			const uint8_t *p = spd_payload(io, &n);
-			fprintf(stderr, "version: %.*s\n", (int)n, (const char *)p);
+			unsigned plen = 0;
+			const uint8_t *payload = spd_payload(io, &plen);
+			fprintf(stderr, "version: %.*s\n", (int)plen, (const char *)payload);
 		}
 		return 0;
 	}

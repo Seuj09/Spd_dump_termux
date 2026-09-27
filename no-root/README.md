@@ -326,6 +326,12 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 bash scripts/menu.sh
 spdhost-usb --timeout 5000 --verbose ping
 ```
 
+BootROM hello (`check-baud` with raw `0x7e`) also reads optional env knobs
+(defaults are patient; shrink them to bisect): `SPDHOST_BROM_TRIES` (15),
+`SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000),
+`SPDHOST_BROM_WALL_MS` (15000), `SPDHOST_BROM_TRACE` (1 = breadcrumb
+timestamps even without `--verbose`).
+
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
 directly. The command words after that are the same:
