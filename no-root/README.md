@@ -326,6 +326,20 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 bash scripts/menu.sh
 spdhost-usb --timeout 5000 --verbose ping
 ```
 
+### BootROM hello debug
+
+Stay in the package root so `scripts/spdhost-usb` finds `./spdhost`:
+
+```bash
+cd ~/spdhost-arm32   # or spdhost-arm64 / unzipped package root that contains ./spdhost + scripts/
+
+SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
+  ./scripts/spdhost-usb --timeout 5000 --verbose ping
+```
+
+Optional arm32 tip binary check (tip `61d610f`, bins unchanged by docs):
+`sha256sum spdhost` → `c329d46e81dc408c263cc0a653fd854ab774f6de11e71c1fe86cd2af34857816`.
+
 BootROM hello (`check-baud` with raw `0x7e`) also reads optional env knobs
 (defaults are patient; shrink them to bisect): `SPDHOST_BROM_TRIES` (15),
 `SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000),
