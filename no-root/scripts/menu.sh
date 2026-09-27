@@ -77,6 +77,37 @@ find_infinix_dir() {
 	return 1
 }
 
+# Shipped BCB images under no-root/misc/ (phone data, not host ISA / not FDL).
+find_misc_dir() {
+	local script_dir here d
+	script_dir=$(cd "$(dirname "$0")" && pwd)
+	here=$(pwd)
+	for d in \
+		"$script_dir/../misc" \
+		"$here/misc" \
+		"$HOME/spdhost/misc" \
+		"$HOME/Spd_dump_termux/no-root/misc" \
+		"$HOME/spreadtrum_flash_termux"
+	do
+		if [[ -f $d/misc-fastbootd.bin && -f $d/misc-wipe.bin ]]; then
+			(cd "$d" && pwd)
+			return 0
+		fi
+	done
+	return 1
+}
+
+MISC_DIR=""
+resolve_misc_dir() {
+	if [[ -n ${MISC_DIR:-} && -d $MISC_DIR ]]; then
+		return 0
+	fi
+	MISC_DIR=$(find_misc_dir) || {
+		echo "misc BCB directory not found (need misc-fastbootd.bin + misc-wipe.bin)." >&2
+		return 1
+	}
+}
+
 # Offer the shipped Infinix UMS9230 pair only after an explicit chip/model
 # confirm, or when SPDHOST_ALLOW_DEFAULT_FDL=1. Never apply silently.
 apply_ums9230_infinix_defaults() {
@@ -201,7 +232,8 @@ dump_partition() {
 	pause
 }
 
-# Android bootloader control block, first 2048 bytes of misc.
+# Fallback/doc: synthesize a 2048-byte misc BCB with dd (menu reboot [2]/[3]
+# prefer spdhost reboot-recovery / reboot-fastboot). Kept for inspection.
 # recovery:  "boot-recovery"
 # fastbootd: "boot-recovery" and, at offset 0x40, "recovery\n--fastboot\n"
 write_misc_command() {
@@ -215,7 +247,7 @@ write_misc_command() {
 	printf '%s\n' "$dest"
 }
 
-# Brick-adjacent: never pass --yes for misc. Require a TTY + typed confirm.
+# Brick-adjacent: never pass --yes for misc/reboot/wipe. Require a TTY + typed confirm.
 confirm_misc_write() {
 	local kind=$1 misc=$2 digest reply
 	if [[ ! -t 0 ]]; then
@@ -234,6 +266,43 @@ confirm_misc_write() {
 	return 0
 }
 
+# Louder prompt for wipe BCB (recovery --wipe_data). Does NOT erase persist/userdata partitions.
+confirm_wipe_userdata() {
+	local misc=$1 digest reply
+	if [[ ! -t 0 ]]; then
+		echo "refusing wipe-userdata without a TTY (no silent --yes)" >&2
+		return 1
+	fi
+	digest=$(sha256sum "$misc" | awk '{print $1}')
+	echo "WARNING: This writes a recovery --wipe_data BCB to misc (2048 bytes), then reset."
+	echo "Recovery will ERASE USERDATA on the next boot. It does not erase persist here."
+	echo "misc-wipe.bin sha256: $digest"
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path and destroy user data."
+	read -r -p "type yes to erase userdata via recovery: " reply
+	if [[ $reply != yes ]]; then
+		echo "not confirmed"
+		return 1
+	fi
+	return 0
+}
+
+# Typed confirm for in-process reboot-* (spdhost will also prompt; never --yes).
+confirm_reboot_cmd() {
+	local kind=$1 reply
+	if [[ ! -t 0 ]]; then
+		echo "refusing $kind without a TTY (no silent --yes)" >&2
+		return 1
+	fi
+	echo "About to run $kind: write exactly 2048 bytes to misc, then reset."
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
+	read -r -p "type yes to continue: " reply
+	if [[ $reply != yes ]]; then
+		echo "not confirmed"
+		return 1
+	fi
+	return 0
+}
+
 reboot_mode() {
 	local choice misc
 	need_loaders || return
@@ -243,6 +312,7 @@ reboot_mode() {
 	echo "[2] recovery"
 	echo "[3] fastbootd"
 	echo "[4] power off"
+	echo "[5] wipe userdata (via recovery BCB; destructive)"
 	read -r -p "Choice: " choice
 	case $choice in
 		1)
@@ -251,36 +321,48 @@ reboot_mode() {
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset || true
 			;;
 		2)
-			misc=$(write_misc_command recovery)
-			echo "Writes 2048 bytes at the start of misc, then reset."
-			if ! confirm_misc_write recovery "$misc"; then
-				rm -f "$misc"
+			echo "Writes 2048-byte recovery BCB to misc via reboot-recovery, then reset."
+			if ! confirm_reboot_cmd reboot-recovery; then
 				pause
 				return
 			fi
 			ready
-			# No --yes: spdhost will also prompt on its TTY confirm path.
+			# No --yes: spdhost prompts again on its TTY confirm path.
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-				write-part misc "$misc" reset || true
-			rm -f "$misc"
+				reboot-recovery || true
 			;;
 		3)
-			misc=$(write_misc_command fastboot)
-			echo "Writes the fastbootd boot command at the start of misc, then reset."
-			if ! confirm_misc_write fastbootd "$misc"; then
-				rm -f "$misc"
+			echo "Writes 2048-byte fastbootd BCB to misc via reboot-fastboot, then reset."
+			if ! confirm_reboot_cmd reboot-fastboot; then
 				pause
 				return
 			fi
 			ready
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-				write-part misc "$misc" reset || true
-			rm -f "$misc"
+				reboot-fastboot || true
 			;;
 		4)
 			echo "Power off. The target stays off."
 			ready
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off || true
+			;;
+		5)
+			resolve_misc_dir || { pause; return; }
+			misc="$MISC_DIR/misc-wipe.bin"
+			if [[ ! -f $misc ]]; then
+				echo "missing $misc" >&2
+				pause
+				return
+			fi
+			echo "Wipe userdata via shipped misc-wipe.bin + reset (BCB only; no persist erase)."
+			if ! confirm_wipe_userdata "$misc"; then
+				pause
+				return
+			fi
+			ready
+			# No --yes. spdhost write-part will also require typed yes.
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+				write-part misc "$misc" reset || true
 			;;
 		*)
 			echo "Unchanged."
