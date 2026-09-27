@@ -147,6 +147,8 @@ static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 		if (!io->linked) {
 			if (line && spd_usb_line_state(&io->usb))
 				exit(1);
+			if (line)
+				spd_brom_after_line_state(io);
 			/* nbytes==1: BootROM path; tries arg ignored (SPDHOST_BROM_*). */
 			if (spd_check_baud(io, 1, 4))
 				exit(1);
@@ -186,6 +188,8 @@ static void do_ping(struct spd *io, int line, int fdl)
 		io->flags |= SPD_F_CRC16;
 	if (line && spd_usb_line_state(&io->usb))
 		exit(1);
+	if (line)
+		spd_brom_after_line_state(io);
 	if (fdl) {
 		if (spd_check_baud_loader(io))
 			exit(1);

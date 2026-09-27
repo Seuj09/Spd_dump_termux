@@ -330,7 +330,10 @@ BootROM hello (`check-baud` with raw `0x7e`) also reads optional env knobs
 (defaults are patient; shrink them to bisect): `SPDHOST_BROM_TRIES` (15),
 `SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000),
 `SPDHOST_BROM_WALL_MS` (15000), `SPDHOST_BROM_TRACE` (1 = breadcrumb
-timestamps even without `--verbose`).
+timestamps even without `--verbose`), `SPDHOST_BROM_REACQ` (default **1** =
+one USB reacquire after hello timeout; `0` disables; max `2`),
+`SPDHOST_BROM_SETTLE_MS` (default **100** ms pause after line-state),
+`SPDHOST_BROM_DRAIN` (default **0**; `1` = short bulk-IN drain after settle).
 
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary

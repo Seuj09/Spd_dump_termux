@@ -40,6 +40,8 @@ const uint8_t *spd_payload(struct spd *io, unsigned *len);
 
 int spd_check_ok(struct spd *io);
 int spd_check_baud(struct spd *io, int nbytes, int tries);
+/* After BootROM line-state: settle + optional IN drain (SPDHOST_BROM_*). */
+void spd_brom_after_line_state(struct spd *io);
 /* After FDL1 starts: 0x7e once (phones), then four 0x7e (older loaders). */
 int spd_check_baud_loader(struct spd *io);
 int spd_connect(struct spd *io);
