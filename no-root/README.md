@@ -317,6 +317,15 @@ Unzipped `no-root/` also works without copying into `$PREFIX/bin`: after
 `make` (or with a Release prebuilt `spdhost` in the package root), run
 `bash scripts/menu.sh` from the package root or from `scripts/`.
 
+Menu sessions always pass `--timeout` (default 3000 ms; override with
+`SPDHOST_TIMEOUT`) and `--verbose` when `SPDHOST_VERBOSE=1`. The CLI binary
+default timeout stays 1000 ms.
+
+```sh
+SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 bash scripts/menu.sh
+spdhost-usb --timeout 5000 --verbose ping
+```
+
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
 directly. The command words after that are the same:
