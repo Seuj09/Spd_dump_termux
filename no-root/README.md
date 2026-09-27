@@ -293,9 +293,17 @@ not silently pick the shipped ums9230 Infinix loaders
 `0x9efffe00`). You must type `yes` to confirm that chip/model, or set
 `SPDHOST_ALLOW_DEFAULT_FDL=1`, or use option 3 / a saved
 `~/.spdhost-menu.conf`. Those files match the release menu's UMS9230 /
-Infinix choice. The menu dumps one partition into `./backup/` or reboots.
-Reboot choices are system (`reset`), recovery (`reboot-recovery`),
-fastbootd (`reboot-fastboot`), power off, and optional wipe userdata via
+Infinix choice.
+
+Dump (option 1) fetches the live `parts` table into
+`./backup/partition_list.txt` (name + size), prints it like the rooted
+menu's LIST PARTISI, then resolves what you type to the closest name
+(`boot.img` or `boot` → `boot_a` when that slot exists) and uses that
+row's size for `read-part`. `all` / `all_lite` match the rooted menu
+bulk dump (skip userdata/cache/blackbox; `all_lite` also skips `_b`
+when `_a` exists). Option 4 only refreshes the list. Reboot choices are
+system (`reset`), recovery (`reboot-recovery`), fastbootd
+(`reboot-fastboot`), power off, and optional wipe userdata via
 `misc/misc-wipe.bin` (BCB + reset only). Misc/reboot/wipe paths always use
 a typed confirm and never pass `--yes`. It does not unlock or flash a
 partition you did not name.
