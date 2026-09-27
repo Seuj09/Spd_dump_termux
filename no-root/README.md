@@ -30,6 +30,23 @@ The same release also has `spdhost-source-arm32-arm64.zip`: the guide,
 `scripts/menu.sh`, the C sources, and the ums9230 Infinix loaders. Use the
 zip when you want to compile on the phone. The prebuilt is the file to run.
 
+## misc BCB images (phone data, not host ISA)
+
+`no-root/misc/` ships opaque 2048-byte Android bootloader control block
+images for writing to partition `misc` at offset 0. They are **target phone
+BCB**, not host-architecture binaries and not chip FDL loaders. The same
+files work on arm32 and arm64 Termux hosts.
+
+| File | Contents | sha256 |
+|------|----------|--------|
+| `misc/misc-recovery.bin` | `boot-recovery` @0 | `7b3d5382b8a753269520c60f01124f5dcea1a3c2e2e8c304623a46df79d046aa` |
+| `misc/misc-fastbootd.bin` | + `recovery\n--fastboot\n` @0x40 | `d5e5251516f466735c7bdd54b470902260bfc70c3d1aa7fe7b0092d76413ac26` |
+| `misc/misc-wipe.bin` | + `recovery\n--wipe_data\n` @0x40 | `bd6b67e852d6072e6fb87040f2ac40216d5b661b7fa661e7024569ecf8ddb3a7` |
+
+Each file is exactly 2048 (`0x800`) bytes. Do not write more than that at
+offset 0: A/B `bootloader_control` lives at misc offset `0x800`. Do not
+`erase-part misc` as a shortcut.
+
 This tree is original. It is not a fork of either repository below, and it
 does not carry their code. Read them when you want to see how someone else
 solved a piece. Do not paste them in here: `sfd_tool` is GPL-3.0-or-later.
