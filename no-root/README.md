@@ -162,11 +162,13 @@ connection, and the commands run from left to right. When the line exits,
 the connection is gone. A later `read-part` does not remember an earlier
 `fdl`. Put the loaders and the partition command on the same line.
 
-This repo does not ship loaders. You need the FDL1 file, the FDL2 file, and
-the load address for each, for that exact chip. Use the same pair the rooted
-menu uses for that model. `FDL1_ADDR` and `FDL2_ADDR` below are not real
-addresses. Replace them with the hex address from that package, including
-the `0x`. A wrong address can brick the phone.
+Loaders must match the exact chip. This tree ships one example pair under
+`fdl/ums9230/infinix/` (`fdl1-dl.bin` / `fdl2-dl.bin` for Infinix UMS9230).
+Treat that pair as untrusted until you match it to your device's PAC or
+known-good package. For any other chip, use the FDL1/FDL2 files and load
+addresses from that model's package. `FDL1_ADDR` and `FDL2_ADDR` below are
+placeholders unless you substitute real hex addresses (including the `0x`).
+A wrong address or loader can brick the phone.
 
 Run the command from the directory that contains the loader files, or pass
 full paths. Names like `fdl1.bin` only work when those files are in the
@@ -238,15 +240,17 @@ spdhost-usb /dev/bus/usb/001/002 -- \
   fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
-`scripts/menu.sh` is a two-item test menu over the same commands. Unless
-you already saved other paths in `~/.spdhost-menu.conf`, it uses the
-ums9230 Infinix loaders shipped in `fdl/ums9230/infinix/`: `fdl1-dl.bin`
-at `0x65000800` and `fdl2-dl.bin` at `0x9efffe00`. Those are the same files
-and addresses as the release menu's UMS9230 / Infinix choice. Option 3
-changes them. The menu either dumps one partition into `./backup/` or
+`scripts/menu.sh` is a two-item test menu over the same commands. It will
+not silently pick the shipped ums9230 Infinix loaders
+(`fdl/ums9230/infinix/`, `fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @
+`0x9efffe00`). You must type `yes` to confirm that chip/model, or set
+`SPDHOST_ALLOW_DEFAULT_FDL=1`, or use option 3 / a saved
+`~/.spdhost-menu.conf`. Those files match the release menu's UMS9230 /
+Infinix choice. The menu either dumps one partition into `./backup/` or
 reboots. Reboot choices are system (`reset`), recovery, fastbootd (both
-write the boot command at the start of `misc`, then `reset`), and power
-off. It does not unlock or flash a partition you did not name.
+write the boot command at the start of `misc` after a typed confirm, then
+`reset`), and power off. It does not unlock or flash a partition you did
+not name.
 
 ```sh
 cp scripts/menu.sh "$PREFIX/bin/"
@@ -278,10 +282,10 @@ are already talking to a loader that understands them.
 If execute makes the phone drop off the bus, spdhost closes the dead
 handle and reopens. On Termux that means calling `termux-usb` again and
 receiving the new descriptor over a socket. On the desktop it scans for
-the same vendor and product. The vendor must stay `1782`. The product id
-may change after a loader starts; a Termux reopen accepts that, a desktop
-reopen still wants the original `--pid`. A reset during `read-part` or
-`write-part` aborts that command instead of resending the chunk.
+vendor `1782` and accepts any product id, logging the new PID. The vendor
+must stay `1782`. The product id may change after a loader starts. A
+reset during `read-part` or `write-part` aborts that command instead of
+resending the chunk.
 
 `parts` prints `index name units`. The unit is whatever that loader reports
 (often a sector count, not a byte size).

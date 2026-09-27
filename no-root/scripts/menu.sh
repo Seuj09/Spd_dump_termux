@@ -77,11 +77,35 @@ find_infinix_dir() {
 	return 1
 }
 
+# Offer the shipped Infinix UMS9230 pair only after an explicit chip/model
+# confirm, or when SPDHOST_ALLOW_DEFAULT_FDL=1. Never apply silently.
 apply_ums9230_infinix_defaults() {
-	local dir
+	local dir reply
+	# Config (or a prior confirm) already complete — leave it alone.
+	if [[ -n ${FDL1:-} && -f $FDL1 && -n ${FDL1_ADDR:-} && -n ${FDL2:-} && -f $FDL2 && -n ${FDL2_ADDR:-} ]]; then
+		return 0
+	fi
+	dir=$(find_infinix_dir) || return 0
+	if [[ ${SPDHOST_ALLOW_DEFAULT_FDL:-} == 1 ]]; then
+		echo "Using shipped ums9230 Infinix FDL defaults (SPDHOST_ALLOW_DEFAULT_FDL=1)" >&2
+	else
+		if [[ ! -t 0 ]]; then
+			echo "refusing shipped Infinix ums9230 FDL defaults without a TTY;" >&2
+			echo "set SPDHOST_ALLOW_DEFAULT_FDL=1 or run option 3 to choose loaders." >&2
+			return 0
+		fi
+		echo "Found shipped FDL pair for Infinix UMS9230:"
+		echo "  $dir/fdl1-dl.bin @ $FDL1_ADDR_DEFAULT"
+		echo "  $dir/fdl2-dl.bin @ $FDL2_ADDR_DEFAULT"
+		echo "A wrong chip or address can brick the phone."
+		read -r -p "type yes if this target is Infinix UMS9230: " reply
+		if [[ $reply != yes ]]; then
+			echo "Defaults not applied. Use option 3 to set loaders for your chip."
+			return 0
+		fi
+	fi
 	[[ -n $FDL1_ADDR ]] || FDL1_ADDR=$FDL1_ADDR_DEFAULT
 	[[ -n $FDL2_ADDR ]] || FDL2_ADDR=$FDL2_ADDR_DEFAULT
-	dir=$(find_infinix_dir) || return 0
 	[[ -n $FDL1 ]] || FDL1=$dir/fdl1-dl.bin
 	[[ -n $FDL2 ]] || FDL2=$dir/fdl2-dl.bin
 }
