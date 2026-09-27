@@ -30,18 +30,39 @@ if [[ ${1:-} == /dev/bus/usb/* ]]; then
 	fi
 fi
 
+list_devs() {
+	# termux-usb -l returns immediately. An empty list is normal until the
+	# cable is plugged in, so the caller has to poll.
+	termux-usb -l 2>/dev/null | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }' || true
+}
+
 if [[ -z $dev ]]; then
-	mapfile -t devs < <(termux-usb -l | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }')
-	if [[ ${#devs[@]} -eq 0 ]]; then
-		echo "termux-usb -l found nothing. Plug the phone in download mode through OTG." >&2
+	echo "Waiting up to 90 seconds. Plug the target in NOW." >&2
+	echo "Hold its download-mode keys (volume down) until this line changes." >&2
+	echo "When the permission dialog appears, tap OK immediately." >&2
+	deadline=$((SECONDS + 90))
+	while (( SECONDS < deadline )); do
+		mapfile -t devs < <(list_devs)
+		if (( ${#devs[@]} == 1 )); then
+			dev=${devs[0]}
+			echo "found $dev" >&2
+			break
+		fi
+		if (( ${#devs[@]} > 1 )); then
+			printf 'more than one USB device; pass the path:\n' >&2
+			printf '  %s\n' "${devs[@]}" >&2
+			exit 1
+		fi
+		left=$((deadline - SECONDS))
+		printf '\rstill waiting (%ds) ' "$left" >&2
+		sleep 0.4
+	done
+	echo >&2
+	if [[ -z $dev ]]; then
+		echo "no USB device appeared. The BootROM only stays up a few seconds;" >&2
+		echo "run this again and plug in while this wait is counting." >&2
 		exit 1
 	fi
-	if [[ ${#devs[@]} -gt 1 ]]; then
-		printf 'more than one USB device; pass the path:\n' >&2
-		printf '  %s\n' "${devs[@]}" >&2
-		exit 1
-	fi
-	dev=${devs[0]}
 fi
 
 if [[ $# -eq 0 ]]; then

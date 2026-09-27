@@ -136,10 +136,11 @@ need_loaders() {
 
 ready() {
 	echo
-	echo "Power the target off. This phone is the USB host (OTG)."
-	echo "Press Enter, then hold the target's download-mode keys and plug it in."
-	echo "Allow the USB permission dialog. The first dialog often misses the BootROM window;"
-	echo "if it does, unplug and run this action again."
+	echo "Power the target off. Leave it unplugged. This phone is the USB host (OTG)."
+	echo "Press Enter. The next step waits 90 seconds."
+	echo "Only after it says 'Plug the target in NOW', hold volume down and connect the cable."
+	echo "Tap OK on the permission dialog as soon as it appears."
+	echo "The first try often misses the BootROM window. Unplug, run the same action, and plug in again."
 	pause
 }
 
