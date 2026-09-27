@@ -513,18 +513,46 @@ static int grab_termux(struct spd_usb *u)
 	return u->handle ? 0 : -1;
 }
 
+/* After a loader starts the product id may change; vendor stays 1782.
+ * Enumerate that vendor and adopt the first matching bulk device.
+ * Updates u->pid when the product id differs from the initial open. */
 static int grab_enum(struct spd_usb *u)
 {
 	int i;
 	for (i = 0; i < 60; i++) {
-		libusb_device_handle *h;
+		libusb_device **list = NULL;
+		ssize_t n, k;
 		if (i == 0)
-			fprintf(stderr, "waiting for %04x:%04x to reappear\n", u->vid, u->pid);
-		h = libusb_open_device_with_vid_pid(u->ctx, (uint16_t)u->vid, (uint16_t)u->pid);
-		if (h && adopt(u, h, 1) == 0) {
-			fprintf(stderr, "reopened %04x:%04x\n", u->vid, u->pid);
-			return 0;
+			fprintf(stderr, "waiting for vendor %04x to reappear (any product)\n", u->vid);
+		n = libusb_get_device_list(u->ctx, &list);
+		if (n < 0) {
+			usleep(250000);
+			continue;
 		}
+		for (k = 0; k < n; k++) {
+			struct libusb_device_descriptor d;
+			libusb_device_handle *h = NULL;
+			int err;
+			if (libusb_get_device_descriptor(list[k], &d) < 0)
+				continue;
+			if (d.idVendor != u->vid)
+				continue;
+			err = libusb_open(list[k], &h);
+			if (err < 0 || !h)
+				continue;
+			/* strict_pid=0: accept any product under this vendor. */
+			if (adopt(u, h, 0) == 0) {
+				if (d.idProduct != u->pid) {
+					fprintf(stderr, "reacquire: product id changed %04x -> %04x\n",
+						u->pid, d.idProduct);
+					u->pid = d.idProduct;
+				}
+				fprintf(stderr, "reopened %04x:%04x\n", u->vid, u->pid);
+				libusb_free_device_list(list, 1);
+				return 0;
+			}
+		}
+		libusb_free_device_list(list, 1);
 		usleep(250000);
 	}
 	return -1;
