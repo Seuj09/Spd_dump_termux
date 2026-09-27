@@ -35,8 +35,19 @@ I/O. They ask you to type `yes` unless you pass `--yes`.
 
 Build inside `no-root/`. This is not the rooted chroot: do not run these
 commands in Ubuntu, and do not follow `root/setup.sh` for this binary.
-`make` produces `./spdhost` for the machine you are on. A binary built on a
-PC will not run on the phone, and the other way around.
+
+The same source runs on arm32 and arm64. `make` compiles for the phone you
+are typing on. There is no separate arm32 binary to download.
+
+```sh
+uname -m
+```
+
+`aarch64` is 64-bit. `armv7l` or `armv8l` is 32-bit. Both use the commands
+below. `make` prints `spdhost: compiling for` and that same name. A binary
+built on a 64-bit phone, or on a PC, will not start on a 32-bit phone.
+Build it again on the host phone. The release zip's `spd_dump` is arm64
+only. This tree replaces that for a 32-bit host.
 
 `./spdhost --self-test` prints `self-test ok` when the compile and the
 framing check worked. That check does not open USB and does not need a phone.

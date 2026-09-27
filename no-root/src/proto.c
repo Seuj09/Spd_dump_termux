@@ -461,18 +461,20 @@ int spd_connect(struct spd *io)
 static uint8_t *load_file(const char *path, size_t *out)
 {
 	FILE *f = fopen(path, "rb");
-	long n;
+	off_t n;
 	uint8_t *buf;
 	if (!f) {
 		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
 		exit(1);
 	}
-	if (fseek(f, 0, SEEK_END) != 0)
+	/* ftell returns a 32-bit long on arm32. fseeko/ftello stay 64-bit. */
+	if (fseeko(f, 0, SEEK_END) != 0)
 		die("fseek");
-	n = ftell(f);
-	if (n < 0)
+	n = ftello(f);
+	if (n < 0 || (unsigned long long)n > (unsigned long long)SIZE_MAX)
 		die("ftell");
-	rewind(f);
+	if (fseeko(f, 0, SEEK_SET) != 0)
+		die("fseek");
 	buf = malloc((size_t)n);
 	if (!buf)
 		die("out of memory");
