@@ -3,12 +3,32 @@
 A small Unisoc download-mode client. One process, one USB device, no GUI.
 It talks to a phone in BootROM or FDL over libusb bulk transfers.
 
-The downloadable source zip is the
+Prebuilt static binaries, built on amd64 and checked under emulation, are
+on the
 [spdhost-source](https://github.com/Seuj09/Spd_dump_termux/releases/tag/spdhost-source)
-release. One archive is for both an arm32 host and an arm64 host. It
-includes this guide, `scripts/menu.sh`, the C sources, and the ums9230
-Infinix loaders. Unzip it on the phone and run `make` there. Do not expect
-a prebuilt `spdhost` inside the zip. An arm64 binary does not run on arm32.
+release:
+
+- `spdhost-arm32` for `uname -m` of `armv7l` or `armv8l`
+- `spdhost-arm64` for `uname -m` of `aarch64`
+
+They already contain libusb. You do not compile, and you do not install the
+`libusb` package for these. Copy the one that matches the host phone:
+
+```sh
+uname -m
+# arm32 host:
+curl -L -o spdhost https://github.com/Seuj09/Spd_dump_termux/releases/download/spdhost-source/spdhost-arm32
+chmod +x spdhost
+./spdhost --self-test
+cp spdhost "$PREFIX/bin/"
+```
+
+Use `spdhost-arm64` instead of `spdhost-arm32` when `uname -m` prints
+`aarch64`. An arm64 file will not start on an arm32 phone.
+
+The same release also has `spdhost-source-arm32-arm64.zip`: the guide,
+`scripts/menu.sh`, the C sources, and the ums9230 Infinix loaders. Use the
+zip when you want to compile on the phone. The prebuilt is the file to run.
 
 This tree is original. It is not a fork of either repository below, and it
 does not carry their code. Read them when you want to see how someone else
