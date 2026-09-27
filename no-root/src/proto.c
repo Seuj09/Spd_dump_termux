@@ -4,6 +4,7 @@
 #include "proto.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -740,16 +741,19 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		const uint8_t *rec = p + i * 0x4c;
 		char name[37];
 		unsigned k;
-		uint32_t sz = rd32le(rec + 0x48);
+		/* Wire entry is 0x4c: UTF-16LE name[36] + LE size dword at 0x48.
+		 * A high dword would begin at 0x4c (the next record); common FDL
+		 * tables only ship the low 32 bits. Always print as uint64. */
+		uint64_t sz = (uint64_t)rd32le(rec + 0x48);
 		for (k = 0; k < 36; k++) {
 			name[k] = (char)rec[k * 2];
 			if (!name[k])
 				break;
 		}
 		name[k] = 0;
-		printf("%u %s %u\n", i, name, sz);
+		printf("%u %s %" PRIu64 "\n", i, name, sz);
 		if (fo)
-			fprintf(fo, "%s %u\n", name, sz);
+			fprintf(fo, "%s %" PRIu64 "\n", name, sz);
 	}
 	if (fo)
 		fclose(fo);
@@ -794,7 +798,11 @@ int spd_selftest(void)
 	static const uint8_t msg[] = "123456789";
 	struct spd *io;
 	uint8_t body[8] = {0x00, 0x00, 0x00, 0x01, 0x11, 0x22};
+	uint8_t odd[5] = {0x00, 0x00, 0x00, 0x01, 0x11};
+	uint8_t payload[4] = {0x7e, 0x7d, 0x00, 0x01};
+	uint8_t unesc[64];
 	unsigned sum;
+	int i, n, esc;
 
 	if (crc16(msg, 9) != 0x31c3) {
 		fprintf(stderr, "crc16 self-test failed: %04x\n", crc16(msg, 9));
@@ -805,6 +813,13 @@ int spd_selftest(void)
 	sum = sum16(body, 6, CHK_FIXZERO);
 	if (sum != 0xeedc || sum16(body, 6, CHK_ORIG) != 0xeedc) {
 		fprintf(stderr, "sum16 self-test failed: %04x\n", sum);
+		return 1;
+	}
+	/* Odd length: FIXZERO does not swap; ORIG does. */
+	sum = sum16(odd, 5, CHK_FIXZERO);
+	if (sum != 0xfeee || sum16(odd, 5, CHK_ORIG) != 0xeefe) {
+		fprintf(stderr, "sum16 odd-length self-test failed: %04x / %04x\n",
+			sum, sum16(odd, 5, CHK_ORIG));
 		return 1;
 	}
 
@@ -820,6 +835,52 @@ int spd_selftest(void)
 		fprintf(stderr, "frame too short\n");
 		return 1;
 	}
+
+	/* Encode a body that contains HDLC specials; unescape and match raw. */
+	spd_encode(io, BSL_CMD_MIDST_DATA, payload, sizeof(payload));
+	if (io->enc[0] != HDLC_MARK || io->enc[io->enc_len - 1] != HDLC_MARK) {
+		fprintf(stderr, "escaped frame marks missing\n");
+		return 1;
+	}
+	esc = 0;
+	n = 0;
+	for (i = 1; i < io->enc_len - 1; i++) {
+		uint8_t a = io->enc[i];
+		if (esc) {
+			unesc[n++] = (uint8_t)(a ^ 0x20);
+			esc = 0;
+			continue;
+		}
+		if (a == HDLC_ESC) {
+			esc = 1;
+			continue;
+		}
+		if (a == HDLC_MARK) {
+			fprintf(stderr, "unescape saw bare mark inside frame\n");
+			return 1;
+		}
+		unesc[n++] = a;
+	}
+	if (esc || n != io->raw_len || memcmp(unesc, io->raw, (size_t)n) != 0) {
+		fprintf(stderr, "encode/unescape round-trip failed (n=%d raw_len=%d)\n",
+			n, io->raw_len);
+		return 1;
+	}
+	/* Escaped form must contain 0x7d 0x5e (for 0x7e) and 0x7d 0x5d (for 0x7d). */
+	{
+		int saw_7e = 0, saw_7d = 0;
+		for (i = 1; i < io->enc_len - 2; i++) {
+			if (io->enc[i] == HDLC_ESC && io->enc[i + 1] == (HDLC_MARK ^ 0x20))
+				saw_7e = 1;
+			if (io->enc[i] == HDLC_ESC && io->enc[i + 1] == (HDLC_ESC ^ 0x20))
+				saw_7d = 1;
+		}
+		if (!saw_7e || !saw_7d) {
+			fprintf(stderr, "escape of 0x7e/0x7d missing in encoded frame\n");
+			return 1;
+		}
+	}
+
 	spd_free(io);
 	printf("self-test ok\n");
 	return 0;

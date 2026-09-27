@@ -175,6 +175,12 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	u->pid = pid;
 	u->reac_left = 4;
 	u->fd_mode = fd >= 0;
+	u->last_bus[0] = 0;
+	{
+		const char *bus = getenv("SPDHOST_USB_BUS");
+		if (bus && bus[0] && strncmp(bus, "/dev/bus/usb/", 13) == 0)
+			snprintf(u->last_bus, sizeof(u->last_bus), "%s", bus);
+	}
 	init_ctx(u, u->fd_mode);
 
 	if (fd >= 0) {
@@ -235,13 +241,12 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		(unsigned char *)buf, len, &sent, u->timeout_ms);
 	if (err < 0) {
 		fprintf(stderr, "usb send: %s\n", libusb_error_name(err));
+		/* NO_DEVICE/PIPE/IO after EXEC usually means the device left the bus.
+		 * Mark gone so reopen_if_gone can reacquire; return -1 for all three. */
 		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
-			/* PIPE/IO here is usually the device leaving the bus. */
-			if (err == LIBUSB_ERROR_NO_DEVICE)
-				u->gone = 1;
-		}
-		if (err == LIBUSB_ERROR_NO_DEVICE)
+			u->gone = 1;
 			return -1;
+		}
 		return -2;
 	}
 	if (sent != len) {
@@ -263,9 +268,9 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 	int err = libusb_bulk_transfer(u->handle, u->ep_in, buf, cap, &got, timeout_ms);
 	if (err == LIBUSB_ERROR_TIMEOUT)
 		return 0;
-	if (err == LIBUSB_ERROR_NO_DEVICE) {
+	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
 		u->gone = 1;
-		fprintf(stderr, "usb recv: device left the bus\n");
+		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));
 		return -1;
 	}
 	if (err < 0) {
@@ -372,11 +377,15 @@ int spd_usb_emit_fd(const char *sock_path)
 	return 0;
 }
 
-static int list_one_device(char *out, size_t cap)
+/* Fill out with a single usable bus path. Prefer prefer[] when several
+ * devices are present (remembered path from a prior successful open).
+ * Returns device count; out is set only when exactly one path is chosen. */
+static int list_one_device(char *out, size_t cap, const char *prefer)
 {
 	FILE *p;
 	char line[256];
-	int count = 0;
+	char paths[8][128];
+	int count = 0, i;
 	out[0] = 0;
 	p = popen("termux-usb -l 2>/dev/null", "r");
 	if (!p)
@@ -390,14 +399,49 @@ static int list_one_device(char *out, size_t cap)
 		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
 			end++;
 		*end = 0;
+		if (count < 8)
+			snprintf(paths[count], sizeof(paths[count]), "%s", path);
 		count++;
-		if (count == 1)
-			snprintf(out, cap, "%s", path);
 	}
 	pclose(p);
-	if (count != 1)
-		out[0] = 0;
+	if (count == 1) {
+		snprintf(out, cap, "%s", paths[0]);
+		return 1;
+	}
+	if (count > 1 && prefer && prefer[0]) {
+		for (i = 0; i < count && i < 8; i++) {
+			if (strcmp(paths[i], prefer) == 0) {
+				snprintf(out, cap, "%s", prefer);
+				return 1;
+			}
+		}
+	}
 	return count;
+}
+
+static void print_bus_paths(void)
+{
+	FILE *p;
+	char line[256];
+	int n = 0;
+	p = popen("termux-usb -l 2>/dev/null", "r");
+	if (!p)
+		return;
+	while (fgets(line, sizeof(line), p)) {
+		char *path = strstr(line, "/dev/bus/usb/");
+		char *end;
+		if (!path)
+			continue;
+		end = path;
+		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
+			end++;
+		*end = 0;
+		fprintf(stderr, "  %s\n", path);
+		n++;
+	}
+	pclose(p);
+	if (!n)
+		fprintf(stderr, "  (none)\n");
 }
 
 static int grab_termux(struct spd_usb *u)
@@ -447,7 +491,7 @@ static int grab_termux(struct spd_usb *u)
 	}
 
 	for (i = 0; i < 60 && got < 0; i++) {
-		int n = list_one_device(dev, sizeof(dev));
+		int n = list_one_device(dev, sizeof(dev), u->last_bus);
 		pid_t pid;
 		struct pollfd pfd;
 		int status;
@@ -456,9 +500,22 @@ static int grab_termux(struct spd_usb *u)
 			fprintf(stderr, "termux-usb -l failed. Is Termux:API installed?\n");
 			break;
 		}
-		if (n != 1) {
-			if (i == 0)
+		if (n != 1 || !dev[0]) {
+			if (n > 1) {
+				/* Prefer last_bus when several nodes exist; otherwise keep
+				 * waiting through the renumeration window, then explain. */
+				if (u->last_bus[0] && i > 0 && i % 12 == 0) {
+					fprintf(stderr, "reacquire: %d USB devices; remembered %s is gone\n",
+						n, u->last_bus);
+					fprintf(stderr, "pass an explicit /dev/bus/usb/... to spdhost-usb:\n");
+					print_bus_paths();
+				} else if (!u->last_bus[0] && (i == 0 || i % 12 == 0)) {
+					fprintf(stderr, "reacquire: %d USB devices; waiting for a single node\n", n);
+					print_bus_paths();
+				}
+			} else if (i == 0) {
 				fprintf(stderr, "waiting for the phone to reappear on USB\n");
+			}
 			usleep(250000);
 			continue;
 		}
@@ -503,6 +560,7 @@ static int grab_termux(struct spd_usb *u)
 				usleep(250000);
 				continue;
 			}
+			snprintf(u->last_bus, sizeof(u->last_bus), "%s", dev);
 			fprintf(stderr, "reopened %s\n", dev);
 			break;
 		}
@@ -514,18 +572,46 @@ static int grab_termux(struct spd_usb *u)
 	return u->handle ? 0 : -1;
 }
 
+/* After a loader starts the product id may change; vendor stays 1782.
+ * Enumerate that vendor and adopt the first matching bulk device.
+ * Updates u->pid when the product id differs from the initial open. */
 static int grab_enum(struct spd_usb *u)
 {
 	int i;
 	for (i = 0; i < 60; i++) {
-		libusb_device_handle *h;
+		libusb_device **list = NULL;
+		ssize_t n, k;
 		if (i == 0)
-			fprintf(stderr, "waiting for %04x:%04x to reappear\n", u->vid, u->pid);
-		h = libusb_open_device_with_vid_pid(u->ctx, (uint16_t)u->vid, (uint16_t)u->pid);
-		if (h && adopt(u, h, 1) == 0) {
-			fprintf(stderr, "reopened %04x:%04x\n", u->vid, u->pid);
-			return 0;
+			fprintf(stderr, "waiting for vendor %04x to reappear (any product)\n", u->vid);
+		n = libusb_get_device_list(u->ctx, &list);
+		if (n < 0) {
+			usleep(250000);
+			continue;
 		}
+		for (k = 0; k < n; k++) {
+			struct libusb_device_descriptor d;
+			libusb_device_handle *h = NULL;
+			int err;
+			if (libusb_get_device_descriptor(list[k], &d) < 0)
+				continue;
+			if (d.idVendor != u->vid)
+				continue;
+			err = libusb_open(list[k], &h);
+			if (err < 0 || !h)
+				continue;
+			/* strict_pid=0: accept any product under this vendor. */
+			if (adopt(u, h, 0) == 0) {
+				if (d.idProduct != u->pid) {
+					fprintf(stderr, "reacquire: product id changed %04x -> %04x\n",
+						u->pid, d.idProduct);
+					u->pid = d.idProduct;
+				}
+				fprintf(stderr, "reopened %04x:%04x\n", u->vid, u->pid);
+				libusb_free_device_list(list, 1);
+				return 0;
+			}
+		}
+		libusb_free_device_list(list, 1);
 		usleep(250000);
 	}
 	return -1;

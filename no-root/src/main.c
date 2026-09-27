@@ -44,8 +44,9 @@ static void usage(void)
 		"\n"
 		"ADDR, OFF and SIZE accept a 0x hex prefix and a K/M/G suffix.\n"
 		"The first fdl talks to BootROM (CRC-16). A second fdl talks to FDL1\n"
-		"(additive checksum). Loaders and addresses come from the FDL pair for\n"
-		"that chip; this program does not ship them.\n"
+		"(additive checksum). Loaders and addresses must match that exact chip.\n"
+		"This tree ships one example pair under fdl/ums9230/infinix/; a wrong\n"
+		"pair or address can brick the phone.\n"
 		"\n"
 		"If the phone resets USB after a loader starts, spdhost asks termux-usb\n"
 		"for a new descriptor (or scans again on the desktop) and continues\n"
@@ -85,8 +86,10 @@ bad:
 static void confirm(int yes, const char *verb, const char *name)
 {
 	char buf[16];
-	if (yes)
+	if (yes) {
+		fprintf(stderr, "confirmed via --yes: %s '%s'\n", verb, name);
 		return;
+	}
 	if (!isatty(STDIN_FILENO)) {
 		fprintf(stderr, "refusing to %s %s without --yes (stdin is not a terminal)\n", verb, name);
 		exit(1);
@@ -95,6 +98,16 @@ static void confirm(int yes, const char *verb, const char *name)
 	fflush(stderr);
 	if (!fgets(buf, sizeof(buf), stdin) || strcmp(buf, "yes\n") != 0) {
 		fprintf(stderr, "not confirmed\n");
+		exit(1);
+	}
+}
+
+static void need_fdl2(struct spd *io, const char *cmd)
+{
+	if (io->fdl_stage < 2) {
+		fprintf(stderr,
+			"%s requires FDL2 (fdl_stage >= 2); run two fdl commands first (now at stage %d)\n",
+			cmd, io->fdl_stage);
 		exit(1);
 	}
 }
@@ -223,9 +236,18 @@ int main(int argc, char **argv)
 		case 'P':
 			pid = (unsigned)strtoul(optarg, NULL, 0);
 			break;
-		case 't':
-			timeout = atoi(optarg);
+		case 't': {
+			char *end = NULL;
+			long v;
+			errno = 0;
+			v = strtol(optarg, &end, 10);
+			if (end == optarg || *end || errno || v <= 0 || v > 600000) {
+				fprintf(stderr, "bad --timeout: %s (need 1..600000 ms)\n", optarg);
+				return 2;
+			}
+			timeout = (int)v;
 			break;
+		}
 		case 's':
 			step = atoi(optarg);
 			break;
@@ -308,6 +330,7 @@ int main(int argc, char **argv)
 			i += 3;
 		} else if (strcmp(cmd, "parts") == 0) {
 			const char *out = NULL;
+			need_fdl2(io, "parts");
 			if (i + 1 < argc && !is_command(argv[i + 1])) {
 				out = argv[i + 1];
 				i++;
@@ -317,18 +340,21 @@ int main(int argc, char **argv)
 			i++;
 		} else if (strcmp(cmd, "read-part") == 0) {
 			need(argc, i, 4, "read-part");
+			need_fdl2(io, "read-part");
 			if (spd_read_part(io, argv[i + 1], parse_size(argv[i + 2]),
 				parse_size(argv[i + 3]), argv[i + 4]))
 				return 1;
 			i += 5;
 		} else if (strcmp(cmd, "write-part") == 0) {
 			need(argc, i, 2, "write-part");
+			need_fdl2(io, "write-part");
 			confirm(yes, "write", argv[i + 1]);
 			if (spd_write_part(io, argv[i + 1], argv[i + 2]))
 				return 1;
 			i += 3;
 		} else if (strcmp(cmd, "erase-part") == 0) {
 			need(argc, i, 1, "erase-part");
+			need_fdl2(io, "erase-part");
 			confirm(yes, "erase", argv[i + 1]);
 			if (spd_erase_part(io, argv[i + 1]))
 				return 1;

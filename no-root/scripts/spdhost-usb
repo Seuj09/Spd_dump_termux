@@ -67,6 +67,7 @@ run=$(mktemp "${TMPDIR:-/tmp}/spdhost-run.XXXXXX")
 # Termux:API executes this file itself, without Termux's /bin/bash shim.
 # The shebang has to be the real bash path.
 bash_bin=$(command -v bash)
+trap 'rm -f "$run"' EXIT
 {
 	printf '#!%s\n' "$bash_bin"
 	printf 'exec'
@@ -79,4 +80,8 @@ if ! "$bash_bin" -n "$run"; then
 	cat "$run" >&2
 	exit 1
 fi
-exec termux-usb -r -E -e "$run" "$dev"
+# Do not exec: keep this shell so the EXIT trap removes the temp launcher.
+# Child spdhost remembers this path for post-EXEC reacquire when several
+# USB nodes appear.
+export SPDHOST_USB_BUS=$dev
+termux-usb -r -E -e "$run" "$dev"

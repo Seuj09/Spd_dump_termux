@@ -17,6 +17,7 @@ struct spd_usb {
 	unsigned vid;
 	unsigned pid;
 	char self_path[512];
+	char last_bus[128]; /* last successful Termux /dev/bus/usb path */
 };
 
 /* fd >= 0 adopts a termux-usb descriptor.

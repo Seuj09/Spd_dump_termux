@@ -77,11 +77,35 @@ find_infinix_dir() {
 	return 1
 }
 
+# Offer the shipped Infinix UMS9230 pair only after an explicit chip/model
+# confirm, or when SPDHOST_ALLOW_DEFAULT_FDL=1. Never apply silently.
 apply_ums9230_infinix_defaults() {
-	local dir
+	local dir reply
+	# Config (or a prior confirm) already complete — leave it alone.
+	if [[ -n ${FDL1:-} && -f $FDL1 && -n ${FDL1_ADDR:-} && -n ${FDL2:-} && -f $FDL2 && -n ${FDL2_ADDR:-} ]]; then
+		return 0
+	fi
+	dir=$(find_infinix_dir) || return 0
+	if [[ ${SPDHOST_ALLOW_DEFAULT_FDL:-} == 1 ]]; then
+		echo "Using shipped ums9230 Infinix FDL defaults (SPDHOST_ALLOW_DEFAULT_FDL=1)" >&2
+	else
+		if [[ ! -t 0 ]]; then
+			echo "refusing shipped Infinix ums9230 FDL defaults without a TTY;" >&2
+			echo "set SPDHOST_ALLOW_DEFAULT_FDL=1 or run option 3 to choose loaders." >&2
+			return 0
+		fi
+		echo "Found shipped FDL pair for Infinix UMS9230:"
+		echo "  $dir/fdl1-dl.bin @ $FDL1_ADDR_DEFAULT"
+		echo "  $dir/fdl2-dl.bin @ $FDL2_ADDR_DEFAULT"
+		echo "A wrong chip or address can brick the phone."
+		read -r -p "type yes if this target is Infinix UMS9230: " reply
+		if [[ $reply != yes ]]; then
+			echo "Defaults not applied. Use option 3 to set loaders for your chip."
+			return 0
+		fi
+	fi
 	[[ -n $FDL1_ADDR ]] || FDL1_ADDR=$FDL1_ADDR_DEFAULT
 	[[ -n $FDL2_ADDR ]] || FDL2_ADDR=$FDL2_ADDR_DEFAULT
-	dir=$(find_infinix_dir) || return 0
 	[[ -n $FDL1 ]] || FDL1=$dir/fdl1-dl.bin
 	[[ -n $FDL2 ]] || FDL2=$dir/fdl2-dl.bin
 }
@@ -191,6 +215,25 @@ write_misc_command() {
 	printf '%s\n' "$dest"
 }
 
+# Brick-adjacent: never pass --yes for misc. Require a TTY + typed confirm.
+confirm_misc_write() {
+	local kind=$1 misc=$2 digest reply
+	if [[ ! -t 0 ]]; then
+		echo "refusing to write misc without a TTY (no silent --yes)" >&2
+		return 1
+	fi
+	digest=$(sha256sum "$misc" | awk '{print $1}')
+	echo "About to write 2048 bytes to partition 'misc' ($kind), then reset."
+	echo "misc image sha256: $digest"
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
+	read -r -p "type yes to write misc: " reply
+	if [[ $reply != yes ]]; then
+		echo "not confirmed"
+		return 1
+	fi
+	return 0
+}
+
 reboot_mode() {
 	local choice misc
 	need_loaders || return
@@ -210,16 +253,27 @@ reboot_mode() {
 		2)
 			misc=$(write_misc_command recovery)
 			echo "Writes 2048 bytes at the start of misc, then reset."
+			if ! confirm_misc_write recovery "$misc"; then
+				rm -f "$misc"
+				pause
+				return
+			fi
 			ready
-			run_session --yes fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			# No --yes: spdhost will also prompt on its TTY confirm path.
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 				write-part misc "$misc" reset || true
 			rm -f "$misc"
 			;;
 		3)
 			misc=$(write_misc_command fastboot)
 			echo "Writes the fastbootd boot command at the start of misc, then reset."
+			if ! confirm_misc_write fastbootd "$misc"; then
+				rm -f "$misc"
+				pause
+				return
+			fi
 			ready
-			run_session --yes fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 				write-part misc "$misc" reset || true
 			rm -f "$misc"
 			;;
