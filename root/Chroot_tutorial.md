@@ -51,7 +51,7 @@ Download `setup.sh` into `/data/local/tmp` (it writes `start.sh` for you):
 ```sh
 su
 cd /data/local/tmp
-curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/setup.sh
+curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/root/setup.sh
 chmod +x setup.sh
 ```
 
@@ -59,7 +59,7 @@ chmod +x setup.sh
 > `start.sh` the same way:
 >
 > ```sh
-> curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/start.sh
+> curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/root/start.sh
 > chmod +x start.sh
 > ```
 
@@ -123,7 +123,7 @@ cd ..
 Either download it (recommended):
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/start.sh
+curl -L -O https://raw.githubusercontent.com/Seuj09/Spd_dump_termux/main/root/start.sh
 chmod +x start.sh
 ```
 

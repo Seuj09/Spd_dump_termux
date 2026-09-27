@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Hand one OTG device to spdhost without root.
+# termux-usb -E puts the usbfs descriptor in TERMUX_USB_FD instead of argv,
+# so the command string can hold the real arguments.
+#
+#   spdhost-usb fdl fdl1.bin 0x5500 fdl fdl2.bin 0x9efffe00 parts
+#   spdhost-usb /dev/bus/usb/001/002 -- read-part boot 0 64M boot.img
+set -euo pipefail
+
+if ! command -v termux-usb >/dev/null 2>&1; then
+	echo "termux-usb is not on PATH. Install Termux:API (F-Droid) and: pkg install termux-api" >&2
+	exit 1
+fi
+if ! command -v spdhost >/dev/null 2>&1; then
+	echo "spdhost is not on PATH. Build it in this repo with: make && cp spdhost \$PREFIX/bin/" >&2
+	exit 1
+fi
+
+dev=
+if [[ ${1:-} == /dev/bus/usb/* ]]; then
+	dev=$1
+	shift
+	if [[ ${1:-} == -- ]]; then
+		shift
+	fi
+fi
+
+if [[ -z $dev ]]; then
+	mapfile -t devs < <(termux-usb -l | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }')
+	if [[ ${#devs[@]} -eq 0 ]]; then
+		echo "termux-usb -l found nothing. Plug the phone in download mode through OTG." >&2
+		exit 1
+	fi
+	if [[ ${#devs[@]} -gt 1 ]]; then
+		printf 'more than one USB device; pass the path:\n' >&2
+		printf '  %s\n' "${devs[@]}" >&2
+		exit 1
+	fi
+	dev=${devs[0]}
+fi
+
+if [[ $# -eq 0 ]]; then
+	echo "usage: spdhost-usb [/dev/bus/usb/N/M] -- <spdhost commands>" >&2
+	exit 2
+fi
+
+# Quote every argument, then let termux-usb's shell run that one string.
+quoted=$(printf '%q ' "$@")
+exec termux-usb -r -E -e "spdhost ${quoted}" "$dev"
