@@ -202,33 +202,260 @@ run_session() {
 	return "$rc"
 }
 
+# Cached live partition table from the last `parts` run (name + size units).
+# Same fields the rooted menu shows as LIST PARTISI, but sizes come from the
+# device table (spdhost `parts` / FILE form), not a hardcoded string.
+parts_cache_path() {
+	mkdir -p "$DUMP_DIR"
+	printf '%s\n' "$DUMP_DIR/partition_list.txt"
+}
+
+fmt_size() {
+	local n=$1
+	if [[ ! $n =~ ^[0-9]+$ ]]; then
+		printf '%s' "$n"
+		return
+	fi
+	if (( n >= 1073741824 && n % 1073741824 == 0 )); then
+		printf '%uG' $((n / 1073741824))
+	elif (( n >= 1048576 && n % 1048576 == 0 )); then
+		printf '%uM' $((n / 1048576))
+	elif (( n >= 1024 && n % 1024 == 0 )); then
+		printf '%uK' $((n / 1024))
+	else
+		printf '%u' "$n"
+	fi
+}
+
+normalize_part_query() {
+	local q=$1
+	q=${q##*/}
+	q=${q%.img}
+	q=${q%.IMG}
+	q=${q%.bin}
+	q=${q%.BIN}
+	q=${q%.raw}
+	q=${q%.RAW}
+	# bash ${q,,} needs bash 4+; Termux has it
+	printf '%s' "${q,,}"
+}
+
+# Score how well device partition NAME matches QUERY (already normalized).
+# Higher is better. Exact and slot-suffixed matches beat fuzzy contains.
+score_part_match() {
+	local name=$1 query=$2
+	local nl=${#name} ql=${#query}
+	local nlow=${name,,}
+	[[ -z $query || -z $nlow ]] && { printf '0'; return; }
+	if [[ $nlow == "$query" ]]; then
+		printf '1000'
+		return
+	fi
+	if [[ $nlow == "${query}_a" ]]; then
+		printf '950'
+		return
+	fi
+	if [[ $nlow == "${query}_b" ]]; then
+		printf '900'
+		return
+	fi
+	if [[ $nlow == "$query"* ]]; then
+		# Prefer shorter names (boot_a over boot_ab_something)
+		printf '%d' $((800 - (nl - ql)))
+		return
+	fi
+	if [[ $nlow == *"$query"* ]]; then
+		printf '%d' $((500 - (nl - ql)))
+		return
+	fi
+	# Shared prefix length (bootimg vs boot_a still gets a nudge via strip above)
+	local i=0
+	while (( i < ql && i < nl )) && [[ ${nlow:i:1} == "${query:i:1}" ]]; do
+		((i++)) || true
+	done
+	if (( i >= 3 )); then
+		printf '%d' $((200 + i * 10 - (nl - i)))
+		return
+	fi
+	printf '0'
+}
+
+# Print "name size" for the best match against PARTS_FILE, or fail.
+# Prefer _a over _b when scores tie (active-slot guess without reading misc).
+resolve_part_query() {
+	local query_raw=$1 parts_file=$2
+	local query name size best_name="" best_size="" best_score=0 score
+	query=$(normalize_part_query "$query_raw")
+	if [[ -z $query || $query == */* || $query == *' '* ]]; then
+		echo "Name must be one word, like boot, boot.img, or boot_a." >&2
+		return 1
+	fi
+	if [[ ! -f $parts_file ]]; then
+		echo "No partition list at $parts_file" >&2
+		return 1
+	fi
+	while read -r name size _; do
+		[[ -z ${name:-} || -z ${size:-} ]] && continue
+		[[ $size =~ ^[0-9]+$ ]] || continue
+		(( size > 0 )) || continue
+		score=$(score_part_match "$name" "$query")
+		(( score <= 0 )) && continue
+		if (( score > best_score )); then
+			best_score=$score
+			best_name=$name
+			best_size=$size
+		elif (( score == best_score && best_score > 0 )); then
+			# Tie-break: prefer *_a over *_b over bare
+			if [[ ${name,,} == *_a && ${best_name,,} != *_a ]]; then
+				best_name=$name
+				best_size=$size
+			fi
+		fi
+	done < "$parts_file"
+	if [[ -z $best_name ]]; then
+		echo "No partition close to '$query_raw' in $parts_file" >&2
+		return 1
+	fi
+	printf '%s %s\n' "$best_name" "$best_size"
+}
+
+show_parts_list() {
+	local parts_file=$1 name size
+	echo "PARTITION LIST (from device parts table):"
+	printf '%-28s %12s %14s\n' "NAME" "SIZE" "BYTES"
+	echo "------------------------------------------------------------"
+	while read -r name size _; do
+		[[ -z ${name:-} || -z ${size:-} ]] && continue
+		printf '%-28s %12s %14s\n' "$name" "$(fmt_size "$size")" "$size"
+	done < "$parts_file"
+	echo
+	echo "Type a name (boot, boot.img, boot_a), or:"
+	echo "  all       — every partition except userdata, cache, blackbox"
+	echo "  all_lite  — same, and skip inactive slot (_b when _a exists)"
+}
+
+fetch_parts_table() {
+	local parts_file
+	parts_file=$(parts_cache_path)
+	echo "Fetching live partition table into $parts_file"
+	ready
+	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$parts_file"; then
+		echo "parts failed (exit $?)." >&2
+		return 1
+	fi
+	if [[ ! -s $parts_file ]]; then
+		echo "parts wrote an empty list." >&2
+		return 1
+	fi
+	return 0
+}
+
+should_skip_bulk() {
+	local name=$1 mode=$2
+	local nlow=${name,,}
+	case $nlow in
+		userdata|cache|blackbox) return 0 ;;
+	esac
+	if [[ $mode == all_lite && $nlow == *_b ]]; then
+		# Skip _b when a matching _a exists in the same list.
+		local base=${name%_b}
+		base=${base%_B}
+		if grep -qiE "^${base}_a[[:space:]]" "$(parts_cache_path)" 2>/dev/null; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
+dump_matched_parts() {
+	local mode=$1 parts_file=$2
+	local name size out args=() n=0
+	mkdir -p "$DUMP_DIR"
+	while read -r name size _; do
+		[[ -z ${name:-} || -z ${size:-} ]] && continue
+		[[ $size =~ ^[0-9]+$ ]] || continue
+		(( size > 0 )) || continue
+		if should_skip_bulk "$name" "$mode"; then
+			echo "skip $name"
+			continue
+		fi
+		out="$DUMP_DIR/${name}.img"
+		echo "queue $name size=$(fmt_size "$size") ($size) -> $out"
+		args+=(read-part "$name" 0 "$size" "$out")
+		((n++)) || true
+	done < "$parts_file"
+	if (( n == 0 )); then
+		echo "Nothing to dump."
+		return 1
+	fi
+	echo "Will dump $n partition(s) in one session."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		"${args[@]}" || true
+}
+
 dump_partition() {
-	local name size out
+	local parts_file reply query matched name size out
 	need_loaders || return
 	cls
-	echo "Dump one partition"
-	echo "This is one read, not the release menu's \"all\" / \"all_lite\" list."
-	echo "Size is required. Examples: 64M, 32K, 4096, 0x100000"
-	read -r -p "Partition name: " name
-	if [[ -z $name || $name == */* || $name == *' '* ]]; then
-		echo "Name must be one word, like boot or boot_a."
+	echo "Dump partition(s)"
+	echo "Lists the live device table (like rooted menu LIST PARTISI),"
+	echo "then matches what you type (boot.img -> boot_a) and uses that size."
+	parts_file=$(parts_cache_path)
+	if [[ -s $parts_file ]]; then
+		echo "Cached list: $parts_file"
+		read -r -p "Refresh from device? [y/N]: " reply
+		if [[ ${reply,,} == y || ${reply,,} == yes ]]; then
+			fetch_parts_table || { pause; return; }
+		fi
+	else
+		fetch_parts_table || { pause; return; }
+	fi
+	if [[ ! -s $parts_file ]]; then
+		echo "No partition list."
 		pause
 		return
 	fi
-	read -r -p "Size: " size
-	if [[ -z $size || ! $size =~ ^[0-9a-fA-FxXmMkKgG]+$ ]]; then
-		echo "Bad size."
+	cls
+	show_parts_list "$parts_file"
+	read -r -p "Partition name (or all / all_lite): " query
+	if [[ -z ${query:-} ]]; then
+		echo "Cancelled."
 		pause
 		return
 	fi
-	mkdir -p "$DUMP_DIR"
+	case ${query,,} in
+		all|all_lite)
+			dump_matched_parts "${query,,}" "$parts_file"
+			pause
+			return
+			;;
+	esac
+	matched=$(resolve_part_query "$query" "$parts_file") || {
+		pause
+		return
+	}
+	read -r name size <<<"$matched"
 	out="$DUMP_DIR/${name}.img"
+	echo
+	echo "Matched '$query' -> $name  size=$(fmt_size "$size") ($size bytes/units)"
 	read -r -e -p "Output file [$out]: " reply
 	[[ -n ${reply:-} ]] && out=$reply
 	echo "Will read $name at offset 0, size $size, into $out"
 	ready
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		read-part "$name" 0 "$size" "$out" || true
+	pause
+}
+
+list_partitions_menu() {
+	need_loaders || return
+	cls
+	echo "List partitions (live parts table)"
+	fetch_parts_table || { pause; return; }
+	cls
+	show_parts_list "$(parts_cache_path)"
 	pause
 }
 
@@ -381,15 +608,17 @@ while true; do
 	echo "FDL2: ${FDL2:-unset} ${FDL2_ADDR:-}"
 	echo "Dumps go to: $DUMP_DIR"
 	echo
-	echo "[1] Dump a partition"
+	echo "[1] Dump a partition (list + closest match + size)"
 	echo "[2] Reboot into a mode"
 	echo "[3] Change loader files"
+	echo "[4] List partitions only"
 	echo "[0] Quit"
 	read -r -p "Choice: " choice
 	case ${choice:-} in
 		1) dump_partition ;;
 		2) reboot_mode ;;
 		3) configure_loaders; pause ;;
+		4) list_partitions_menu ;;
 		0) exit 0 ;;
 		*) echo "Not a choice."; pause ;;
 	esac
