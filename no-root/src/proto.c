@@ -4,6 +4,7 @@
 #include "proto.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -740,16 +741,19 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		const uint8_t *rec = p + i * 0x4c;
 		char name[37];
 		unsigned k;
-		uint32_t sz = rd32le(rec + 0x48);
+		/* Wire entry is 0x4c: UTF-16LE name[36] + LE size dword at 0x48.
+		 * A high dword would begin at 0x4c (the next record); common FDL
+		 * tables only ship the low 32 bits. Always print as uint64. */
+		uint64_t sz = (uint64_t)rd32le(rec + 0x48);
 		for (k = 0; k < 36; k++) {
 			name[k] = (char)rec[k * 2];
 			if (!name[k])
 				break;
 		}
 		name[k] = 0;
-		printf("%u %s %u\n", i, name, sz);
+		printf("%u %s %" PRIu64 "\n", i, name, sz);
 		if (fo)
-			fprintf(fo, "%s %u\n", name, sz);
+			fprintf(fo, "%s %" PRIu64 "\n", name, sz);
 	}
 	if (fo)
 		fclose(fo);
