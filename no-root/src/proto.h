@@ -15,6 +15,7 @@ struct spd {
 	int verbose;
 	int step;
 	int fdl_stage; /* 0 brom, 1 after first loader, 2 after second */
+	int linked;    /* handshake for the current stage already done */
 	uint8_t *raw;
 	uint8_t *enc;
 	uint8_t *recv;
@@ -39,6 +40,8 @@ const uint8_t *spd_payload(struct spd *io, unsigned *len);
 
 int spd_check_ok(struct spd *io);
 int spd_check_baud(struct spd *io, int nbytes, int tries);
+/* After FDL1 starts: 0x7e once (phones), then four 0x7e (older loaders). */
+int spd_check_baud_loader(struct spd *io);
 int spd_connect(struct spd *io);
 
 int spd_send_loader(struct spd *io, const char *path, uint32_t addr);

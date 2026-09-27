@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define HDLC_MARK 0x7e
 #define HDLC_ESC 0x7d
@@ -43,6 +44,14 @@ static void die(const char *msg)
 {
 	fprintf(stderr, "%s\n", msg);
 	exit(1);
+}
+
+static void pause_ms(int ms)
+{
+	struct timespec ts;
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	nanosleep(&ts, NULL);
 }
 
 static void wr16be(uint8_t *p, unsigned v)
@@ -209,15 +218,21 @@ int spd_send(struct spd *io)
 	if (io->verbose)
 		fprintf(stderr, "send %d bytes\n", io->enc_len);
 	if (spd_usb_bulk_send(&io->usb, io->enc, io->enc_len) < 0)
-		exit(1);
+		return -1;
 	return io->enc_len;
 }
 
 int spd_recv(struct spd *io, int timeout_ms)
 {
-	int esc = 0, n = 0, head = 0, need = 6;
-	int pos = io->recv_pos;
-	int len = io->recv_len;
+	int esc, n, head, need, pos, len;
+
+restart:
+	esc = 0;
+	n = 0;
+	head = 0;
+	need = 6;
+	pos = io->recv_pos;
+	len = io->recv_len;
 
 	for (;;) {
 		int a;
@@ -230,7 +245,7 @@ int spd_recv(struct spd *io, int timeout_ms)
 				return 0;
 			}
 			if (got < 0)
-				exit(1);
+				return -1;
 			if (io->verbose)
 				fprintf(stderr, "recv %d bytes\n", got);
 			pos = 0;
@@ -305,7 +320,7 @@ int spd_recv(struct spd *io, int timeout_ms)
 		unsigned plen = 0;
 		const uint8_t *p = spd_payload(io, &plen);
 		fprintf(stderr, "device log: %.*s\n", (int)plen, (const char *)p);
-		return spd_recv(io, timeout_ms);
+		goto restart;
 	}
 	return n;
 }
@@ -330,11 +345,16 @@ const uint8_t *spd_payload(struct spd *io, unsigned *len)
 int spd_check_ok(struct spd *io)
 {
 	unsigned t;
-	spd_send(io);
-	if (!spd_recv(io, io->usb.timeout_ms)) {
+	int n;
+	if (spd_send(io) < 0)
+		return -1;
+	n = spd_recv(io, io->usb.timeout_ms);
+	if (n == 0) {
 		fprintf(stderr, "timeout waiting for ack\n");
 		return -1;
 	}
+	if (n < 0)
+		return -1;
 	t = spd_type(io);
 	if (t != BSL_REP_ACK) {
 		fprintf(stderr, "unexpected response 0x%04x\n", t);
@@ -343,13 +363,38 @@ int spd_check_ok(struct spd *io)
 	return 0;
 }
 
+static int reopen_if_gone(struct spd *io)
+{
+	if (!io->usb.gone)
+		return -1;
+	fprintf(stderr, "USB reset; reopening\n");
+	if (spd_usb_reacquire(&io->usb))
+		return -1;
+	io->recv_pos = 0;
+	io->recv_len = 0;
+	return 0;
+}
+
 int spd_check_baud(struct spd *io, int nbytes, int tries)
 {
 	int i;
 	for (i = 0; i < tries; i++) {
+		int n;
+		if (i)
+			pause_ms(200);
 		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
-		spd_send(io);
-		if (!spd_recv(io, io->usb.timeout_ms)) {
+		if (spd_send(io) < 0) {
+			if (reopen_if_gone(io) == 0)
+				continue;
+			return -1;
+		}
+		n = spd_recv(io, io->usb.timeout_ms);
+		if (n < 0) {
+			if (reopen_if_gone(io) == 0)
+				continue;
+			return -1;
+		}
+		if (n == 0) {
 			fprintf(stderr, "check baud %d: timeout\n", i + 1);
 			continue;
 		}
@@ -361,6 +406,46 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 			unsigned n = 0;
 			const uint8_t *p = spd_payload(io, &n);
 			fprintf(stderr, "version: %.*s\n", (int)n, (const char *)p);
+		}
+		return 0;
+	}
+	return -1;
+}
+
+int spd_check_baud_loader(struct spd *io)
+{
+	int i;
+	/* sfd_tool sends one 0x7e after FDL1 on phones. The older dumper
+	 * sends four. Try the phone form first, then the older one. */
+	for (i = 0; i < 10; i++) {
+		int nbytes = i < 6 ? 1 : 4;
+		int n;
+		if (i)
+			pause_ms(500);
+		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
+		if (spd_send(io) < 0) {
+			if (reopen_if_gone(io) == 0)
+				continue;
+			return -1;
+		}
+		n = spd_recv(io, io->usb.timeout_ms);
+		if (n < 0) {
+			if (reopen_if_gone(io) == 0)
+				continue;
+			return -1;
+		}
+		if (n == 0) {
+			fprintf(stderr, "loader check baud %d (%d x 0x7e): timeout\n", i + 1, nbytes);
+			continue;
+		}
+		if (spd_type(io) != BSL_REP_VER) {
+			fprintf(stderr, "loader check baud %d: response 0x%04x\n", i + 1, spd_type(io));
+			continue;
+		}
+		{
+			unsigned plen = 0;
+			const uint8_t *p = spd_payload(io, &plen);
+			fprintf(stderr, "version: %.*s\n", (int)plen, (const char *)p);
 		}
 		return 0;
 	}
@@ -434,10 +519,23 @@ int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible)
 {
 	unsigned t;
 	spd_encode(io, BSL_CMD_EXEC_DATA, NULL, 0);
-	spd_send(io);
-	if (!spd_recv(io, timeout_ms)) {
-		fprintf(stderr, "timeout waiting for exec\n");
+	if (spd_send(io) < 0) {
+		/* The loader often resets USB as it starts, before the ack. */
+		if (reopen_if_gone(io) == 0)
+			return 0;
 		return -1;
+	}
+	{
+		int n = spd_recv(io, timeout_ms);
+		if (n < 0) {
+			if (reopen_if_gone(io) == 0)
+				return 0;
+			return -1;
+		}
+		if (n == 0) {
+			fprintf(stderr, "timeout waiting for exec\n");
+			return -1;
+		}
 	}
 	t = spd_type(io);
 	if (t == BSL_REP_ACK)
@@ -487,6 +585,10 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 	int mode64 = (offset + size) > 0xffffffffu;
 	int step = io->step;
 
+	if (offset > UINT64_MAX - size) {
+		fprintf(stderr, "read range wraps\n");
+		return -1;
+	}
 	fo = fopen(out_path, "wb");
 	if (!fo) {
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
@@ -508,9 +610,15 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		wr32le(req + 4, (uint32_t)pos);
 		wr32le(req + 8, (uint32_t)(pos >> 32));
 		spd_encode(io, BSL_CMD_READ_MIDST, req, mode64 ? 12 : 8);
-		spd_send(io);
-		if (!spd_recv(io, io->usb.timeout_ms))
-			die("timeout during read");
+		if (spd_send(io) < 0)
+			die("send failed during read");
+		{
+			int got = spd_recv(io, io->usb.timeout_ms);
+			if (got == 0)
+				die("timeout during read");
+			if (got < 0)
+				die("device reset during read; this read was not resumed");
+		}
 		t = spd_type(io);
 		if (t != BSL_REP_READ_FLASH) {
 			fprintf(stderr, "read response 0x%04x\n", t);
@@ -560,9 +668,15 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 		if (fread(io->temp, 1, n, fi) != n)
 			die("short read");
 		spd_encode(io, BSL_CMD_MIDST_DATA, io->temp, n);
-		spd_send(io);
-		if (!spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000))
-			die("timeout during write");
+		if (spd_send(io) < 0)
+			die("send failed during write");
+		{
+			int got = spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000);
+			if (got == 0)
+				die("timeout during write");
+			if (got < 0)
+				die("device reset during write; this write was not resumed");
+		}
 		if (spd_type(io) != BSL_REP_ACK) {
 			fprintf(stderr, "write response 0x%04x at offset %llu\n",
 				spd_type(io), (unsigned long long)off);
@@ -593,9 +707,15 @@ int spd_list_parts(struct spd *io, const char *out_path)
 	const uint8_t *p;
 
 	spd_encode(io, BSL_CMD_READ_PARTITION, NULL, 0);
-	spd_send(io);
-	if (!spd_recv(io, io->usb.timeout_ms))
-		die("timeout waiting for partition table");
+	if (spd_send(io) < 0)
+		die("send failed");
+	{
+		int got = spd_recv(io, io->usb.timeout_ms);
+		if (got == 0)
+			die("timeout waiting for partition table");
+		if (got < 0)
+			die("device reset while reading the partition table");
+	}
 	t = spd_type(io);
 	if (t != BSL_REP_READ_PARTITION) {
 		fprintf(stderr, "partition response 0x%04x\n", t);
@@ -639,9 +759,15 @@ int spd_chip_uid(struct spd *io)
 	unsigned t, n = 0, i;
 	const uint8_t *p;
 	spd_encode(io, BSL_CMD_READ_CHIP_UID, NULL, 0);
-	spd_send(io);
-	if (!spd_recv(io, io->usb.timeout_ms))
-		die("timeout waiting for chip uid");
+	if (spd_send(io) < 0)
+		return -1;
+	{
+		int got = spd_recv(io, io->usb.timeout_ms);
+		if (got == 0)
+			die("timeout waiting for chip uid");
+		if (got < 0)
+			return -1;
+	}
 	t = spd_type(io);
 	if (t != BSL_REP_READ_CHIP_UID) {
 		fprintf(stderr, "chip uid response 0x%04x\n", t);

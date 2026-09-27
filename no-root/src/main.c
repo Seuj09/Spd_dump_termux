@@ -44,8 +44,14 @@ static void usage(void)
 		"\n"
 		"ADDR, OFF and SIZE accept a 0x hex prefix and a K/M/G suffix.\n"
 		"The first fdl talks to BootROM (CRC-16). A second fdl talks to FDL1\n"
-		"(additive checksum). Loaders are files you already have. This program\n"
-		"keeps a single file descriptor: if the phone resets USB, the run ends.\n");
+		"(additive checksum). Loaders and addresses come from the FDL pair for\n"
+		"that chip; this program does not ship them.\n"
+		"\n"
+		"If the phone resets USB after a loader starts, spdhost asks termux-usb\n"
+		"for a new descriptor (or scans again on the desktop) and continues\n"
+		"the handshake. A reset in the middle of read-part or write-part stops\n"
+		"that command. ping --fdl marks the link as already in FDL1, so the\n"
+		"next fdl sends the second loader.\n");
 }
 
 static uint64_t parse_size(const char *str)
@@ -115,21 +121,25 @@ static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 {
 	if (io->fdl_stage == 0) {
 		io->flags |= SPD_F_CRC16 | SPD_F_TRANSCODE;
-		if (line && spd_usb_line_state(&io->usb))
-			exit(1);
-		if (spd_check_baud(io, 1, 4))
-			exit(1);
-		if (spd_connect(io))
-			exit(1);
+		if (!io->linked) {
+			if (line && spd_usb_line_state(&io->usb))
+				exit(1);
+			if (spd_check_baud(io, 1, 4))
+				exit(1);
+			if (spd_connect(io))
+				exit(1);
+			io->linked = 1;
+		}
 		spd_send_loader(io, path, addr);
 		if (spd_exec(io, io->usb.timeout_ms > 3000 ? io->usb.timeout_ms : 3000, 0))
 			exit(1);
 		io->flags &= ~SPD_F_CRC16;
-		if (spd_check_baud(io, 4, 10))
+		if (spd_check_baud_loader(io))
 			exit(1);
 		if (spd_connect(io))
 			exit(1);
 		io->fdl_stage = 1;
+		io->linked = 1;
 		fprintf(stderr, "FDL1 is running\n");
 	} else if (io->fdl_stage == 1) {
 		spd_send_loader(io, path, addr);
@@ -152,10 +162,17 @@ static void do_ping(struct spd *io, int line, int fdl)
 		io->flags |= SPD_F_CRC16;
 	if (line && spd_usb_line_state(&io->usb))
 		exit(1);
-	if (spd_check_baud(io, fdl ? 4 : 1, 4))
+	if (fdl) {
+		if (spd_check_baud_loader(io))
+			exit(1);
+	} else if (spd_check_baud(io, 1, 4)) {
 		exit(1);
+	}
 	if (spd_connect(io))
 		exit(1);
+	io->linked = 1;
+	if (fdl)
+		io->fdl_stage = 1;
 }
 
 int main(int argc, char **argv)
@@ -174,17 +191,32 @@ int main(int argc, char **argv)
 		{NULL, 0, NULL, 0}
 	};
 	int fd = -1, verbose = 0, yes = 0, line = 1, selftest = 0;
+	char self_path[512];
 	int timeout = 1000, step = 4096;
 	unsigned vid = 0x1782, pid = 0x4d00;
 	int c, i;
 	struct spd *io;
 	const char *envfd;
+	const char *emit;
 
-	while ((c = getopt_long(argc, argv, "h", opts, NULL)) != -1) {
+	emit = getenv("SPDHOST_EMIT_SOCK");
+	if (emit && emit[0])
+		return spd_usb_emit_fd(emit);
+
+	while ((c = getopt_long(argc, argv, "+h", opts, NULL)) != -1) {
 		switch (c) {
-		case 'f':
-			fd = atoi(optarg);
+		case 'f': {
+			char *end = NULL;
+			long v;
+			errno = 0;
+			v = strtol(optarg, &end, 10);
+			if (end == optarg || *end || errno || v < 0) {
+				fprintf(stderr, "bad --usb-fd: %s\n", optarg);
+				return 2;
+			}
+			fd = (int)v;
 			break;
+		}
 		case 'V':
 			vid = (unsigned)strtoul(optarg, NULL, 0);
 			break;
@@ -222,8 +254,17 @@ int main(int argc, char **argv)
 	}
 
 	envfd = getenv("TERMUX_USB_FD");
-	if (fd < 0 && envfd && envfd[0])
-		fd = atoi(envfd);
+	if (fd < 0 && envfd && envfd[0]) {
+		char *end = NULL;
+		long v;
+		errno = 0;
+		v = strtol(envfd, &end, 10);
+		if (end == envfd || *end || errno || v < 0) {
+			fprintf(stderr, "bad TERMUX_USB_FD: %s\n", envfd);
+			return 2;
+		}
+		fd = (int)v;
+	}
 
 	if (step < 64 || step > 65024) {
 		fprintf(stderr, "--step must be between 64 and 65024\n");
@@ -233,6 +274,14 @@ int main(int argc, char **argv)
 	io = spd_new(verbose, step);
 	io->usb.timeout_ms = timeout;
 	spd_usb_open(&io->usb, fd, vid, pid, timeout);
+	{
+		ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+		if (n < 0)
+			snprintf(self_path, sizeof(self_path), "%s", argv[0]);
+		else
+			self_path[n] = 0;
+	}
+	spd_usb_enable_reacquire(&io->usb, self_path);
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];
