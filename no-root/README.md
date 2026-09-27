@@ -227,7 +227,8 @@ Enter, then hold the target's download-mode keys and plug it in. This phone
 shows a USB permission dialog. Allow it. The first dialog usually spends
 the few seconds the BootROM stays up. Unplug, run the same command again,
 and plug in as soon as you have pressed Enter. After the first allow, later
-runs usually skip the dialog.
+runs usually skip the dialog. Cold-unplug the target ≥5 s between sessions;
+a successful hello once does not make later tries stickier without a replug.
 
 On Termux:
 
@@ -337,6 +338,15 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
   ./scripts/spdhost-usb --timeout 5000 --verbose ping
 ```
 
+`--timeout 5000` still applies to CONNECT / bulk / loader paths. BootROM
+hello send/recv uses `SPDHOST_BROM_TIMEOUT` only (default **3000**), not
+`max(--timeout, BROM_TIMEOUT)`, so a larger global timeout no longer starves
+the try budget under the wall. Every BootROM start prints one always-on line
+like `brom: hello hello_to=3000 wall=20000 tries=15`. With defaults
+(`hello_to=3000`, pause 500, wall **20000**) expect ~5–6 full tries before
+the wall; for ≥8 tries set `SPDHOST_BROM_WALL_MS=30000` (or similar). There
+is no auto-scaling of the wall.
+
 Follow-up list-parts smoke (Infinix UMS9230 + shipped FDL only; after ping
 success look for `version:SPRD3` or similar `version:` line):
 
@@ -351,18 +361,20 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
 
 BootROM hello (`check-baud` with raw `0x7e`) also reads optional env knobs
 (defaults are patient; shrink them to bisect): `SPDHOST_BROM_TRIES` (15),
-`SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000),
-`SPDHOST_BROM_WALL_MS` (15000), `SPDHOST_BROM_TRACE` (1 = breadcrumb
-timestamps even without `--verbose`; prints try N of M, wall, settle, reacq),
-`SPDHOST_BROM_REACQ` (default **0** = off — Termux-safe; no mid-ping USB
-close/reopen / second Allow dialog. Soft OUT TIMEOUT retries + wall stay on
-the **same FD**. Set to `1`/`2` for soft same-handle settle+retry after
+`SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000; BootROM hello
+only — not max'd with `--timeout`), `SPDHOST_BROM_WALL_MS` (**20000**; for
+≥8 tries use ≈30000), `SPDHOST_BROM_TRACE` (1 = breadcrumb timestamps even
+without `--verbose`; open/claim, line-state done, try N of M, wall, settle,
+reacq), `SPDHOST_BROM_REACQ` (default **0** = off — Termux-safe; no mid-ping
+USB close/reopen / second Allow dialog. Soft OUT TIMEOUT retries + wall stay
+on the **same FD**. Set to `1`/`2` for soft same-handle settle+retry after
 try/wall miss — still no termux-usb reopen; max `2`),
 `SPDHOST_BROM_SETTLE_MS` (default **100** ms pause after line-state),
 `SPDHOST_BROM_DRAIN` (default **0**; `1` = short bulk-IN drain after settle).
-BootROM OUT `LIBUSB_ERROR_TIMEOUT` during check-baud is soft (same as recv
-timeout): remaining tries continue on the same handle; it does not abort the
-session. A forced USB reacquire mid-hello was removed: it hit
+Cold-unplug ≥5 s between sessions; success once ≠ stickier later without a
+replug. BootROM OUT `LIBUSB_ERROR_TIMEOUT` during check-baud is soft (same as
+recv timeout): remaining tries continue on the same handle; it does not abort
+the session. A forced USB reacquire mid-hello was removed: it hit
 `LIBUSB_ERROR_BUSY` and a second termux-usb Allow. If claim ever returns BUSY
 during a real reopen, look for `brom: reacq skipped: claim BUSY`.
 
