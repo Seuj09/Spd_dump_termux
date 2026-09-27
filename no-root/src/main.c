@@ -86,8 +86,10 @@ bad:
 static void confirm(int yes, const char *verb, const char *name)
 {
 	char buf[16];
-	if (yes)
+	if (yes) {
+		fprintf(stderr, "confirmed via --yes: %s '%s'\n", verb, name);
 		return;
+	}
 	if (!isatty(STDIN_FILENO)) {
 		fprintf(stderr, "refusing to %s %s without --yes (stdin is not a terminal)\n", verb, name);
 		exit(1);

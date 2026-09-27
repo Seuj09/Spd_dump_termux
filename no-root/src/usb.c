@@ -175,6 +175,12 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	u->pid = pid;
 	u->reac_left = 4;
 	u->fd_mode = fd >= 0;
+	u->last_bus[0] = 0;
+	{
+		const char *bus = getenv("SPDHOST_USB_BUS");
+		if (bus && bus[0] && strncmp(bus, "/dev/bus/usb/", 13) == 0)
+			snprintf(u->last_bus, sizeof(u->last_bus), "%s", bus);
+	}
 	init_ctx(u, u->fd_mode);
 
 	if (fd >= 0) {
@@ -371,11 +377,15 @@ int spd_usb_emit_fd(const char *sock_path)
 	return 0;
 }
 
-static int list_one_device(char *out, size_t cap)
+/* Fill out with a single usable bus path. Prefer prefer[] when several
+ * devices are present (remembered path from a prior successful open).
+ * Returns device count; out is set only when exactly one path is chosen. */
+static int list_one_device(char *out, size_t cap, const char *prefer)
 {
 	FILE *p;
 	char line[256];
-	int count = 0;
+	char paths[8][128];
+	int count = 0, i;
 	out[0] = 0;
 	p = popen("termux-usb -l 2>/dev/null", "r");
 	if (!p)
@@ -389,14 +399,49 @@ static int list_one_device(char *out, size_t cap)
 		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
 			end++;
 		*end = 0;
+		if (count < 8)
+			snprintf(paths[count], sizeof(paths[count]), "%s", path);
 		count++;
-		if (count == 1)
-			snprintf(out, cap, "%s", path);
 	}
 	pclose(p);
-	if (count != 1)
-		out[0] = 0;
+	if (count == 1) {
+		snprintf(out, cap, "%s", paths[0]);
+		return 1;
+	}
+	if (count > 1 && prefer && prefer[0]) {
+		for (i = 0; i < count && i < 8; i++) {
+			if (strcmp(paths[i], prefer) == 0) {
+				snprintf(out, cap, "%s", prefer);
+				return 1;
+			}
+		}
+	}
 	return count;
+}
+
+static void print_bus_paths(void)
+{
+	FILE *p;
+	char line[256];
+	int n = 0;
+	p = popen("termux-usb -l 2>/dev/null", "r");
+	if (!p)
+		return;
+	while (fgets(line, sizeof(line), p)) {
+		char *path = strstr(line, "/dev/bus/usb/");
+		char *end;
+		if (!path)
+			continue;
+		end = path;
+		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
+			end++;
+		*end = 0;
+		fprintf(stderr, "  %s\n", path);
+		n++;
+	}
+	pclose(p);
+	if (!n)
+		fprintf(stderr, "  (none)\n");
 }
 
 static int grab_termux(struct spd_usb *u)
@@ -446,7 +491,7 @@ static int grab_termux(struct spd_usb *u)
 	}
 
 	for (i = 0; i < 60 && got < 0; i++) {
-		int n = list_one_device(dev, sizeof(dev));
+		int n = list_one_device(dev, sizeof(dev), u->last_bus);
 		pid_t pid;
 		struct pollfd pfd;
 		int status;
@@ -455,9 +500,22 @@ static int grab_termux(struct spd_usb *u)
 			fprintf(stderr, "termux-usb -l failed. Is Termux:API installed?\n");
 			break;
 		}
-		if (n != 1) {
-			if (i == 0)
+		if (n != 1 || !dev[0]) {
+			if (n > 1) {
+				/* Prefer last_bus when several nodes exist; otherwise keep
+				 * waiting through the renumeration window, then explain. */
+				if (u->last_bus[0] && i > 0 && i % 12 == 0) {
+					fprintf(stderr, "reacquire: %d USB devices; remembered %s is gone\n",
+						n, u->last_bus);
+					fprintf(stderr, "pass an explicit /dev/bus/usb/... to spdhost-usb:\n");
+					print_bus_paths();
+				} else if (!u->last_bus[0] && (i == 0 || i % 12 == 0)) {
+					fprintf(stderr, "reacquire: %d USB devices; waiting for a single node\n", n);
+					print_bus_paths();
+				}
+			} else if (i == 0) {
 				fprintf(stderr, "waiting for the phone to reappear on USB\n");
+			}
 			usleep(250000);
 			continue;
 		}
@@ -502,6 +560,7 @@ static int grab_termux(struct spd_usb *u)
 				usleep(250000);
 				continue;
 			}
+			snprintf(u->last_bus, sizeof(u->last_bus), "%s", dev);
 			fprintf(stderr, "reopened %s\n", dev);
 			break;
 		}
