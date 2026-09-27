@@ -3,6 +3,13 @@
 A small Unisoc download-mode client. One process, one USB device, no GUI.
 It talks to a phone in BootROM or FDL over libusb bulk transfers.
 
+The downloadable source zip is the
+[spdhost-source](https://github.com/Seuj09/Spd_dump_termux/releases/tag/spdhost-source)
+release. One archive is for both an arm32 host and an arm64 host. It
+includes this guide, `scripts/menu.sh`, the C sources, and the ums9230
+Infinix loaders. Unzip it on the phone and run `make` there. Do not expect
+a prebuilt `spdhost` inside the zip. An arm64 binary does not run on arm32.
+
 This tree is original. It is not a fork of either repository below, and it
 does not carry their code. Read them when you want to see how someone else
 solved a piece. Do not paste them in here: `sfd_tool` is GPL-3.0-or-later.
