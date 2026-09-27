@@ -33,17 +33,72 @@ I/O. They ask you to type `yes` unless you pass `--yes`.
 
 ## Build
 
-Desktop or Termux:
+Build inside `no-root/`. This is not the rooted chroot: do not run these
+commands in Ubuntu, and do not follow `root/setup.sh` for this binary.
+`make` produces `./spdhost` for the machine you are on. A binary built on a
+PC will not run on the phone, and the other way around.
+
+`./spdhost --self-test` prints `self-test ok` when the compile and the
+framing check worked. That check does not open USB and does not need a phone.
+
+### Termux, no root
+
+Install [Termux](https://f-droid.org/packages/com.termux/) and
+[Termux:API](https://f-droid.org/packages/com.termux.api/) from F-Droid.
+The Play Store Termux package is an old build and will not work.
+Termux:API has to be the app as well as the `termux-api` package, and the
+two apps must be signed together, which they are when both come from F-Droid.
+
+In Termux, not in a chroot:
 
 ```sh
-pkg install clang pkg-config libusb   # Termux
-# or: apt install build-essential pkg-config libusb-1.0-0-dev
+pkg update
+pkg install git clang make pkg-config libusb termux-api
+git clone https://github.com/Seuj09/Spd_dump_termux.git
+cd Spd_dump_termux/no-root
+make
+./spdhost --self-test
+cp spdhost "$PREFIX/bin/"
+cp scripts/spdhost-usb "$PREFIX/bin/"
+```
+
+`$PREFIX` is already set by Termux. It is
+`/data/data/com.termux/files/usr`. The `cp` lines are what puts `spdhost`
+and `spdhost-usb` on `PATH`. Without them, `spdhost-usb` in the next section
+will not be found.
+
+`clang` is the compiler. `make` runs the Makefile. `pkg-config` and `libusb`
+are how the build finds the USB library. `termux-api` is the command-line
+bridge to the Termux:API app. None of these are `apt` packages. Termux's
+`apt` is `pkg`.
+
+### Linux PC
+
+Debian, Ubuntu, and derivatives:
+
+```sh
+sudo apt update
+sudo apt install git build-essential pkg-config libusb-1.0-0-dev
+git clone https://github.com/Seuj09/Spd_dump_termux.git
+cd Spd_dump_termux/no-root
 make
 ./spdhost --self-test
 ```
 
-Termux does not need a chroot. The binary links Termux's libusb and runs as
-the Termux user.
+Fedora and RHEL:
+
+```sh
+sudo dnf install git gcc make pkgconf-pkg-config libusb1-devel
+git clone https://github.com/Seuj09/Spd_dump_termux.git
+cd Spd_dump_termux/no-root
+make
+./spdhost --self-test
+```
+
+Leave the binary in this directory and run it as `./spdhost`. There is no
+`spdhost-usb` step on a PC. The PC must be allowed to open the device node
+itself (root, or a udev rule for vendor `1782`). See the desktop commands
+below.
 
 ## Run
 
@@ -61,13 +116,9 @@ uses. This tool does not ship loaders. A wrong address is how phones get
 bricked. The loader download itself is sent in 528-byte chunks. `--step`
 changes partition reads and writes only.
 
-On a non-root Android host, with Termux and Termux:API installed from
-F-Droid (the Play Store Termux build is too old):
+On the phone, after the Termux build and the `cp` into `$PREFIX/bin`:
 
 ```sh
-pkg install termux-api
-cp spdhost "$PREFIX/bin/"
-cp scripts/spdhost-usb "$PREFIX/bin/"
 spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
