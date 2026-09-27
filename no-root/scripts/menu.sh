@@ -8,12 +8,27 @@ DUMP_DIR="${SPDHOST_DUMP_DIR:-$PWD/backup}"
 FDL1_ADDR_DEFAULT=0x65000800
 FDL2_ADDR_DEFAULT=0x9efffe00
 
+# Prefer PATH, then this package's scripts/ (works from no-root/ or scripts/).
+# Always run the wrapper by absolute path so spdhost-usb can resolve ../spdhost via $0.
+script_dir=$(cd "$(dirname "$0")" && pwd)
+RUNNER=()
 if command -v spdhost-usb >/dev/null 2>&1; then
-	RUNNER=(spdhost-usb)
-elif [[ -x "$PWD/scripts/spdhost-usb" ]]; then
-	RUNNER=(./scripts/spdhost-usb)
+	RUNNER=("$(command -v spdhost-usb)")
 else
-	echo "spdhost-usb is not on PATH. From no-root/: cp scripts/spdhost-usb \"\$PREFIX/bin/\"" >&2
+	for cand in \
+		"$script_dir/spdhost-usb" \
+		"$PWD/scripts/spdhost-usb" \
+		"$PWD/spdhost-usb"
+	do
+		if [[ -x $cand && -f $cand ]]; then
+			RUNNER=("$(cd "$(dirname "$cand")" && printf '%s/%s' "$(pwd)" "$(basename "$cand")")")
+			break
+		fi
+	done
+fi
+if (( ${#RUNNER[@]} == 0 )); then
+	echo "spdhost-usb not found next to this tree or on PATH." >&2
+	echo "From no-root/: bash scripts/menu.sh   (optional: cp scripts/spdhost-usb \"\$PREFIX/bin/\")" >&2
 	exit 1
 fi
 
