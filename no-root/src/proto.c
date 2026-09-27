@@ -485,20 +485,21 @@ reacq_restart:
 		if (brom) {
 			now = mono_ms();
 			if (now - t0 >= wall_ms) {
-				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
-					wall_ms, i);
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
+					wall_ms, i, tries);
 				break;
 			}
 			if (brom_trace)
-				fprintf(stderr, "brom: try %d start @%lldms\n", i + 1, now - t0);
+				fprintf(stderr, "brom: try %d of %d start @%lldms\n",
+					i + 1, tries, now - t0);
 		}
 		if (i)
 			pause_ms(pause);
 		if (brom) {
 			now = mono_ms();
 			if (now - t0 >= wall_ms) {
-				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
-					wall_ms, i);
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
+					wall_ms, i, tries);
 				break;
 			}
 		}
@@ -509,14 +510,22 @@ reacq_restart:
 		rc = spd_send(io);
 		io->usb.timeout_ms = saved_to;
 		if (brom && brom_trace)
-			fprintf(stderr, "brom: try %d send rc=%d @%lldms\n",
-				i + 1, rc, mono_ms() - t0);
+			fprintf(stderr, "brom: try %d of %d send rc=%d @%lldms\n",
+				i + 1, tries, rc, mono_ms() - t0);
 		if (rc < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
-			/* BootROM only: send TIMEOUT (-2, gone unset) is a soft fail. */
+			/* BootROM only: send TIMEOUT (-2, gone unset) is a soft fail —
+			 * same as recv timeout: keep trying within the wall, then A2. */
 			if (brom && rc == -2 && !io->usb.gone) {
-				fprintf(stderr, "brom: send TIMEOUT (soft retry)\n");
+				fprintf(stderr, "brom: try %d of %d send TIMEOUT (soft retry) @%lldms\n",
+					i + 1, tries, mono_ms() - t0);
+				now = mono_ms();
+				if (now - t0 >= wall_ms) {
+					fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
+						wall_ms, i + 1, tries);
+					break;
+				}
 				continue;
 			}
 			return -1;
@@ -524,14 +533,14 @@ reacq_restart:
 		n = spd_recv(io, hello_to);
 		if (brom && brom_trace) {
 			if (n == 0)
-				fprintf(stderr, "brom: try %d recv timeout @%lldms\n",
-					i + 1, mono_ms() - t0);
+				fprintf(stderr, "brom: try %d of %d recv timeout @%lldms\n",
+					i + 1, tries, mono_ms() - t0);
 			else if (n < 0)
-				fprintf(stderr, "brom: try %d recv disconnect/err @%lldms\n",
-					i + 1, mono_ms() - t0);
+				fprintf(stderr, "brom: try %d of %d recv disconnect/err @%lldms\n",
+					i + 1, tries, mono_ms() - t0);
 			else
-				fprintf(stderr, "brom: try %d recv n=%d @%lldms\n",
-					i + 1, n, mono_ms() - t0);
+				fprintf(stderr, "brom: try %d of %d recv n=%d @%lldms\n",
+					i + 1, tries, n, mono_ms() - t0);
 		}
 		if (n < 0) {
 			if (reopen_if_gone(io) == 0)
@@ -539,19 +548,20 @@ reacq_restart:
 			return -1;
 		}
 		if (n == 0) {
-			fprintf(stderr, "check baud %d: timeout\n", i + 1);
+			fprintf(stderr, "check baud %d/%d: timeout\n", i + 1, tries);
 			if (brom) {
 				now = mono_ms();
 				if (now - t0 >= wall_ms) {
-					fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
-						wall_ms, i + 1);
+					fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
+						wall_ms, i + 1, tries);
 					break;
 				}
 			}
 			continue;
 		}
 		if (spd_type(io) != BSL_REP_VER) {
-			fprintf(stderr, "check baud %d: response 0x%04x\n", i + 1, spd_type(io));
+			fprintf(stderr, "check baud %d/%d: response 0x%04x\n",
+				i + 1, tries, spd_type(io));
 			continue;
 		}
 		{
@@ -562,23 +572,24 @@ reacq_restart:
 		return 0;
 	}
 
-	/* A2: after try/wall fail with no VER, optional BootROM USB reacquire. */
+	/* A2: after try/wall budget miss with no VER, optional BootROM USB reacquire.
+	 * Always attempt when reacqs remain (do not require leftover wall — OUT/IN
+	 * timeouts often exhaust the wall). Fresh wall clock after reacq. */
 	if (brom && reacqs_done < reacqs_max) {
-		long long remaining = wall_ms - (mono_ms() - t0);
-		if (remaining > 1000) {
-			fprintf(stderr, "brom: hello timeout; reacquiring USB\n");
-			io->usb.gone = 1;
-			if (reopen_if_gone(io) != 0)
-				return -1;
-			if (spd_usb_line_state(&io->usb))
-				return -1;
-			spd_brom_after_line_state(io);
-			reacqs_done++;
-			if (brom_trace)
-				fprintf(stderr, "brom: reacq %d done; restarting check-baud (@%lldms remaining ~%lld)\n",
-					reacqs_done, mono_ms() - t0, remaining);
-			goto reacq_restart;
-		}
+		fprintf(stderr, "brom: hello timeout; reacquiring USB (reacq %d of %d)\n",
+			reacqs_done + 1, reacqs_max);
+		io->usb.gone = 1;
+		if (reopen_if_gone(io) != 0)
+			return -1;
+		if (spd_usb_line_state(&io->usb))
+			return -1;
+		spd_brom_after_line_state(io);
+		reacqs_done++;
+		t0 = mono_ms();
+		if (brom_trace)
+			fprintf(stderr, "brom: reacq %d of %d done; restarting check-baud (fresh wall=%d @0ms)\n",
+				reacqs_done, reacqs_max, wall_ms);
+		goto reacq_restart;
 	}
 	return -1;
 }
