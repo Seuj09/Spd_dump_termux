@@ -80,6 +80,8 @@ static int claim_bulk(struct spd_usb *u)
 		err = libusb_claim_interface(h, num);
 		if (err < 0) {
 			fprintf(stderr, "claim interface %d: %s\n", num, libusb_error_name(err));
+			if (err == LIBUSB_ERROR_BUSY)
+				fprintf(stderr, "brom: reacq skipped: claim BUSY\n");
 			libusb_free_config_descriptor(cfg);
 			return -1;
 		}
