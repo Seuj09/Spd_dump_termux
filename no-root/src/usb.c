@@ -235,13 +235,12 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		(unsigned char *)buf, len, &sent, u->timeout_ms);
 	if (err < 0) {
 		fprintf(stderr, "usb send: %s\n", libusb_error_name(err));
+		/* NO_DEVICE/PIPE/IO after EXEC usually means the device left the bus.
+		 * Mark gone so reopen_if_gone can reacquire; return -1 for all three. */
 		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
-			/* PIPE/IO here is usually the device leaving the bus. */
-			if (err == LIBUSB_ERROR_NO_DEVICE)
-				u->gone = 1;
-		}
-		if (err == LIBUSB_ERROR_NO_DEVICE)
+			u->gone = 1;
 			return -1;
+		}
 		return -2;
 	}
 	if (sent != len) {
@@ -263,9 +262,9 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 	int err = libusb_bulk_transfer(u->handle, u->ep_in, buf, cap, &got, timeout_ms);
 	if (err == LIBUSB_ERROR_TIMEOUT)
 		return 0;
-	if (err == LIBUSB_ERROR_NO_DEVICE) {
+	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
 		u->gone = 1;
-		fprintf(stderr, "usb recv: device left the bus\n");
+		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));
 		return -1;
 	}
 	if (err < 0) {
