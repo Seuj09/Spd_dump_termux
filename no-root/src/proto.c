@@ -694,6 +694,46 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	return 0;
 }
 
+int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len)
+{
+	uint64_t off;
+	int step = io->step;
+
+	if (!buf) {
+		fprintf(stderr, "write-part-buf: null buffer\n");
+		return -1;
+	}
+	fprintf(stderr, "write %s: %zu bytes from buffer\n", name, len);
+
+	select_part(io, name, (uint64_t)len, BSL_CMD_START_DATA);
+	if (spd_check_ok(io))
+		exit(1);
+	for (off = 0; off < (uint64_t)len; ) {
+		uint64_t left = (uint64_t)len - off;
+		size_t n = left > (uint64_t)step ? (size_t)step : (size_t)left;
+		spd_encode(io, BSL_CMD_MIDST_DATA, buf + off, n);
+		if (spd_send(io) < 0)
+			die("send failed during write");
+		{
+			int got = spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000);
+			if (got == 0)
+				die("timeout during write");
+			if (got < 0)
+				die("device reset during write; this write was not resumed");
+		}
+		if (spd_type(io) != BSL_REP_ACK) {
+			fprintf(stderr, "write response 0x%04x at offset %llu\n",
+				spd_type(io), (unsigned long long)off);
+			exit(1);
+		}
+		off += n;
+	}
+	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+	if (spd_check_ok(io))
+		exit(1);
+	return 0;
+}
+
 int spd_erase_part(struct spd *io, const char *name)
 {
 	select_part(io, name, 0, BSL_CMD_ERASE_FLASH);

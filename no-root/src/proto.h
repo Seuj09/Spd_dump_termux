@@ -49,6 +49,7 @@ int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible);
 
 int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path);
 int spd_write_part(struct spd *io, const char *name, const char *path);
+int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
 int spd_chip_uid(struct spd *io);

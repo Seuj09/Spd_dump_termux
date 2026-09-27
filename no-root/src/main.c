@@ -27,7 +27,7 @@ static void usage(void)
 		"  --timeout MS        bulk timeout (default 1000)\n"
 		"  --step N            partition chunk size (default 4096, max 65024)\n"
 		"  --no-line-state     skip the smartphone line-state control transfer\n"
-		"  --yes               do not prompt before write-part / erase-part\n"
+		"  --yes               do not prompt before write-part / erase-part / reboot-*\n"
 		"  --verbose\n"
 		"  --self-test         framing check, no device\n"
 		"\n"
@@ -39,6 +39,8 @@ static void usage(void)
 		"  write-part NAME FILE\n"
 		"  erase-part NAME\n"
 		"  chip-uid\n"
+		"  reboot-recovery            write 2048-byte BCB to misc, then reset\n"
+		"  reboot-fastboot            same with --fastboot recovery arg\n"
 		"  reset\n"
 		"  power-off\n"
 		"\n"
@@ -47,6 +49,12 @@ static void usage(void)
 		"(additive checksum). Loaders and addresses must match that exact chip.\n"
 		"This tree ships one example pair under fdl/ums9230/infinix/; a wrong\n"
 		"pair or address can brick the phone.\n"
+		"\n"
+		"reboot-recovery and reboot-fastboot synthesize a 2048-byte Android\n"
+		"bootloader_message (boot-recovery at offset 0; fastbootd also puts\n"
+		"recovery\\n--fastboot\\n at 0x40), write exactly those 2048 bytes to\n"
+		"partition \"misc\", then reset. Do not erase misc; do not write more\n"
+		"than 2048 at offset 0 (A/B bootloader_control starts at 0x800).\n"
 		"\n"
 		"If the phone resets USB after a loader starts, spdhost asks termux-usb\n"
 		"for a new descriptor (or scans again on the desktop) and continues\n"
@@ -117,7 +125,9 @@ static int is_command(const char *s)
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
-		strcmp(s, "chip-uid") == 0 || strcmp(s, "reset") == 0 ||
+		strcmp(s, "chip-uid") == 0 ||
+		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
+		strcmp(s, "reset") == 0 ||
 		strcmp(s, "power-off") == 0;
 }
 
@@ -186,6 +196,34 @@ static void do_ping(struct spd *io, int line, int fdl)
 	io->linked = 1;
 	if (fdl)
 		io->fdl_stage = 1;
+}
+
+
+/* Android bootloader_message: first 0x800 bytes of misc. A/B metadata @0x800. */
+enum { SPD_MISC_BCB_LEN = 0x800 };
+
+/* kind: 0 = recovery only, 1 = recovery + --fastboot at 0x40. */
+static int do_reboot_bcb(struct spd *io, int yes, int kind)
+{
+	uint8_t buf[SPD_MISC_BCB_LEN];
+	const char *label = kind ? "misc (reboot-fastboot)" : "misc (reboot-recovery)";
+
+	/* Compile-time guard: never enlarge this write window. */
+	_Static_assert(sizeof(buf) == 0x800, "misc BCB must be exactly 2048 bytes");
+
+	memset(buf, 0, sizeof(buf));
+	memcpy(buf, "boot-recovery", 13);
+	if (kind)
+		memcpy(buf + 0x40, "recovery\n--fastboot\n", 20);
+
+	confirm(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", label);
+	if (sizeof(buf) != (size_t)SPD_MISC_BCB_LEN) {
+		fprintf(stderr, "internal error: misc BCB length %zu != 2048\n", sizeof(buf));
+		return -1;
+	}
+	if (spd_write_part_buf(io, "misc", buf, sizeof(buf)))
+		return -1;
+	return spd_simple(io, 0x05); /* BSL_CMD_NORMAL_RESET */
 }
 
 int main(int argc, char **argv)
@@ -361,6 +399,16 @@ int main(int argc, char **argv)
 			i += 2;
 		} else if (strcmp(cmd, "chip-uid") == 0) {
 			if (spd_chip_uid(io))
+				return 1;
+			i++;
+		} else if (strcmp(cmd, "reboot-recovery") == 0) {
+			need_fdl2(io, "reboot-recovery");
+			if (do_reboot_bcb(io, yes, 0))
+				return 1;
+			i++;
+		} else if (strcmp(cmd, "reboot-fastboot") == 0) {
+			need_fdl2(io, "reboot-fastboot");
+			if (do_reboot_bcb(io, yes, 1))
 				return 1;
 			i++;
 		} else if (strcmp(cmd, "reset") == 0) {
