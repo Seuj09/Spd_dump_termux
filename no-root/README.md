@@ -26,6 +26,11 @@ cp spdhost "$PREFIX/bin/"
 Use `spdhost-arm64` instead of `spdhost-arm32` when `uname -m` prints
 `aarch64`. An arm64 file will not start on an arm32 phone.
 
+After the reboot-recovery/fastboot change, both prebuilts must be
+rebuilt from the same `no-root/src` (do not copy a binary across arches).
+Cross-build recipe (musl + static libusb) is in the PR that lands those
+commands; native `make` on each Termux host also works.
+
 The same release also has `spdhost-source-arm32-arm64.zip`: the guide,
 `scripts/menu.sh`, the C sources, and the ums9230 Infinix loaders. Use the
 zip when you want to compile on the phone. The prebuilt is the file to run.
@@ -46,6 +51,30 @@ files work on arm32 and arm64 Termux hosts.
 Each file is exactly 2048 (`0x800`) bytes. Do not write more than that at
 offset 0: A/B `bootloader_control` lives at misc offset `0x800`. Do not
 `erase-part misc` as a shortcut.
+
+### reboot-recovery / reboot-fastboot
+
+After two matching `fdl` loaders (FDL2), these commands synthesize the same
+2048-byte BCB TomKing uses, write exactly those bytes to partition `misc`,
+then `reset`:
+
+```sh
+spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR reboot-recovery
+spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR reboot-fastboot
+```
+
+They ask you to type `yes` unless you pass `--yes` (CLI automation only).
+`scripts/menu.sh` never passes `--yes` for reboot or misc writes.
+
+**FDL must match the exact chip.** A wrong loader or address can brick the
+phone. The shipped `fdl/ums9230/infinix/` pair is one example only.
+
+### Menu wipe (BCB only)
+
+Menu reboot option `[5]` writes `misc/misc-wipe.bin` then `reset`. Recovery
+honors `--wipe_data` and erases userdata on the next boot. spdhost does
+**not** erase the `persist` or `userdata` partitions itself (unlike some
+rooted wipe flows). Use only on a sacrificial device.
 
 This tree is original. It is not a fork of either repository below, and it
 does not carry their code. Read them when you want to see how someone else
@@ -229,9 +258,10 @@ spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
 `0x` hex number is a byte count.
 
 `write-part NAME FILE` writes a file onto a partition. `erase-part NAME`
-erases one. Both stop and ask you to type `yes`. `--yes` skips that prompt.
-Do not put `--yes` in front of the device path. Options go before the
-commands:
+erases one. `reboot-recovery` and `reboot-fastboot` write a 2048-byte BCB
+to `misc` then reset (see misc section). All of these stop and ask you to
+type `yes`. `--yes` skips that prompt. Do not put `--yes` in front of the
+device path. Options go before the commands:
 
 ```sh
 spdhost-usb --yes fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
@@ -257,17 +287,18 @@ spdhost-usb /dev/bus/usb/001/002 -- \
   fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
-`scripts/menu.sh` is a two-item test menu over the same commands. It will
+`scripts/menu.sh` is a small test menu over the same commands. It will
 not silently pick the shipped ums9230 Infinix loaders
 (`fdl/ums9230/infinix/`, `fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @
 `0x9efffe00`). You must type `yes` to confirm that chip/model, or set
 `SPDHOST_ALLOW_DEFAULT_FDL=1`, or use option 3 / a saved
 `~/.spdhost-menu.conf`. Those files match the release menu's UMS9230 /
-Infinix choice. The menu either dumps one partition into `./backup/` or
-reboots. Reboot choices are system (`reset`), recovery, fastbootd (both
-write the boot command at the start of `misc` after a typed confirm, then
-`reset`), and power off. It does not unlock or flash a partition you did
-not name.
+Infinix choice. The menu dumps one partition into `./backup/` or reboots.
+Reboot choices are system (`reset`), recovery (`reboot-recovery`),
+fastbootd (`reboot-fastboot`), power off, and optional wipe userdata via
+`misc/misc-wipe.bin` (BCB + reset only). Misc/reboot/wipe paths always use
+a typed confirm and never pass `--yes`. It does not unlock or flash a
+partition you did not name.
 
 ```sh
 cp scripts/menu.sh "$PREFIX/bin/"
