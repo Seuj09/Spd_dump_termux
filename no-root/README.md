@@ -313,6 +313,10 @@ cp scripts/menu.sh "$PREFIX/bin/"
 menu.sh
 ```
 
+Unzipped `no-root/` also works without copying into `$PREFIX/bin`: after
+`make` (or with a Release prebuilt `spdhost` in the package root), run
+`bash scripts/menu.sh` from the package root or from `scripts/`.
+
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
 directly. The command words after that are the same:
