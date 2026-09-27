@@ -337,6 +337,18 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
   ./scripts/spdhost-usb --timeout 5000 --verbose ping
 ```
 
+Follow-up list-parts smoke (Infinix UMS9230 + shipped FDL only; after ping
+success look for `version:SPRD3` or similar `version:` line):
+
+```bash
+cd ~/spdhost-arm32
+SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
+  ./scripts/spdhost-usb --timeout 5000 --verbose \
+  fdl ./fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 \
+  fdl ./fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 \
+  parts ./backup/partition_list.txt
+```
+
 Optional arm32 tip binary check (tip `61d610f`, bins unchanged by docs):
 `sha256sum spdhost` → `c329d46e81dc408c263cc0a653fd854ab774f6de11e71c1fe86cd2af34857816`.
 
