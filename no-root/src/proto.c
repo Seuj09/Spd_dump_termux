@@ -462,8 +462,10 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 		}
 		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 15000, 1000, 120000);
 		brom_trace = io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1);
-		/* Default ON: one USB reacquire after hello budget fails (0=off, max 2). */
-		reacqs_max = env_int("SPDHOST_BROM_REACQ", 1, 0, 2);
+		/* Default OFF: forced USB close/reopen mid-hello re-prompts termux-usb
+		 * Allow and often hits claim BUSY. Soft OUT TIMEOUT retries + wall stay
+		 * on the same FD. REACQ>0 = soft same-handle settle+retry only (no reopen). */
+		reacqs_max = env_int("SPDHOST_BROM_REACQ", 0, 0, 2);
 		t0 = mono_ms();
 		if (brom_trace)
 			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d wall=%d reacq=%d @%lldms\n",
@@ -516,7 +518,7 @@ reacq_restart:
 			if (reopen_if_gone(io) == 0)
 				continue;
 			/* BootROM only: send TIMEOUT (-2, gone unset) is a soft fail —
-			 * same as recv timeout: keep trying within the wall, then A2. */
+			 * same as recv timeout: keep trying within the wall (optional soft A2). */
 			if (brom && rc == -2 && !io->usb.gone) {
 				fprintf(stderr, "brom: try %d of %d send TIMEOUT (soft retry) @%lldms\n",
 					i + 1, tries, mono_ms() - t0);
@@ -572,22 +574,20 @@ reacq_restart:
 		return 0;
 	}
 
-	/* A2: after try/wall budget miss with no VER, optional BootROM USB reacquire.
-	 * Always attempt when reacqs remain (do not require leftover wall — OUT/IN
-	 * timeouts often exhaust the wall). Fresh wall clock after reacq. */
+	/* A2: after try/wall budget miss with no VER, optional soft same-FD reacq.
+	 * Never force gone / never close+reopen mid-hello (that re-prompts termux-usb
+	 * Allow and often claim BUSY on a still-open grant). Soft path: line-state +
+	 * settle/drain on the current handle, then restart tries with a fresh wall. */
 	if (brom && reacqs_done < reacqs_max) {
-		fprintf(stderr, "brom: hello timeout; reacquiring USB (reacq %d of %d)\n",
+		fprintf(stderr, "brom: hello timeout; soft reacq same FD (reacq %d of %d)\n",
 			reacqs_done + 1, reacqs_max);
-		io->usb.gone = 1;
-		if (reopen_if_gone(io) != 0)
-			return -1;
-		if (spd_usb_line_state(&io->usb))
-			return -1;
+		if (spd_usb_line_state(&io->usb) != 0)
+			fprintf(stderr, "brom: soft reacq: line-state failed; continuing same FD\n");
 		spd_brom_after_line_state(io);
 		reacqs_done++;
 		t0 = mono_ms();
 		if (brom_trace)
-			fprintf(stderr, "brom: reacq %d of %d done; restarting check-baud (fresh wall=%d @0ms)\n",
+			fprintf(stderr, "brom: soft reacq %d of %d done; restarting check-baud (fresh wall=%d @0ms)\n",
 				reacqs_done, reacqs_max, wall_ms);
 		goto reacq_restart;
 	}
