@@ -70,6 +70,7 @@ find_infinix_dir() {
 		"$script_dir/../fdl/ums9230/infinix" \
 		"$here/fdl/ums9230/infinix" \
 		"$here/ums9230/infinix" \
+		"$HOME/spdhost/fdl/ums9230/infinix" \
 		"$HOME/Spd_dump_termux/no-root/fdl/ums9230/infinix" \
 		"$HOME/spreadtrum_flash_termux/ums9230/infinix"
 	do
