@@ -64,7 +64,7 @@ ask_addr() {
 			printf '%s\n' "$reply"
 			return 0
 		fi
-		echo "Address must look like 0x65000800"
+		echo "Address must look like 0x65000800" >&2
 	done
 }
 
@@ -76,7 +76,7 @@ ask_file() {
 			printf '%s\n' "$reply"
 			return 0
 		fi
-		echo "No such file: $reply"
+		echo "No such file: $reply" >&2
 	done
 }
 
