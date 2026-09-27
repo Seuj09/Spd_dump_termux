@@ -200,12 +200,15 @@ spdhost-usb /dev/bus/usb/001/002 -- \
   fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
-`scripts/menu.sh` is a two-item test menu over the same commands. It asks
-for your FDL1 and FDL2 once, saves them in `~/.spdhost-menu.conf`, then
-either dumps one partition into `./backup/` or reboots. Reboot choices are
-system (`reset`), recovery, fastbootd (both write the boot command at the
-start of `misc`, then `reset`), and power off. It does not unlock or flash
-a partition you did not name.
+`scripts/menu.sh` is a two-item test menu over the same commands. Unless
+you already saved other paths in `~/.spdhost-menu.conf`, it uses the
+ums9230 Infinix loaders shipped in `fdl/ums9230/infinix/`: `fdl1-dl.bin`
+at `0x65000800` and `fdl2-dl.bin` at `0x9efffe00`. Those are the same files
+and addresses as the release menu's UMS9230 / Infinix choice. Option 3
+changes them. The menu either dumps one partition into `./backup/` or
+reboots. Reboot choices are system (`reset`), recovery, fastbootd (both
+write the boot command at the start of `misc`, then `reset`), and power
+off. It does not unlock or flash a partition you did not name.
 
 ```sh
 cp scripts/menu.sh "$PREFIX/bin/"

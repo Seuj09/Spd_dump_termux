@@ -3,11 +3,15 @@
 #   dump one partition  (the release menu's "r" / Cadangkan Partisi)
 #   reboot into a mode  (system, recovery, fastbootd, power off)
 #
-# It does not unlock, erase, or flash. Loaders are files you already have.
+# It does not unlock, erase, or flash.
+# Default loaders are the release's ums9230 Infinix pair:
+#   fdl1-dl.bin at 0x65000800, fdl2-dl.bin at 0x9efffe00.
 set -u
 
 CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
 DUMP_DIR="${SPDHOST_DUMP_DIR:-$PWD/backup}"
+FDL1_ADDR_DEFAULT=0x65000800
+FDL2_ADDR_DEFAULT=0x9efffe00
 
 if command -v spdhost-usb >/dev/null 2>&1; then
 	RUNNER=(spdhost-usb)
@@ -54,6 +58,36 @@ load_config() {
 				;;
 		esac
 	done < "$CONFIG"
+}
+
+# Release layout is ums9230/infinix/{fdl1-dl.bin,fdl2-dl.bin}.
+# This repo keeps that pair under no-root/fdl/ums9230/infinix/.
+find_infinix_dir() {
+	local script_dir here d
+	script_dir=$(cd "$(dirname "$0")" && pwd)
+	here=$(pwd)
+	for d in \
+		"$script_dir/../fdl/ums9230/infinix" \
+		"$here/fdl/ums9230/infinix" \
+		"$here/ums9230/infinix" \
+		"$HOME/Spd_dump_termux/no-root/fdl/ums9230/infinix" \
+		"$HOME/spreadtrum_flash_termux/ums9230/infinix"
+	do
+		if [[ -f $d/fdl1-dl.bin && -f $d/fdl2-dl.bin ]]; then
+			(cd "$d" && pwd)
+			return 0
+		fi
+	done
+	return 1
+}
+
+apply_ums9230_infinix_defaults() {
+	local dir
+	[[ -n $FDL1_ADDR ]] || FDL1_ADDR=$FDL1_ADDR_DEFAULT
+	[[ -n $FDL2_ADDR ]] || FDL2_ADDR=$FDL2_ADDR_DEFAULT
+	dir=$(find_infinix_dir) || return 0
+	[[ -n $FDL1 ]] || FDL1=$dir/fdl1-dl.bin
+	[[ -n $FDL2 ]] || FDL2=$dir/fdl2-dl.bin
 }
 
 ask_addr() {
@@ -205,6 +239,7 @@ reboot_mode() {
 }
 
 load_config
+apply_ums9230_infinix_defaults
 
 while true; do
 	cls
