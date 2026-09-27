@@ -200,6 +200,18 @@ spdhost-usb /dev/bus/usb/001/002 -- \
   fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
+`scripts/menu.sh` is a two-item test menu over the same commands. It asks
+for your FDL1 and FDL2 once, saves them in `~/.spdhost-menu.conf`, then
+either dumps one partition into `./backup/` or reboots. Reboot choices are
+system (`reset`), recovery, fastbootd (both write the boot command at the
+start of `misc`, then `reset`), and power off. It does not unlock or flash
+a partition you did not name.
+
+```sh
+cp scripts/menu.sh "$PREFIX/bin/"
+menu.sh
+```
+
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
 directly. The command words after that are the same:
