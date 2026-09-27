@@ -347,6 +347,18 @@ like `brom: hello hello_to=3000 wall=20000 tries=15`. With defaults
 the wall; for ≥8 tries set `SPDHOST_BROM_WALL_MS=30000` (or similar). There
 is no auto-scaling of the wall.
 
+Optional sfd-aligned settle=0 probe (`sfd_tool` has no post-line-state
+settle). Keeps hello_to at 3000 via `--timeout 3000` / `SPDHOST_TIMEOUT`,
+raises the wall to 30s for denser tries, and skips the 100 ms settle. For
+even denser tries add `SPDHOST_BROM_PAUSE_MS=0` (optional):
+
+```bash
+cd ~/spdhost-arm32
+SPDHOST_BROM_SETTLE_MS=0 SPDHOST_BROM_WALL_MS=30000 \
+  SPDHOST_TIMEOUT=3000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
+  ./scripts/spdhost-usb --timeout 3000 --verbose ping
+```
+
 Follow-up list-parts smoke (Infinix UMS9230 + shipped FDL only; after ping
 success look for `version:SPRD3` or similar `version:` line):
 
