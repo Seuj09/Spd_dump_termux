@@ -64,13 +64,30 @@ cp scripts/spdhost-usb "$PREFIX/bin/"
 
 `$PREFIX` is already set by Termux. It is
 `/data/data/com.termux/files/usr`. The `cp` lines are what puts `spdhost`
-and `spdhost-usb` on `PATH`. Without them, `spdhost-usb` in the next section
-will not be found.
+and `spdhost-usb` on `PATH`. `cp` prints nothing when it works. Check:
+
+```sh
+command -v spdhost
+command -v spdhost-usb
+```
+
+Both must print a path under `/data/data/com.termux/files/usr/bin/`. If
+either prints nothing, run the two `cp` lines again from `no-root/`.
 
 `clang` is the compiler. `make` runs the Makefile. `pkg-config` and `libusb`
-are how the build finds the USB library. `termux-api` is the command-line
-bridge to the Termux:API app. None of these are `apt` packages. Termux's
-`apt` is `pkg`.
+are how the build finds the USB library. None of these are Debian `apt`
+packages. In Termux, `apt` and `pkg` are the same tool.
+
+`pkg install termux-api` does not install the Termux:API app. That package
+is only the `termux-usb` command. The app is a separate F-Droid install,
+and without it `termux-usb` cannot show the USB permission dialog or open
+the phone. Install both before the run section:
+
+- [Termux](https://f-droid.org/packages/com.termux/)
+- [Termux:API](https://f-droid.org/packages/com.termux.api/)
+
+They have to come from F-Droid, not the Play Store. The Play Store Termux
+build is old, and the app and the package must be signed by the same key.
 
 ### Linux PC
 
@@ -102,44 +119,96 @@ below.
 
 ## Run
 
-On a Linux PC that can open the device node (root, or a udev rule for
-`1782:4d00`):
+One line is one session. Every command on that line shares the USB
+connection, and the commands run from left to right. When the line exits,
+the connection is gone. A later `read-part` does not remember an earlier
+`fdl`. Put the loaders and the partition command on the same line.
 
-```sh
-./spdhost fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
-./spdhost read-part boot 0 64M boot.img
-```
+This repo does not ship loaders. You need the FDL1 file, the FDL2 file, and
+the load address for each, for that exact chip. Use the same pair the rooted
+menu uses for that model. `FDL1_ADDR` and `FDL2_ADDR` below are not real
+addresses. Replace them with the hex address from that package, including
+the `0x`. A wrong address can brick the phone.
 
-`FDL1_ADDR` and `FDL2_ADDR` are the load addresses for that chip. They are
-not universal. Take them from the same per-device FDL pair the rooted menu
-uses. This tool does not ship loaders. A wrong address is how phones get
-bricked. The loader download itself is sent in 528-byte chunks. `--step`
-changes partition reads and writes only.
+Run the command from the directory that contains the loader files, or pass
+full paths. Names like `fdl1.bin` only work when those files are in the
+current directory.
 
-On the phone, after the Termux build and the `cp` into `$PREFIX/bin`:
+The phone running Termux is the USB host. Use an OTG adapter that forces
+host mode. A plain USB-C cable often leaves this phone as the device, and
+then nothing appears. Power the target off. Type the command and press
+Enter, then hold the target's download-mode keys and plug it in. This phone
+shows a USB permission dialog. Allow it. The first dialog usually spends
+the few seconds the BootROM stays up. Unplug, run the same command again,
+and plug in as soon as you have pressed Enter. After the first allow, later
+runs usually skip the dialog.
+
+On Termux:
 
 ```sh
 spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
 ```
 
-`spdhost-usb` lists devices with `termux-usb -l` and asks for permission
-with `-r`. It does not put the spdhost arguments in the `termux-usb -e`
-string. Termux runs that string by word-splitting, not as a shell command,
-so a filename with a space would be split and shell quoting would not be
-honored. The wrapper writes a small script and passes that script's path.
-`-E` puts the descriptor in `TERMUX_USB_FD`. If more than one device is
-plugged in, pass the path:
+Read that line as five steps:
+
+1. `fdl fdl1.bin FDL1_ADDR` sends the first loader to BootROM and executes it.
+2. `fdl fdl2.bin FDL2_ADDR` sends the second loader to the first and executes it.
+3. `parts` prints the partition list from the second loader.
+
+`parts` prints one line per partition: `index name units`. `units` is
+whatever that loader reports. It is often a sector count, not a size in
+bytes.
+
+To dump a partition, add `read-part` on that same line. `NAME` is the name
+from `parts`. `OFFSET` is where to start inside the partition (`0` is the
+start). `SIZE` is how much to read. `OUT` is the file written on this phone.
 
 ```sh
-spdhost-usb /dev/bus/usb/001/002 -- read-part boot 0 64M boot.img
+spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
+  read-part boot 0 64M boot.img
 ```
 
-Grant the permission dialog once, unplug, then run the command and plug the
-target in while holding its download-mode keys. The BootROM window is a few
-seconds, and the first dialog usually consumes it.
+`64M` is 64 mebibytes. `K` and `G` work the same way. A bare number or a
+`0x` hex number is a byte count.
 
-The host phone must be the USB host (OTG). An adaptor that forces host mode
-is more reliable than a plain USB-C cable.
+`write-part NAME FILE` writes a file onto a partition. `erase-part NAME`
+erases one. Both stop and ask you to type `yes`. `--yes` skips that prompt.
+Do not put `--yes` in front of the device path. Options go before the
+commands:
+
+```sh
+spdhost-usb --yes fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
+  write-part boot new-boot.img
+```
+
+The loader download is sent in 528-byte chunks. `--step` changes partition
+reads and writes only, not the loader chunks. It is also an option, so it
+goes before `fdl`:
+
+```sh
+spdhost-usb --step 1024 fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
+  read-part boot 0 64M boot.img
+```
+
+If more than one USB device is plugged in, `spdhost-usb` stops and lists
+them. Copy one path from `termux-usb -l` and put it first. The `--` is
+required so the path is not read as an option:
+
+```sh
+termux-usb -l
+spdhost-usb /dev/bus/usb/001/002 -- \
+  fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
+```
+
+On a Linux PC that can open the device node (root, or a udev rule for
+vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
+directly. The command words after that are the same:
+
+```sh
+./spdhost fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
+./spdhost fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
+  read-part boot 0 64M boot.img
+```
 
 ## Command order
 
