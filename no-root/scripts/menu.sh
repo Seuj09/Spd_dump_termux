@@ -206,6 +206,7 @@ ready() {
 	echo "Only after it says 'Plug the target in NOW', hold volume down and connect the cable."
 	echo "Tap OK on the permission dialog as soon as it appears."
 	echo "The first try often misses the BootROM window. Unplug, run the same action, and plug in again."
+	echo "Cold-unplug ≥5 s between sessions. Success once does not make later tries stickier without a replug."
 	pause
 }
 

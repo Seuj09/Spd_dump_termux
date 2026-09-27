@@ -11,6 +11,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <libusb-1.0/libusb.h>
 
@@ -19,6 +20,22 @@ static void die_usb(const char *what, int err)
 	fprintf(stderr, "%s: %s\n", what, libusb_error_name(err));
 	exit(1);
 }
+
+static long long mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+/* A3/B1 soft breadcrumbs: SPDHOST_BROM_TRACE=1 (Allow→hello timing). */
+static int brom_trace_on(void)
+{
+	const char *e = getenv("SPDHOST_BROM_TRACE");
+	return e && e[0] && e[0] != '0';
+}
+
 
 static int claim_bulk(struct spd_usb *u)
 {
@@ -95,6 +112,8 @@ static int claim_bulk(struct spd_usb *u)
 		fprintf(stderr, "no bulk IN/OUT pair on the device\n");
 		return -1;
 	}
+	if (brom_trace_on())
+		fprintf(stderr, "brom: open/claim done @%lldms\n", mono_ms());
 	return 0;
 }
 
@@ -233,6 +252,8 @@ int spd_usb_line_state(struct spd_usb *u)
 		fprintf(stderr, "retry with --no-line-state if this device is not a phone BootROM\n");
 		return -1;
 	}
+	if (brom_trace_on())
+		fprintf(stderr, "brom: line-state done @%lldms\n", mono_ms());
 	return 0;
 }
 

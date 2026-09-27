@@ -452,21 +452,25 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 	int reacqs_done = 0;
 	long long t0 = 0;
 
-	/* BootROM hello (raw 1×0x7e): patient defaults + wall; tries arg ignored. */
+	/* BootROM hello (raw 1×0x7e): patient defaults + wall; tries arg ignored.
+	 * hello_to uses SPDHOST_BROM_TIMEOUT only (default 3000) — not max'd with
+	 * global --timeout / usb.timeout_ms (that still applies to CONNECT/bulk/loader).
+	 * Wall default 20000 ms: ~5–6 full tries at hello_to=3000+pause 500; for ≥8
+	 * tries set SPDHOST_BROM_WALL_MS≈30000 (no auto-scaling). */
 	if (brom) {
 		tries = env_int("SPDHOST_BROM_TRIES", 15, 1, 100);
 		pause = env_int("SPDHOST_BROM_PAUSE_MS", 500, 0, 5000);
-		{
-			int brom_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
-			hello_to = io->usb.timeout_ms > brom_to ? io->usb.timeout_ms : brom_to;
-		}
-		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 15000, 1000, 120000);
+		hello_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
+		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 20000, 1000, 120000);
 		brom_trace = io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1);
 		/* Default OFF: forced USB close/reopen mid-hello re-prompts termux-usb
 		 * Allow and often hits claim BUSY. Soft OUT TIMEOUT retries + wall stay
 		 * on the same FD. REACQ>0 = soft same-handle settle+retry only (no reopen). */
 		reacqs_max = env_int("SPDHOST_BROM_REACQ", 0, 0, 2);
 		t0 = mono_ms();
+		/* Always-on short start line (hello_to + wall + tries). */
+		fprintf(stderr, "brom: hello hello_to=%d wall=%d tries=%d\n",
+			hello_to, wall_ms, tries);
 		if (brom_trace)
 			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d wall=%d reacq=%d @%lldms\n",
 				tries, pause, hello_to, wall_ms, reacqs_max, t0);
