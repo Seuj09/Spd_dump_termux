@@ -191,6 +191,25 @@ write_misc_command() {
 	printf '%s\n' "$dest"
 }
 
+# Brick-adjacent: never pass --yes for misc. Require a TTY + typed confirm.
+confirm_misc_write() {
+	local kind=$1 misc=$2 digest reply
+	if [[ ! -t 0 ]]; then
+		echo "refusing to write misc without a TTY (no silent --yes)" >&2
+		return 1
+	fi
+	digest=$(sha256sum "$misc" | awk '{print $1}')
+	echo "About to write 2048 bytes to partition 'misc' ($kind), then reset."
+	echo "misc image sha256: $digest"
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
+	read -r -p "type yes to write misc: " reply
+	if [[ $reply != yes ]]; then
+		echo "not confirmed"
+		return 1
+	fi
+	return 0
+}
+
 reboot_mode() {
 	local choice misc
 	need_loaders || return
@@ -210,16 +229,27 @@ reboot_mode() {
 		2)
 			misc=$(write_misc_command recovery)
 			echo "Writes 2048 bytes at the start of misc, then reset."
+			if ! confirm_misc_write recovery "$misc"; then
+				rm -f "$misc"
+				pause
+				return
+			fi
 			ready
-			run_session --yes fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			# No --yes: spdhost will also prompt on its TTY confirm path.
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 				write-part misc "$misc" reset || true
 			rm -f "$misc"
 			;;
 		3)
 			misc=$(write_misc_command fastboot)
 			echo "Writes the fastbootd boot command at the start of misc, then reset."
+			if ! confirm_misc_write fastbootd "$misc"; then
+				rm -f "$misc"
+				pause
+				return
+			fi
 			ready
-			run_session --yes fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 				write-part misc "$misc" reset || true
 			rm -f "$misc"
 			;;
