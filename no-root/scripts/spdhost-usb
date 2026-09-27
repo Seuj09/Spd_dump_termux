@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# Hand one OTG device to spdhost without root.
-#
-# termux-callback runs `$TERMUX_CALLBACK` with the variable unquoted, so the
-# -e string is word-split and is not a shell command line. Passing
-# `spdhost fdl file.bin 0x5500` would break on spaces and on %q quoting.
-# Write a one-shot script and give termux-usb that path. -E puts the
-# usbfs descriptor in TERMUX_USB_FD, which spdhost reads itself.
-#
-#   spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR parts
-#   spdhost-usb /dev/bus/usb/001/002 -- read-part boot 0 64M boot.img
+# Wait for one OTG device, then run spdhost with that file descriptor.
+# Usage: spdhost-usb [fdl ...]
+#        spdhost-usb /dev/bus/usb/N/M -- [fdl ...]
 set -euo pipefail
 
 if ! command -v termux-usb >/dev/null 2>&1; then
@@ -71,10 +64,19 @@ if [[ $# -eq 0 ]]; then
 fi
 
 run=$(mktemp "${TMPDIR:-/tmp}/spdhost-run.XXXXXX")
+# Termux:API executes this file itself, without Termux's /bin/bash shim.
+# The shebang has to be the real bash path.
+bash_bin=$(command -v bash)
 {
-	printf '#!/bin/bash\nexec '
-	printf '%q ' "$bin" "$@"
+	printf '#!%s\n' "$bash_bin"
+	printf 'exec'
+	printf ' %q' "$bin" "$@"
 	printf '\n'
 } > "$run"
 chmod +x "$run"
+if ! "$bash_bin" -n "$run"; then
+	echo "generated launcher failed a syntax check:" >&2
+	cat "$run" >&2
+	exit 1
+fi
 exec termux-usb -r -E -e "$run" "$dev"

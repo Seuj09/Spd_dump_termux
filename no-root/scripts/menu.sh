@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Test menu for spdhost. Two actions, same shape as the release menu:
-#   dump one partition  (the release menu's "r" / Cadangkan Partisi)
-#   reboot into a mode  (system, recovery, fastbootd, power off)
-#
-# It does not unlock, erase, or flash.
-# Default loaders are the release's ums9230 Infinix pair:
-#   fdl1-dl.bin at 0x65000800, fdl2-dl.bin at 0x9efffe00.
+# Test menu: dump one partition, or reboot into a mode.
+# Default loaders: ums9230 Infinix fdl1-dl.bin and fdl2-dl.bin.
 set -u
 
 CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
