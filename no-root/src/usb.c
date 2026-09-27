@@ -247,6 +247,8 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 			u->gone = 1;
 			return -1;
 		}
+		/* TIMEOUT (and other non-disconnect errors): -2, gone unset.
+		 * BootROM hello may soft-retry TIMEOUT; other callers treat <0 as fail. */
 		return -2;
 	}
 	if (sent != len) {

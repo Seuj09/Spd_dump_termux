@@ -210,8 +210,12 @@ ready() {
 }
 
 run_session() {
-	echo "+ ${RUNNER[*]} $*"
-	"${RUNNER[@]}" "$@"
+	local -a prefix=(--timeout "${SPDHOST_TIMEOUT:-3000}")
+	if [[ ${SPDHOST_VERBOSE:-} == 1 ]]; then
+		prefix+=(--verbose)
+	fi
+	echo "+ ${RUNNER[*]} ${prefix[*]} $*"
+	"${RUNNER[@]}" "${prefix[@]}" "$@"
 	local rc=$?
 	echo "exit $rc"
 	return "$rc"

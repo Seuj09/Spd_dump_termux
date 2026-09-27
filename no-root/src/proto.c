@@ -55,6 +55,35 @@ static void pause_ms(int ms)
 	nanosleep(&ts, NULL);
 }
 
+/* Parse env ints; clamp to [lo, hi]. Junk/missing → def. */
+static int env_int(const char *name, int def, int lo, int hi)
+{
+	const char *s;
+	char *end = NULL;
+	long v;
+
+	s = getenv(name);
+	if (!s || !*s)
+		return def;
+	errno = 0;
+	v = strtol(s, &end, 10);
+	if (errno || end == s || (end && *end))
+		return def;
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return (int)v;
+}
+
+static long long mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
 static void wr16be(uint8_t *p, unsigned v)
 {
 	p[0] = (uint8_t)(v >> 8);
@@ -214,12 +243,15 @@ void spd_encode(struct spd *io, unsigned type, const void *data, size_t len)
 
 int spd_send(struct spd *io)
 {
+	int rc;
+
 	if (io->enc_len <= 0)
 		die("empty message");
 	if (io->verbose)
 		fprintf(stderr, "send %d bytes\n", io->enc_len);
-	if (spd_usb_bulk_send(&io->usb, io->enc, io->enc_len) < 0)
-		return -1;
+	rc = spd_usb_bulk_send(&io->usb, io->enc, io->enc_len);
+	if (rc < 0)
+		return rc; /* -1 gone/disconnect; -2 TIMEOUT / other */
 	return io->enc_len;
 }
 
@@ -364,6 +396,38 @@ int spd_check_ok(struct spd *io)
 	return 0;
 }
 
+/* Settle (and optional short IN drain) after BootROM line-state. */
+void spd_brom_after_line_state(struct spd *io)
+{
+	int settle;
+	int drain;
+	int i;
+
+	if (!io)
+		return;
+	settle = env_int("SPDHOST_BROM_SETTLE_MS", 100, 0, 2000);
+	if (settle > 0) {
+		if (io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1))
+			fprintf(stderr, "brom: settle %d ms\n", settle);
+		pause_ms(settle);
+	}
+	drain = env_int("SPDHOST_BROM_DRAIN", 0, 0, 1);
+	if (!drain)
+		return;
+	for (i = 0; i < 3; i++) {
+		uint8_t junk[64];
+		int got = spd_usb_bulk_recv(&io->usb, junk, (int)sizeof(junk), 80);
+		if (got == 0)
+			continue; /* TIMEOUT — ignore */
+		if (got < 0) {
+			fprintf(stderr, "brom: drain abort (recv error)\n");
+			return;
+		}
+		if (io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1))
+			fprintf(stderr, "brom: drain got %d bytes\n", got);
+	}
+}
+
 static int reopen_if_gone(struct spd *io)
 {
 	if (!io->usb.gone)
@@ -379,17 +443,96 @@ static int reopen_if_gone(struct spd *io)
 int spd_check_baud(struct spd *io, int nbytes, int tries)
 {
 	int i;
+	int brom = (nbytes == 1);
+	int pause;
+	int hello_to;
+	int wall_ms;
+	int brom_trace;
+	int reacqs_max = 0;
+	int reacqs_done = 0;
+	long long t0 = 0;
+
+	/* BootROM hello (raw 1×0x7e): patient defaults + wall; tries arg ignored. */
+	if (brom) {
+		tries = env_int("SPDHOST_BROM_TRIES", 15, 1, 100);
+		pause = env_int("SPDHOST_BROM_PAUSE_MS", 500, 0, 5000);
+		{
+			int brom_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
+			hello_to = io->usb.timeout_ms > brom_to ? io->usb.timeout_ms : brom_to;
+		}
+		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 15000, 1000, 120000);
+		brom_trace = io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1);
+		/* Default ON: one USB reacquire after hello budget fails (0=off, max 2). */
+		reacqs_max = env_int("SPDHOST_BROM_REACQ", 1, 0, 2);
+		t0 = mono_ms();
+		if (brom_trace)
+			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d wall=%d reacq=%d @%lldms\n",
+				tries, pause, hello_to, wall_ms, reacqs_max, t0);
+	} else {
+		pause = 200;
+		hello_to = io->usb.timeout_ms;
+		wall_ms = 0;
+		brom_trace = 0;
+	}
+
+reacq_restart:
 	for (i = 0; i < tries; i++) {
 		int n;
+		int rc;
+		int saved_to;
+		long long now;
+
+		if (brom) {
+			now = mono_ms();
+			if (now - t0 >= wall_ms) {
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+					wall_ms, i);
+				break;
+			}
+			if (brom_trace)
+				fprintf(stderr, "brom: try %d start @%lldms\n", i + 1, now - t0);
+		}
 		if (i)
-			pause_ms(200);
+			pause_ms(pause);
+		if (brom) {
+			now = mono_ms();
+			if (now - t0 >= wall_ms) {
+				fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+					wall_ms, i);
+				break;
+			}
+		}
 		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
-		if (spd_send(io) < 0) {
+		/* Hello-only timeout for send; do not leave global usb.timeout_ms raised. */
+		saved_to = io->usb.timeout_ms;
+		io->usb.timeout_ms = hello_to;
+		rc = spd_send(io);
+		io->usb.timeout_ms = saved_to;
+		if (brom && brom_trace)
+			fprintf(stderr, "brom: try %d send rc=%d @%lldms\n",
+				i + 1, rc, mono_ms() - t0);
+		if (rc < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
+			/* BootROM only: send TIMEOUT (-2, gone unset) is a soft fail. */
+			if (brom && rc == -2 && !io->usb.gone) {
+				fprintf(stderr, "brom: send TIMEOUT (soft retry)\n");
+				continue;
+			}
 			return -1;
 		}
-		n = spd_recv(io, io->usb.timeout_ms);
+		n = spd_recv(io, hello_to);
+		if (brom && brom_trace) {
+			if (n == 0)
+				fprintf(stderr, "brom: try %d recv timeout @%lldms\n",
+					i + 1, mono_ms() - t0);
+			else if (n < 0)
+				fprintf(stderr, "brom: try %d recv disconnect/err @%lldms\n",
+					i + 1, mono_ms() - t0);
+			else
+				fprintf(stderr, "brom: try %d recv n=%d @%lldms\n",
+					i + 1, n, mono_ms() - t0);
+		}
 		if (n < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
@@ -397,6 +540,14 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 		}
 		if (n == 0) {
 			fprintf(stderr, "check baud %d: timeout\n", i + 1);
+			if (brom) {
+				now = mono_ms();
+				if (now - t0 >= wall_ms) {
+					fprintf(stderr, "check baud: wall %d ms exceeded after %d tries\n",
+						wall_ms, i + 1);
+					break;
+				}
+			}
 			continue;
 		}
 		if (spd_type(io) != BSL_REP_VER) {
@@ -404,11 +555,30 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 			continue;
 		}
 		{
-			unsigned n = 0;
-			const uint8_t *p = spd_payload(io, &n);
-			fprintf(stderr, "version: %.*s\n", (int)n, (const char *)p);
+			unsigned plen = 0;
+			const uint8_t *payload = spd_payload(io, &plen);
+			fprintf(stderr, "version: %.*s\n", (int)plen, (const char *)payload);
 		}
 		return 0;
+	}
+
+	/* A2: after try/wall fail with no VER, optional BootROM USB reacquire. */
+	if (brom && reacqs_done < reacqs_max) {
+		long long remaining = wall_ms - (mono_ms() - t0);
+		if (remaining > 1000) {
+			fprintf(stderr, "brom: hello timeout; reacquiring USB\n");
+			io->usb.gone = 1;
+			if (reopen_if_gone(io) != 0)
+				return -1;
+			if (spd_usb_line_state(&io->usb))
+				return -1;
+			spd_brom_after_line_state(io);
+			reacqs_done++;
+			if (brom_trace)
+				fprintf(stderr, "brom: reacq %d done; restarting check-baud (@%lldms remaining ~%lld)\n",
+					reacqs_done, mono_ms() - t0, remaining);
+			goto reacq_restart;
+		}
 	}
 	return -1;
 }
