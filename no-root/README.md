@@ -349,7 +349,34 @@ settle remains **100** ms unless that env is set. Arms do not change
 Wrapper knobs that shrink Allow→spawn latency (hello framing unchanged):
 `SPD_USB_ATTACHED_GRACE` (default **0**; was 3s), optional
 `SPD_USB_SKIP_REQUEST=1` to omit `-r` on warm already-authorized runs
-(default keeps `-r`).
+(default keeps `-r`). Correlate wrapper `usb:` millis with
+`SPDHOST_BROM_TRACE=1` (`brom: open/claim` → `brom: try 1`) to measure
+list→Allow→spawn→try1.
+
+#### Warm Allow / pre-grant recipe
+
+First session: normal grant (default keeps `-r`). After Android has
+authorized this host↔device pairing at least once, cold-unplug ≥5 s, then
+skip the redundant `-r` to shrink Allow→spawn:
+
+```bash
+cd ~/spdhost-arm32   # or spdhost-arm64 / unzipped package root that contains ./spdhost + scripts/
+
+# First session: normal grant (default keeps -r)
+SPDHOST_BROM_TRACE=1 ./scripts/spdhost-usb --timeout 5000 --verbose ping
+
+# After Android has authorized this host↔device pairing at least once:
+# cold-unplug ≥5s, then skip redundant -r to shrink Allow→spawn:
+SPD_USB_SKIP_REQUEST=1 SPDHOST_BROM_TRACE=1 \
+  ./scripts/spdhost-usb --timeout 5000 --verbose ping
+```
+
+**Warn:** if the grant was never given, `SPD_USB_SKIP_REQUEST=1` will fail
+open (permission denied / never started). Keep the default `-r` for a cold
+first plug. Do not export `SPD_USB_SKIP_REQUEST=1` as a global default in
+menus; use it only on the warm path after a successful Allow.
+
+Baseline cold ping (same as above first session, with explicit timeout env):
 
 ```bash
 cd ~/spdhost-arm32   # or spdhost-arm64 / unzipped package root that contains ./spdhost + scripts/
@@ -437,11 +464,35 @@ are already talking to a loader that understands them.
 
 If execute makes the phone drop off the bus, spdhost closes the dead
 handle and reopens. On Termux that means calling `termux-usb` again and
-receiving the new descriptor over a socket. On the desktop it scans for
-vendor `1782` and accepts any product id, logging the new PID. The vendor
-must stay `1782`. The product id may change after a loader starts. A
-reset during `read-part` or `write-part` aborts that command instead of
+receiving the new descriptor over a socket (`grab_termux` /
+`spd_usb_reacquire` in `src/usb.c`). On the desktop it scans for vendor
+`1782` and accepts any product id, logging the new PID. The vendor must
+stay `1782`. The product id may change after a loader starts. A reset
+during `read-part` or `write-part` aborts that command instead of
 resending the chunk.
+
+#### Post-FDL reconnect SM (P4 — deferred this release)
+
+**Not landed / not hardened in this tip.** Full post-bus-leave
+re-`termux-usb` reconnect state machine is held until the BootROM→FDL1
+gate is green (plan P4). Existing reopen helpers remain for loader-stage
+drop-offs; they are **not** a mid-BootROM hello reopen (REACQ default
+stays **0**; never close+reopen mid-`check-baud`).
+
+Intended SM (docs-only stub; do not expect this release to implement it):
+
+1. On `gone` / post-EXEC bus leave → close the dead handle.
+2. Wait for a **unique** Spreadtrum node (`vendor 1782`, prefer product
+   `4d00` when several appear during renumeration).
+3. Re-run `termux-usb` (fresh Allow / FD) and wrap the new descriptor.
+4. **Refuse** multi-device auto-pick — require an explicit
+   `/dev/bus/usb/N/M` (or a single remaining node).
+5. **Never** mid-hello: do not reopen while BootROM `check-baud` tries
+   are in flight on the same session.
+
+Until P4 ships, treat post-EXEC reconnect failures as expected on short
+BootROM windows; re-prove hello with menu `1`/`2` (or warm
+`SPD_USB_SKIP_REQUEST=1`) before retrying FDL smoke.
 
 `parts` prints `index name units`. The unit is whatever that loader reports
 (often a sector count, not a byte size).
