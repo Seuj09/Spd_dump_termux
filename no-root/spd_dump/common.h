@@ -198,6 +198,7 @@ void startUsbEventHandle(void);
 void stopUsbEventHandle(void);
 void find_endpoints(libusb_device_handle *dev_handle, int result[2]);
 void call_Initialize_libusb(spdio_t *io);
+void spd_usb_release(void);
 #else
 DWORD *FindPort(const char *USB_DL);
 #endif
