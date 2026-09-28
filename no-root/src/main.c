@@ -268,8 +268,8 @@ int main(int argc, char **argv)
 			long v;
 			errno = 0;
 			v = strtol(optarg, &end, 10);
-			if (end == optarg || *end || errno || v < 0) {
-				fprintf(stderr, "bad --usb-fd: %s\n", optarg);
+			if (end == optarg || *end || errno || v < 3 || v > 0x7fffffff) {
+				fprintf(stderr, "bad --usb-fd: %s (need open FD >= 3)\n", optarg);
 				return 2;
 			}
 			fd = (int)v;
@@ -328,8 +328,8 @@ int main(int argc, char **argv)
 		long v;
 		errno = 0;
 		v = strtol(envfd, &end, 10);
-		if (end == envfd || *end || errno || v < 0) {
-			fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s\n", envfd);
+		if (end == envfd || *end || errno || v < 3 || v > 0x7fffffff) {
+			fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s (need open FD >= 3)\n", envfd);
 			return 2;
 		}
 		fd = (int)v;

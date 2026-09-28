@@ -14,6 +14,7 @@ struct spd_usb {
 	int fd_mode;       /* opened from an existing descriptor, not by scanning */
 	int reacquire;     /* try to grab the device again after a reset */
 	int reac_left;
+	int claimed_iface; /* bulk iface claimed; -1 if none (Termux release) */
 	unsigned vid;
 	unsigned pid;
 	char self_path[512];
