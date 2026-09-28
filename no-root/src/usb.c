@@ -371,14 +371,16 @@ int spd_usb_emit_fd(const char *sock_path)
 	int sock;
 
 	env = getenv("TERMUX_USB_FD");
+	if ((!env || !env[0]) && (env = getenv("SPD_USB_FD")) && env[0])
+		; /* SPD_USB_FD aliases TERMUX_USB_FD */
 	if (!env || !env[0]) {
-		fprintf(stderr, "SPDHOST_EMIT_SOCK set but TERMUX_USB_FD is missing\n");
+		fprintf(stderr, "SPDHOST_EMIT_SOCK set but TERMUX_USB_FD/SPD_USB_FD is missing\n");
 		return 1;
 	}
 	errno = 0;
 	fd = strtol(env, &end, 10);
 	if (end == env || *end || fd < 0 || errno) {
-		fprintf(stderr, "bad TERMUX_USB_FD: %s\n", env);
+		fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s\n", env);
 		return 1;
 	}
 	sock = socket(AF_UNIX, SOCK_STREAM, 0);
