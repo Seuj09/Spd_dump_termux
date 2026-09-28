@@ -9,6 +9,7 @@ struct spd_usb {
 	int ep_in;
 	int ep_out;
 	int out_mps;
+	int in_mps;
 	int timeout_ms;
 	int gone;          /* last transfer saw a disconnect */
 	int fd_mode;       /* opened from an existing descriptor, not by scanning */

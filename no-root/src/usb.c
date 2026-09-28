@@ -57,6 +57,60 @@ static int brom_trace_on(void)
 }
 
 
+/* EXPERIMENT (item 3): one-line device summary for BootROM debugging.
+ * Only printed with SPDHOST_BROM_TRACE=1 or --verbose-style trace. */
+static const char *speed_name(int sp)
+{
+	switch (sp) {
+	case LIBUSB_SPEED_LOW: return "low";
+	case LIBUSB_SPEED_FULL: return "full";
+	case LIBUSB_SPEED_HIGH: return "high";
+	case LIBUSB_SPEED_SUPER: return "super";
+	case LIBUSB_SPEED_SUPER_PLUS: return "super+";
+	default: return "unknown";
+	}
+}
+
+static void trace_device(struct spd_usb *u)
+{
+	libusb_device *dev = libusb_get_device(u->handle);
+	struct libusb_device_descriptor d;
+	int cfg = -1;
+
+	if (libusb_get_device_descriptor(dev, &d) < 0)
+		return;
+	(void)libusb_get_configuration(u->handle, &cfg);
+	fprintf(stderr,
+		"brom: dev speed=%s bcdUSB=%x.%02x class=%02x cfg=%d iface=%d "
+		"ep_out=0x%02x(mps %d) ep_in=0x%02x(mps %d) ep0_mps=%d\n",
+		speed_name(libusb_get_device_speed(dev)),
+		(unsigned)(d.bcdUSB >> 8), (unsigned)(d.bcdUSB & 0xff),
+		d.bDeviceClass, cfg, u->claimed_iface,
+		u->ep_out, u->out_mps, u->ep_in, u->in_mps, d.bMaxPacketSize0);
+}
+
+/* EXPERIMENT (item 1): CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints.
+ * Also resets the data toggle on both sides, which rules out a toggle
+ * mismatch after an earlier cancelled transfer. Errors are not fatal (some
+ * BootROMs stall the request); they are only shown with the trace.
+ * Disable for A/B testing with SPDHOST_NO_CLEAR_HALT=1. */
+static void clear_halts(struct spd_usb *u)
+{
+	const char *off = getenv("SPDHOST_NO_CLEAR_HALT");
+	int eo, ei;
+
+	if (off && off[0] && off[0] != '0') {
+		if (brom_trace_on())
+			fprintf(stderr, "brom: clear_halt skipped (SPDHOST_NO_CLEAR_HALT)\n");
+		return;
+	}
+	eo = libusb_clear_halt(u->handle, (unsigned char)u->ep_out);
+	ei = libusb_clear_halt(u->handle, (unsigned char)u->ep_in);
+	if (brom_trace_on())
+		fprintf(stderr, "brom: clear_halt out=%s in=%s @%lldms\n",
+			libusb_error_name(eo), libusb_error_name(ei), mono_ms());
+}
+
 static int claim_bulk(struct spd_usb *u)
 {
 	libusb_device_handle *h = u->handle;
@@ -72,7 +126,7 @@ static int claim_bulk(struct spd_usb *u)
 	for (k = 0; k < cfg->bNumInterfaces && !found; k++) {
 		const struct libusb_interface *iface = cfg->interface + k;
 		const struct libusb_interface_descriptor *alt;
-		int in = -1, out = -1, mps = 0, num;
+		int in = -1, out = -1, mps = 0, inmps = 0, num;
 
 		if (iface->num_altsetting < 1)
 			continue;
@@ -91,6 +145,7 @@ static int claim_bulk(struct spd_usb *u)
 					return -1;
 				}
 				in = ep->bEndpointAddress;
+				inmps = pkt;
 			} else {
 				if (out >= 0) {
 					fprintf(stderr, "more than one bulk OUT\n");
@@ -129,6 +184,7 @@ static int claim_bulk(struct spd_usb *u)
 		u->ep_in = in;
 		u->ep_out = out;
 		u->out_mps = mps;
+		u->in_mps = inmps;
 		u->claimed_iface = num;
 		found = 1;
 	}
@@ -137,8 +193,10 @@ static int claim_bulk(struct spd_usb *u)
 		fprintf(stderr, "no bulk IN/OUT pair on the device\n");
 		return -1;
 	}
-	if (brom_trace_on())
+	if (brom_trace_on()) {
+		trace_device(u);
 		fprintf(stderr, "brom: open/claim done @%lldms\n", mono_ms());
+	}
 	return 0;
 }
 
@@ -183,6 +241,7 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 		u->handle = NULL;
 		return -1;
 	}
+	clear_halts(u);
 	return 0;
 }
 
@@ -333,8 +392,16 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 {
 	int got = 0;
 	int err = libusb_bulk_transfer(u->handle, u->ep_in, buf, cap, &got, timeout_ms);
-	if (err == LIBUSB_ERROR_TIMEOUT)
+	if (err == LIBUSB_ERROR_TIMEOUT) {
+		/* EXPERIMENT (item 2): libusb may report TIMEOUT together with bytes
+		 * that arrived before the cancel. Keep them instead of dropping. */
+		if (got > 0) {
+			if (brom_trace_on())
+				fprintf(stderr, "brom: recv TIMEOUT but %d bytes arrived; keeping\n", got);
+			return got;
+		}
 		return 0;
+	}
 	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
 		u->gone = 1;
 		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));
