@@ -56,12 +56,27 @@ static int brom_trace_on(void)
 	return e && e[0] && e[0] != '0';
 }
 
+/* exp/brom-hello-diag: human-readable libusb device speed for SPDHOST_BROM_TRACE. */
+static const char *brom_speed_name(int speed)
+{
+	switch (speed) {
+	case LIBUSB_SPEED_LOW: return "low";
+	case LIBUSB_SPEED_FULL: return "full";
+	case LIBUSB_SPEED_HIGH: return "high";
+	case LIBUSB_SPEED_SUPER: return "super";
+#ifdef LIBUSB_SPEED_SUPER_PLUS
+	case LIBUSB_SPEED_SUPER_PLUS: return "super+";
+#endif
+	default: return "unknown";
+	}
+}
 
 static int claim_bulk(struct spd_usb *u)
 {
 	libusb_device_handle *h = u->handle;
 	struct libusb_config_descriptor *cfg = NULL;
 	int i, k, err, found = 0;
+	int claimed_in_mps = 0; /* exp/brom-hello-diag: for BROM_TRACE */
 
 	err = libusb_get_config_descriptor(libusb_get_device(h), 0, &cfg);
 	if (err < 0) {
@@ -72,7 +87,7 @@ static int claim_bulk(struct spd_usb *u)
 	for (k = 0; k < cfg->bNumInterfaces && !found; k++) {
 		const struct libusb_interface *iface = cfg->interface + k;
 		const struct libusb_interface_descriptor *alt;
-		int in = -1, out = -1, mps = 0, num;
+		int in = -1, out = -1, mps = 0, in_mps = 0, num;
 
 		if (iface->num_altsetting < 1)
 			continue;
@@ -91,6 +106,7 @@ static int claim_bulk(struct spd_usb *u)
 					return -1;
 				}
 				in = ep->bEndpointAddress;
+				in_mps = pkt;
 			} else {
 				if (out >= 0) {
 					fprintf(stderr, "more than one bulk OUT\n");
@@ -130,6 +146,7 @@ static int claim_bulk(struct spd_usb *u)
 		u->ep_out = out;
 		u->out_mps = mps;
 		u->claimed_iface = num;
+		claimed_in_mps = in_mps;
 		found = 1;
 	}
 	libusb_free_config_descriptor(cfg);
@@ -137,8 +154,16 @@ static int claim_bulk(struct spd_usb *u)
 		fprintf(stderr, "no bulk IN/OUT pair on the device\n");
 		return -1;
 	}
-	if (brom_trace_on())
-		fprintf(stderr, "brom: open/claim done @%lldms\n", mono_ms());
+	if (brom_trace_on()) {
+		/* exp/brom-hello-diag: device speed + EP addresses + wMaxPacketSize. */
+		int speed = libusb_get_device_speed(libusb_get_device(h));
+		fprintf(stderr,
+			"brom: open/claim done @%lldms speed=%s "
+			"ep_in=0x%02x (wMaxPacketSize=%d) "
+			"ep_out=0x%02x (wMaxPacketSize=%d)\n",
+			mono_ms(), brom_speed_name(speed),
+			u->ep_in, claimed_in_mps, u->ep_out, u->out_mps);
+	}
 	return 0;
 }
 
@@ -299,6 +324,31 @@ int spd_usb_line_state(struct spd_usb *u)
 	return 0;
 }
 
+/* exp/brom-hello-diag ONLY: clear_halt on bulk IN+OUT after claim/line-state,
+ * before BootROM hello. Product main keeps clear_halt as a NO-GO; this branch
+ * allows it for diagnostics. Failures are logged, never fatal. */
+void spd_usb_clear_halts(struct spd_usb *u)
+{
+	int err_in, err_out;
+
+	if (!u || !u->handle)
+		return;
+	err_in = libusb_clear_halt(u->handle, (unsigned char)u->ep_in);
+	err_out = libusb_clear_halt(u->handle, (unsigned char)u->ep_out);
+	if (brom_trace_on()) {
+		fprintf(stderr, "brom: clear_halt IN 0x%02x: %s\n",
+			u->ep_in & 0xff,
+			err_in == 0 ? "ok" : libusb_error_name(err_in));
+		fprintf(stderr, "brom: clear_halt OUT 0x%02x: %s\n",
+			u->ep_out & 0xff,
+			err_out == 0 ? "ok" : libusb_error_name(err_out));
+	} else if (err_in < 0 || err_out < 0) {
+		fprintf(stderr, "brom: clear_halt IN=%s OUT=%s\n",
+			err_in == 0 ? "ok" : libusb_error_name(err_in),
+			err_out == 0 ? "ok" : libusb_error_name(err_out));
+	}
+}
+
 int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 {
 	int sent = 0;
@@ -333,8 +383,18 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 {
 	int got = 0;
 	int err = libusb_bulk_transfer(u->handle, u->ep_in, buf, cap, &got, timeout_ms);
-	if (err == LIBUSB_ERROR_TIMEOUT)
+	/* exp/brom-hello-diag: libusb may return TIMEOUT with a non-zero
+	 * transferred length. Keep those bytes for hello/check-baud — do not
+	 * discard the partial payload. */
+	if (err == LIBUSB_ERROR_TIMEOUT) {
+		if (got > 0) {
+			if (brom_trace_on())
+				fprintf(stderr,
+					"brom: bulk IN TIMEOUT with %d bytes kept\n", got);
+			return got;
+		}
 		return 0;
+	}
 	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
 		u->gone = 1;
 		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));

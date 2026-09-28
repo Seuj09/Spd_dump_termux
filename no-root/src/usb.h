@@ -40,8 +40,12 @@ int spd_usb_reacquire(struct spd_usb *u);
  * is the CDC control interface, not necessarily the bulk interface. */
 int spd_usb_line_state(struct spd_usb *u);
 
+/* exp/brom-hello-diag: libusb_clear_halt on bulk IN+OUT before BootROM hello. */
+void spd_usb_clear_halts(struct spd_usb *u);
+
 int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len);
-/* >0 byte count, 0 timeout, -1 disconnect (u->gone set), -2 other error. */
+/* >0 byte count (incl. TIMEOUT with partial), 0 empty timeout,
+ * -1 disconnect (u->gone set), -2 other error. */
 int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms);
 
 #endif
