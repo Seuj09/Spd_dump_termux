@@ -1,5 +1,10 @@
 # spdhost
 
+> **Also available:** full TomKing `spd_dump` for Termux under
+> [`spd_dump/`](spd_dump/) ([TERMUX.md](spd_dump/TERMUX.md)). Prebuilt arm32:
+> release [`spd_dump-termux`](https://github.com/Seuj09/Spd_dump_termux/releases/tag/spd_dump-termux).
+
+
 A small Unisoc download-mode client. One process, one USB device, no GUI.
 It talks to a phone in BootROM or FDL over libusb bulk transfers.
 
