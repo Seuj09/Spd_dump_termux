@@ -9,7 +9,7 @@ SRCS = src/main.c src/usb.c src/proto.c
 BIN = spdhost
 ARCH := $(shell uname -m)
 
-.PHONY: all clean
+.PHONY: all clean cross-arm32
 all: $(BIN)
 
 $(BIN): $(SRCS) src/usb.h src/proto.h
@@ -18,3 +18,8 @@ $(BIN): $(SRCS) src/usb.h src/proto.h
 
 clean:
 	rm -f $(BIN)
+
+# Static 32-bit ARM build of spdhost + spd_dump from a PC (no phone, no NDK).
+# See scripts/cross-arm32.sh for requirements. Output: dist/arm32/
+cross-arm32:
+	scripts/cross-arm32.sh

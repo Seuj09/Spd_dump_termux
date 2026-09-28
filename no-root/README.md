@@ -127,6 +127,25 @@ built on a 64-bit phone, or on a PC, will not start on a 32-bit phone.
 Build it again on the host phone. The release zip's `spd_dump` is arm64
 only. This tree replaces that for a 32-bit host.
 
+### Cross-compiling for a 32-bit phone (optional)
+
+To build 32-bit ARM binaries on a PC instead of on the phone:
+
+```sh
+pip install ziglang            # C compiler with bundled musl, no Android NDK
+sudo apt install git make autoconf automake libtool qemu-user
+make cross-arm32               # or scripts/cross-arm32.sh
+```
+
+Output goes to `dist/arm32/`: static `spdhost` and `spd_dump` (ARMv7-A,
+Thumb-2, VFPv3-D16, no NEON, no libc or libusb needed on the phone), a
+ready-to-unzip `spdhost-arm32-static-<sha>.zip` with scripts and FDLs, and
+`SHA256SUMS`. The script builds libusb 1.0.27 statically with `-D__ANDROID__`;
+that define is required, otherwise `libusb_init` cannot find usbfs on a phone
+and fails with `LIBUSB_ERROR_OTHER`. The build machine only runs emulated
+smoke tests (`--self-test`, argument and descriptor error paths); nothing here
+opens a USB device. Test the result on the phone before publishing it.
+
 `./spdhost --self-test` prints `self-test ok` when the compile and the
 framing check worked. That check does not open USB and does not need a phone.
 
