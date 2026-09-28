@@ -334,7 +334,22 @@ spdhost-usb --timeout 5000 --verbose ping
 
 ### BootROM hello debug
 
-Stay in the package root so `scripts/spdhost-usb` finds `./spdhost`:
+Stay in the package root so `scripts/spdhost-usb` finds `./spdhost`. Set
+`SPDHOST_BROM_TRACE=1` so claim→try breadcrumbs print (`brom: open/claim`,
+`brom: line-state done`, `brom: try N`). The host wrapper also prints
+always-on thin USB timing lines (no env needed): `usb: listed $dev @Xms`,
+`usb: termux-usb -e start @Yms`, `usb: child start fd=N @Zms`.
+
+A/B smoke menu: `./scripts/spdhost-ab-menu.sh` (or the release
+`spdhost-ab-menu.sh`). Arm **2** (`SPDHOST_BROM_SETTLE_MS=0`) is a
+reasonable first smoke when racing a short BootROM window; the default
+settle remains **100** ms unless that env is set. Arms do not change
+`SPDHOST_BROM_REACQ` (stays **0**); only arm **6** enables REACQ once.
+
+Wrapper knobs that shrink Allow→spawn latency (hello framing unchanged):
+`SPD_USB_ATTACHED_GRACE` (default **0**; was 3s), optional
+`SPD_USB_SKIP_REQUEST=1` to omit `-r` on warm already-authorized runs
+(default keeps `-r`).
 
 ```bash
 cd ~/spdhost-arm32   # or spdhost-arm64 / unzipped package root that contains ./spdhost + scripts/
@@ -353,9 +368,10 @@ the wall; for ≥8 tries set `SPDHOST_BROM_WALL_MS=30000` (or similar). There
 is no auto-scaling of the wall.
 
 Optional sfd-aligned settle=0 probe (`sfd_tool` has no post-line-state
-settle). Keeps hello_to at 3000 via `--timeout 3000` / `SPDHOST_TIMEOUT`,
-raises the wall to 30s for denser tries, and skips the 100 ms settle. For
-even denser tries add `SPDHOST_BROM_PAUSE_MS=0` (optional):
+settle; menu arm 2). Keeps hello_to at 3000 via `--timeout 3000` /
+`SPDHOST_TIMEOUT`, raises the wall to 30s for denser tries, and skips the
+100 ms settle. Default settle remains 100 unless env set. For even denser
+tries add `SPDHOST_BROM_PAUSE_MS=0` (optional):
 
 ```bash
 cd ~/spdhost-arm32
