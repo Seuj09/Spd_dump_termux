@@ -138,6 +138,21 @@ void print_string(FILE *f, const void *src, size_t n) {
 }
 
 #if USE_LIBUSB
+/* Interface claimed by find_endpoints(). On Android the descriptor comes from
+ * Termux:API, which keeps its own reference to the same open file, so the
+ * kernel does not drop our claim when this process exits. libusb also never
+ * closes a wrapped descriptor. Release explicitly, or the next run can fail
+ * with LIBUSB_ERROR_BUSY. */
+static libusb_device_handle *g_claimed_handle = NULL;
+static int g_claimed_iface = -1;
+
+void spd_usb_release(void) {
+	if (g_claimed_handle && g_claimed_iface >= 0)
+		libusb_release_interface(g_claimed_handle, g_claimed_iface);
+	g_claimed_handle = NULL;
+	g_claimed_iface = -1;
+}
+
 void find_endpoints(libusb_device_handle *dev_handle, int result[2]) {
 	int endp_in = -1, endp_out = -1;
 	int i, k, err;
@@ -189,8 +204,14 @@ void find_endpoints(libusb_device_handle *dev_handle, int result[2]) {
 			}
 #endif
 			err = libusb_claim_interface(dev_handle, i);
-			if (err < 0)
+			if (err < 0) {
+				if (err == LIBUSB_ERROR_BUSY)
+					DBG_LOG("interface %d is busy: a previous run or another app still holds it.\n"
+						"Unplug the device, replug it into download mode and retry.\n", i);
 				ERR_EXIT("libusb_claim_interface failed : %s\n", libusb_error_name(err));
+			}
+			g_claimed_handle = dev_handle;
+			g_claimed_iface = i;
 			break;
 		}
 	}
@@ -245,6 +266,7 @@ void spdio_free(spdio_t *io) {
 #endif
 #if USE_LIBUSB
 	if (bListenLibusb) stopUsbEventHandle();
+	spd_usb_release();
 	libusb_close(io->dev_handle);
 	libusb_exit(NULL);
 #else
@@ -2535,6 +2557,7 @@ void ChangeMode(spdio_t *io, int ms, int bootmode, int at) {
 		}
 		for (int i = 0; ; i++) {
 			if (m_bOpened == -1) {
+				g_claimed_handle = NULL; g_claimed_iface = -1; /* handle is going away */
 				libusb_close(io->dev_handle);
 				io->recv_buf[2] = 0;
 				curPort = 0;

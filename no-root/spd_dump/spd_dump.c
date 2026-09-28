@@ -10,6 +10,24 @@
 #include "common.h"
 #include "GITVER.h"
 
+#ifdef __ANDROID__
+#include <errno.h>
+#include <fcntl.h>
+
+/* Strict parse of a USB file descriptor number. Returns -1 if invalid.
+ * 0-2 are stdio, never a USB device, so a small value is almost certainly a
+ * parse mistake (atoi() of a non-number gives 0 = stdin). */
+static int parse_usb_fd(const char *s) {
+	char *end = NULL;
+	long v;
+	if (!s || !s[0]) return -1;
+	errno = 0;
+	v = strtol(s, &end, 10);
+	if (errno || end == s || *end != '\0' || v < 3 || v > 0x7fffffff) return -1;
+	return (int)v;
+}
+#endif
+
 void print_help(void) {
 	DBG_LOG(
 		"Usage\n"
@@ -158,7 +176,9 @@ int main(int argc, char **argv) {
 	//libusb_device_handle *handle; // Use spdio_t.dev_handle
 	//libusb_device* device; //use curPort
 	struct libusb_device_descriptor desc;
-	libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+	ret = libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+	if (ret)
+		DBG_LOG("warning: libusb NO_DEVICE_DISCOVERY unavailable (%s), libusb is probably too old; run: pkg upgrade libusb\n", libusb_error_name(ret));
 #endif
 	ret = libusb_init(NULL);
 	if (ret < 0)
@@ -200,10 +220,12 @@ int main(int argc, char **argv) {
 			 * ProcessBuilder). Fall back to last argv for legacy
 			 * termux-usb -e "./spd_dump --usb-fd" which appends the FD. */
 			if (argv[2][0] >= '0' && argv[2][0] <= '9') {
-				xfd = atoi(argv[2]);
+				xfd = parse_usb_fd(argv[2]);
+				if (xfd < 0) ERR_EXIT("bad --usb-fd value: %s\n", argv[2]);
 				argc -= 2; argv += 2;
 			} else {
-				xfd = atoi(argv[argc - 1]);
+				xfd = parse_usb_fd(argv[argc - 1]);
+				if (xfd < 0) ERR_EXIT("bad --usb-fd value: %s\n", argv[argc - 1]);
 				argc -= 2; argv += 1;
 			}
 #endif
@@ -229,14 +251,10 @@ int main(int argc, char **argv) {
 	/* Adopt FD from env when --usb-fd was not given (termux-usb -E). */
 	if (xfd < 0) {
 		const char *env = getenv("TERMUX_USB_FD");
-		if ((!env || !env[0]) && (env = getenv("SPD_USB_FD")) && env[0])
-			; /* SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts */
+		if (!env || !env[0]) env = getenv("SPD_USB_FD"); /* alias for non-Termux hosts */
 		if (env && env[0]) {
-			char *end = NULL;
-			long v = strtol(env, &end, 10);
-			if (end == env || *end != '\0' || v < 0 || v > 0x7fffffff)
-				ERR_EXIT("bad TERMUX_USB_FD/SPD_USB_FD: %s\n", env);
-			xfd = (int)v;
+			xfd = parse_usb_fd(env);
+			if (xfd < 0) ERR_EXIT("bad TERMUX_USB_FD/SPD_USB_FD: %s\n", env);
 			DBG_LOG("Adopted USB FD %d from environment.\n", xfd);
 		}
 	}
@@ -247,18 +265,31 @@ int main(int argc, char **argv) {
 			"  Or:      ./spd_dump --usb-fd N <commands>\n"
 			"  Legacy:  termux-usb -e \"./spd_dump --usb-fd\" /dev/bus/usb/N/M\n");
 
-	if (libusb_wrap_sys_device(NULL, (intptr_t)xfd, &io->dev_handle))
-		ERR_EXIT("libusb_wrap_sys_device exit unconditionally!\n");
+	if (fcntl(xfd, F_GETFD) == -1)
+		ERR_EXIT("USB file descriptor %d is not open in this process (%s).\n"
+			"  It only exists inside the command started by termux-usb.\n"
+			"  Run through ./scripts/spd_dump-usb, or termux-usb -r -E -e ...\n",
+			xfd, strerror(errno));
+
+	ret = libusb_wrap_sys_device(NULL, (intptr_t)xfd, &io->dev_handle);
+	if (ret)
+		ERR_EXIT("libusb_wrap_sys_device failed on fd %d: %s\n"
+			"  The fd is stale if the device re-enumerated or was replugged;\n"
+			"  start again so termux-usb hands out a fresh one.\n",
+			xfd, libusb_error_name(ret));
 
 	curPort = libusb_get_device(io->dev_handle);
-	if (libusb_get_device_descriptor(curPort, &desc))
-		ERR_EXIT("libusb_get_device exit unconditionally!");
+	ret = libusb_get_device_descriptor(curPort, &desc);
+	if (ret)
+		ERR_EXIT("libusb_get_device_descriptor failed: %s\n", libusb_error_name(ret));
 
 	DBG_LOG("Vendor ID: %04x\nProduct ID: %04x\n", desc.idVendor, desc.idProduct);
-	if (desc.idVendor != 0x1782 || desc.idProduct != 0x4d00) {
-		ERR_EXIT("It seems spec device not a spd device!\n");
-	}
+	if ((desc.idVendor != 0x1782 || desc.idProduct != 0x4d00) && !getenv("SPD_USB_ANY"))
+		ERR_EXIT("Device %04x:%04x is not a Spreadtrum/Unisoc download-mode device (expected 1782:4d00).\n"
+			"  Check that the wrapper picked the right USB device (pass its /dev/bus/usb path),\n"
+			"  or set SPD_USB_ANY=1 to skip this check.\n", desc.idVendor, desc.idProduct);
 	call_Initialize_libusb(io);
+	atexit(spd_usb_release); /* also covers ERR_EXIT paths */
 #else
 #if !USE_LIBUSB
 	bListenLibusb = 0;
