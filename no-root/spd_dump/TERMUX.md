@@ -41,8 +41,16 @@ Release zips ship a copy under `fdl/ums9230/infinix/`.
 
 ## Smoke (BootROM → FDL1)
 
+**Gate:** CHECK_BAUD → SPRD3 → FDL1 load/exec. Keep `exec_addr` + FDL1/FDL2
+paths as below; FDL2 SEND success is **out of scope** (may still time out).
+
 Cold-plug target in download mode (BootROM `1782:4d00`). Grant the USB
 permission dialog immediately.
+
+Before FDL1 smoke, optionally re-prove BootROM hello-only with **spdhost**
+(tip `c4e79d8` / menu `1`×`3` or `2`×`3` — see
+[`../README.md`](../README.md) BootROM hello debug). That is a hello-only
+diagnostic; it does not replace the `spd_dump-usb` FDL1 gate below.
 
 ```bash
 cd ~/Spd_dump_termux/no-root/spd_dump   # or unzipped spd_dump-arm32/
@@ -67,10 +75,39 @@ From a release zip package root (`spd_dump-arm32/`):
 Expect: permission grant → CHECK_BAUD / SPRD3 handshake → FDL1 load/exec.
 FDL2 SEND may still time out — that is **out of scope** for this gate.
 
+### Warm Allow / pre-grant recipe (`spd_dump-usb`)
+
+Same wrapper knobs as `spdhost-usb`. First session keeps `-r`. After Android
+has authorized this host↔device pairing at least once, cold-unplug ≥5 s, then
+skip redundant `-r`:
+
+```bash
+cd ~/Spd_dump_termux/no-root/spd_dump
+
+# First session: normal grant (default keeps -r)
+./scripts/spd_dump-usb --verbose 1 \
+  exec_addr 0x65015f08 \
+  fdl ../fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 \
+  fdl ../fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 \
+  exec
+
+# Warm already-authorized (cold-unplug ≥5s first):
+SPD_USB_SKIP_REQUEST=1 ./scripts/spd_dump-usb --verbose 1 \
+  exec_addr 0x65015f08 \
+  fdl ../fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 \
+  fdl ../fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 \
+  exec
+```
+
+**Warn:** if the grant was never given, `SPD_USB_SKIP_REQUEST=1` fails open —
+keep default `-r` for a cold first plug. Correlate always-on `usb:` millis
+(`listed` → `termux-usb -e start` → `child start`) with device-side progress.
+
 ## Raw termux-usb (advanced)
 
-`spd_dump-usb` is a thin poll + `termux-usb -r -E -e` wrapper. Equivalent
-one-shot once you know the bus path:
+`spd_dump-usb` is a thin poll + single combined `termux-usb … -e` wrapper
+(default includes `-r`; optional `SPD_USB_SKIP_REQUEST=1` omits `-r`).
+Equivalent one-shot once you know the bus path:
 
 ```bash
 termux-usb -r -E -e ./spd_dump /dev/bus/usb/N/M --verbose 1 \
@@ -100,12 +137,29 @@ Or pass the FD explicitly:
 | --- | --- | --- |
 | `SPD_USB_WAIT` | `90` | Seconds to wait for the device to appear |
 | `SPD_WAKE_LOCK` | `1` | Hold a Termux wake lock while running (`0` = off); released on exit |
+| `SPD_USB_ATTACHED_GRACE` | `0` | Seconds before accepting an already-attached single device (was ~3s); cold new-device path unchanged |
+| `SPD_USB_SKIP_REQUEST` | unset/`0` | `1` = omit `termux-usb -r` (warm already-authorized only); default keeps `-r` |
+| `SPD_USB_LIST_TIMEOUT` | `8` | Timeout seconds for each `termux-usb -l` |
 | `SPD_USB_ANY` | unset | Skip the `1782:4d00` ID check inside `spd_dump` |
 
-- It remembers what was already attached and picks the **new** device, so a
+Always-on thin stderr timing (no env needed):
+
+- `usb: listed $dev @Xms`
+- `usb: termux-usb -e start @Yms`
+- `usb: child start fd=N @Zms`
+
+Behaviour notes:
+
+- Prefers package-local `./spd_dump` before PATH.
+- Remembers what was already attached and picks the **new** device, so a
   keyboard or hub on the OTG port no longer aborts the run. With exactly one
   device attached from the start (re-run at the FDL1 stage) it uses that one
-  after about 3 seconds. With several and none new, pass the path.
+  after `SPD_USB_ATTACHED_GRACE` (default **0**). With several and none new,
+  pass the path.
+- Keeps a **single** combined `termux-usb … -e` round (does not split
+  request vs exec).
+- Passes `--usb-fd` as the **next** argument (not last-argv); `spd_dump` also
+  accepts env `TERMUX_USB_FD` / `SPD_USB_FD`.
 - The exit status of `spd_dump` is passed through. If `spd_dump` never started
   (permission denied, device gone), the wrapper says so and exits 1.
 - Works with both termux-api generations: the launcher takes the descriptor
@@ -115,13 +169,23 @@ Or pass the FD explicitly:
 - `termux-usb -l` is time-limited, so a missing or killed Termux:API app gives
   a diagnosis instead of hanging.
 
+## Post-EXEC re-termux reconnect (P4 — deferred)
+
+**Not in this release.** Full post-bus-leave reconnect SM (close → wait unique
+`1782`, prefer `4d00` → re-`termux-usb` → new wrap; refuse multi-device
+auto-pick; never mid-hello) is held until the FDL1 gate is green. See
+[`../README.md`](../README.md) “Post-FDL reconnect SM (P4 — deferred)” and
+existing spdhost helpers `grab_termux` / `spd_usb_reacquire` (docs pointer
+only — `spd_dump` does not ship that SM here).
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
 | Wrapper says `termux-usb did not answer` | Termux:API app missing, from a different source than Termux, or killed by battery optimisation. Open it once; disable battery optimisation for it. |
 | `no USB device appeared` | Cable/OTG problem, or the phone is not in download mode. The BootROM only waits a short time; start the wrapper first, then plug in while holding the key combo. |
-| Permission dialog appears every time | Expected. Termux:API declares no USB-attach filter, so Android has no default to remember and grants permission per connection. Tap OK within 30 seconds. |
+| Permission dialog appears every time | Expected with default `-r`. Termux:API declares no USB-attach filter, so Android grants per connection. Tap OK within 30 seconds. Warm path: after a successful Allow + cold-unplug ≥5 s, try `SPD_USB_SKIP_REQUEST=1`. |
+| `SPD_USB_SKIP_REQUEST=1` and never started | Grant was never given for this pairing — unset SKIP and retry with default `-r`. |
 | `libusb_wrap_sys_device failed` | The descriptor is stale (device re-enumerated or replugged). Start again to get a new one. |
 | `libusb_claim_interface failed : LIBUSB_ERROR_BUSY` | An earlier run or another app still holds the interface. Unplug, replug into download mode, retry. `spd_dump` now releases the interface on exit, including on error exits. |
 | `Device xxxx:yyyy is not a Spreadtrum/Unisoc download-mode device` | Wrong device selected, or the phone is in a different mode. Pass the right `/dev/bus/usb/N/M`, or `SPD_USB_ANY=1` to override. |
@@ -133,5 +197,5 @@ uses the `/dev/bus/usb/N/M` path from `termux-usb -l`.
 
 ## Related
 
-- Seuj09 **spdhost** (protocol/hello hardening): [`../`](../) — same `termux-usb -E` contract (`SPD_USB_FD` alias).
+- Seuj09 **spdhost** (protocol/hello hardening): [`../`](../) — same `termux-usb -E` contract (`SPD_USB_FD` alias); BootROM hello debug + warm recipe in [`../README.md`](../README.md).
 - Prebuilt arm32 package: release tag `spd_dump-termux` on this repo.

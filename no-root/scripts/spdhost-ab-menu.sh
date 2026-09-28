@@ -78,6 +78,7 @@ while :; do
 cold-plug notes — unplug ≥5s between runs, tap Allow fast, power target off then vol-down+plug when wrapper says NOW.
 Watch stderr for: usb: listed / usb: termux-usb -e / usb: child start (ms), then brom: open/claim, brom: try 1, version:SPRD3.
 Optional fast path: arm 2 (SETTLE=0) is a reasonable first smoke when racing BootROM; default settle stays 100 unless env set. REACQ stays default 0 (only arm 6 enables it).
+Warm already-authorized (optional; default keeps -r): export SPD_USB_SKIP_REQUEST=1   # after a successful Allow + cold-unplug ≥5s; unset for first plug
 
 1) Baseline: SPDHOST_BROM_TRACE=1 + ./scripts/spdhost-usb --timeout 5000 --verbose ping
 2) SETTLE only: also SPDHOST_BROM_SETTLE_MS=0 (+ TRACE, same ping)  [optional fast path]

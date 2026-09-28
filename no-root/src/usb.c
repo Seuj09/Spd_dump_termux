@@ -517,6 +517,10 @@ static void print_bus_paths(void)
 		fprintf(stderr, "  (none)\n");
 }
 
+/* P4 post-FDL reconnect SM (deferred — stub/docs only this release):
+ * intended harden on gone/post-EXEC: close → wait unique 1782 (prefer 4d00)
+ * → re-termux-usb → new wrap; refuse multi-device auto-pick; never mid-hello.
+ * This helper is the existing Termux reopen path; do not rewrite mid-BootROM. */
 static int grab_termux(struct spd_usb *u)
 {
 	char dir[192];
