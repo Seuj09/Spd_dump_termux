@@ -1,12 +1,39 @@
 #!/usr/bin/env bash
 # Wait for one OTG device, then run spdhost with that file descriptor.
-# Usage: spdhost-usb [fdl ...]
-#        spdhost-usb /dev/bus/usb/N/M -- [fdl ...]
+# Usage: spdhost-usb [spdhost options and commands ...]
+#        spdhost-usb /dev/bus/usb/N/M -- [spdhost options and commands ...]
+#
+# Environment:
+#   SPD_USB_WAIT=N       seconds to wait for the device to show up (default 90)
+#   SPD_WAKE_LOCK=0      do not hold a Termux wake lock while spdhost runs
+#   SPDHOST_USB_BUS      set by this script to the chosen /dev/bus/usb path
+#                        (post-EXEC reacq in spdhost reads it)
+#
+# How it works: termux-usb opens the device through the Termux:API app and runs
+# a launcher with the file descriptor. Newer termux-api packages export it as
+# TERMUX_USB_FD (-E); older ones pass it as the first argument. The launcher
+# accepts both and hands it to spdhost as --usb-fd.
 set -euo pipefail
+
+run= rcfile= wl=0
+cleanup() {
+	[[ -n $run ]] && rm -f "$run"
+	[[ -n $rcfile ]] && rm -f "$rcfile"
+	if (( wl )); then termux-wake-unlock >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
 
 if ! command -v termux-usb >/dev/null 2>&1; then
 	echo "termux-usb is not on PATH. Install Termux:API from F-Droid and: pkg install termux-api" >&2
 	exit 1
+fi
+
+# Bounded runner: termux-usb can hang forever if the Termux:API app is missing
+# or was killed by battery optimisation.
+if command -v timeout >/dev/null 2>&1; then
+	bounded() { local t=$1; shift; timeout "$t" "$@"; }
+else
+	bounded() { shift; "$@"; }
 fi
 
 # Prefer a binary next to this package (unzipped no-root/), then PATH.
@@ -43,56 +70,141 @@ if [[ ${1:-} == /dev/bus/usb/* ]]; then
 	fi
 fi
 
-list_devs() {
-	# termux-usb -l returns immediately. An empty list is normal until the
-	# cable is plugged in, so the caller has to poll.
-	termux-usb -l 2>/dev/null | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }' || true
-}
-
-if [[ -z $dev ]]; then
-	echo "Waiting up to 90 seconds. Plug the target in NOW." >&2
-	echo "Hold its download-mode keys (volume down) until this line changes." >&2
-	echo "When the permission dialog appears, tap OK immediately." >&2
-	deadline=$((SECONDS + 90))
-	while (( SECONDS < deadline )); do
-		mapfile -t devs < <(list_devs)
-		if (( ${#devs[@]} == 1 )); then
-			dev=${devs[0]}
-			echo "found $dev" >&2
-			break
-		fi
-		if (( ${#devs[@]} > 1 )); then
-			printf 'more than one USB device; pass the path:\n' >&2
-			printf '  %s\n' "${devs[@]}" >&2
-			exit 1
-		fi
-		left=$((deadline - SECONDS))
-		printf '\rstill waiting (%ds) ' "$left" >&2
-		sleep 0.4
-	done
-	echo >&2
-	if [[ -z $dev ]]; then
-		echo "no USB device appeared. The BootROM only stays up a few seconds;" >&2
-		echo "run this again and plug in while this wait is counting." >&2
-		exit 1
-	fi
-fi
-
 if [[ $# -eq 0 ]]; then
 	echo "usage: spdhost-usb [/dev/bus/usb/N/M] -- <spdhost commands>" >&2
 	exit 2
 fi
 
-run=$(mktemp "${TMPDIR:-/tmp}/spdhost-run.XXXXXX")
+# Fills the global array devs. termux-usb -l returns immediately; an empty list
+# is normal until the cable is plugged in, so the caller has to poll.
+devs=()
+list_timeouts=0
+poll_devs() {
+	local out rc=0
+	out=$(bounded "${SPD_USB_LIST_TIMEOUT:-8}" termux-usb -l 2>/dev/null) || rc=$?
+	if (( rc == 124 )); then
+		list_timeouts=$((list_timeouts + 1))
+		devs=()
+		return 0
+	fi
+	list_timeouts=0
+	devs=()
+	local line
+	while IFS= read -r line; do
+		[[ -n $line ]] && devs+=("$line")
+	done < <(printf '%s\n' "$out" | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }')
+	return 0
+}
+
+api_hint() {
+	echo "termux-usb did not answer. Check that:" >&2
+	echo "  - the Termux:API app is installed from the same source as Termux (F-Droid)" >&2
+	echo "  - you opened the Termux:API app once, and battery optimisation is off for it" >&2
+	echo "  - the package is installed: pkg install termux-api" >&2
+}
+
+if [[ -z $dev ]]; then
+	wait_s=${SPD_USB_WAIT:-90}
+	[[ $wait_s =~ ^[0-9]+$ ]] || wait_s=90
+	echo "Waiting up to ${wait_s} seconds. Plug the target in NOW." >&2
+	echo "Hold its download-mode keys (volume down) until this line changes." >&2
+	echo "When the permission dialog appears, tap OK immediately." >&2
+
+	poll_devs
+	base=("${devs[@]+"${devs[@]}"}")
+	if (( ${#base[@]} > 0 )); then
+		printf 'already attached (ignored unless it is the only one): %s\n' "${base[*]}" >&2
+	fi
+
+	start=$SECONDS
+	deadline=$((SECONDS + wait_s))
+	while (( SECONDS < deadline )); do
+		poll_devs
+		if (( list_timeouts >= 3 )); then
+			echo >&2
+			api_hint
+			exit 1
+		fi
+		new=()
+		for d in ${devs[@]+"${devs[@]}"}; do
+			seen=0
+			for b in ${base[@]+"${base[@]}"}; do [[ $b == "$d" ]] && seen=1; done
+			(( seen )) || new+=("$d")
+		done
+		if (( ${#new[@]} == 1 )); then
+			dev=${new[0]}
+			echo >&2
+			echo "found $dev" >&2
+			break
+		fi
+		if (( ${#new[@]} > 1 )); then
+			echo >&2
+			printf 'more than one new USB device; pass the path:\n' >&2
+			printf '  %s\n' "${new[@]}" >&2
+			exit 1
+		fi
+		# Nothing new. If exactly one device was attached from the start (for
+		# example re-running at the FDL1 stage), use it after a short grace.
+		if (( ${#base[@]} == 1 && ${#devs[@]} == 1 && SECONDS - start >= 3 )); then
+			dev=${devs[0]}
+			echo >&2
+			echo "using already attached $dev" >&2
+			break
+		fi
+		left=$((deadline - SECONDS))
+		printf '\rstill waiting (%ds) ' "$left" >&2
+		sleep 0.3
+	done
+	echo >&2
+	if [[ -z $dev ]]; then
+		if (( ${#base[@]} > 1 )); then
+			echo "several USB devices are attached and none is new:" >&2
+			printf '  %s\n' "${base[@]}" >&2
+			echo "pass the right one: spdhost-usb /dev/bus/usb/N/M -- <commands>" >&2
+		else
+			echo "no USB device appeared. The BootROM only stays up a few seconds;" >&2
+			echo "run this again and plug in while this wait is counting." >&2
+		fi
+		exit 1
+	fi
+fi
+
+# Older termux-api packages have no -E; then the fd is appended as argument 1.
+envflag=()
+usage=$(bounded 5 termux-usb -h 2>&1 || true)   # capture first: grep -q + pipefail is racy
+if [[ $usage == *" -E "* ]]; then
+	envflag=(-E)
+fi
+
+tmpdir=${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}
+mkdir -p "$tmpdir"
+run=$(mktemp "$tmpdir/spdhost-run.XXXXXX")
+rcfile=$(mktemp "$tmpdir/spdhost-rc.XXXXXX")
+# termux-callback runs the launcher as an unquoted word, so no whitespace.
+if [[ $run == *[[:space:]]* || $rcfile == *[[:space:]]* ]]; then
+	echo "temp directory path contains whitespace: $tmpdir (set TMPDIR to a plain path)" >&2
+	exit 1
+fi
+: > "$rcfile"   # stays empty unless spdhost actually ran
+
 # Termux:API executes this file itself, without Termux's /bin/bash shim.
 # The shebang has to be the real bash path.
 bash_bin=$(command -v bash)
-trap 'rm -f "$run"' EXIT
 {
 	printf '#!%s\n' "$bash_bin"
-	printf 'exec'
-	printf ' %q' "$bin" "$@"
+	# stdout of a termux-usb -e child is buffered by termux-usb until it exits.
+	# Send it to stderr so progress is visible live.
+	printf 'exec 1>&2\n'
+	printf 'fd=${TERMUX_USB_FD:-${1:-}}\n'
+	printf 'if [ -z "$fd" ]; then\n'
+	printf '\techo "spdhost-usb: termux-usb gave no file descriptor" >&2\n'
+	printf '\techo 97 > %q\n\texit 97\nfi\n' "$rcfile"
+	printf '%q --usb-fd "$fd"' "$bin"
+	printf ' %q' "$@"
 	printf '\n'
+	printf 'rc=$?\n'
+	printf 'echo "$rc" > %q\n' "$rcfile"
+	printf 'exit "$rc"\n'
 } > "$run"
 chmod +x "$run"
 if ! "$bash_bin" -n "$run"; then
@@ -100,8 +212,32 @@ if ! "$bash_bin" -n "$run"; then
 	cat "$run" >&2
 	exit 1
 fi
-# Do not exec: keep this shell so the EXIT trap removes the temp launcher.
+
+# Keep the CPU awake for long dumps (released on exit).
+if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
+	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
+fi
+
+# -r request permission (Android asks again after every replug);
+# -E export TERMUX_USB_FD when supported; -e run launcher with that FD.
 # Child spdhost remembers this path for post-EXEC reacquire when several
 # USB nodes appear.
 export SPDHOST_USB_BUS=$dev
-termux-usb -r -E -e "$run" "$dev"
+set +e
+termux-usb -r ${envflag[@]+"${envflag[@]}"} -e "$run" "$dev"
+term_rc=$?
+set -e
+
+rc=$(cat "$rcfile" 2>/dev/null || true)
+if [[ -z $rc ]]; then
+	echo "spdhost never started (termux-usb exit $term_rc). Look at the message above:" >&2
+	echo "  Permission denied / timeout: tap OK on the dialog within 30 seconds." >&2
+	echo "  No such device: the device left download mode; replug and retry." >&2
+	echo "  Open device failed: replug the cable and retry." >&2
+	exit 1
+fi
+if [[ $rc == 97 ]]; then
+	echo "termux-usb ran the launcher without a file descriptor." >&2
+	echo "Update the package: pkg upgrade termux-api" >&2
+fi
+exit "$rc"

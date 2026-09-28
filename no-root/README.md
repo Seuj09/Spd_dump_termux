@@ -392,8 +392,10 @@ Cold-unplug ≥5 s between sessions; success once ≠ stickier later without a
 replug. BootROM OUT `LIBUSB_ERROR_TIMEOUT` during check-baud is soft (same as
 recv timeout): remaining tries continue on the same handle; it does not abort
 the session. A forced USB reacquire mid-hello was removed: it hit
-`LIBUSB_ERROR_BUSY` and a second termux-usb Allow. If claim ever returns BUSY
-during a real reopen, look for `brom: reacq skipped: claim BUSY`.
+`LIBUSB_ERROR_BUSY` and a second termux-usb Allow. If claim returns BUSY
+(leftover claim after a prior unclean exit — Termux:API keeps the FD), stderr
+prints an unplug/replug hint; spdhost also `libusb_release_interface` before
+close and on atexit so the next run can claim cleanly.
 
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary

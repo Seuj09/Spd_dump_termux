@@ -3,6 +3,7 @@
 #include "usb.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,25 @@ static void die_usb(const char *what, int err)
 {
 	fprintf(stderr, "%s: %s\n", what, libusb_error_name(err));
 	exit(1);
+}
+
+/* Termux:API keeps the wrapped usbfs FD open across process exit, so an
+ * unreleased claim can survive and make the next claim return BUSY. Track the
+ * live handle for atexit and for close/reacq. */
+static struct spd_usb *g_live_usb;
+
+static void release_claimed(struct spd_usb *u)
+{
+	if (!u || !u->handle || u->claimed_iface < 0)
+		return;
+	libusb_release_interface(u->handle, u->claimed_iface);
+	u->claimed_iface = -1;
+}
+
+static void atexit_release(void)
+{
+	if (g_live_usb)
+		release_claimed(g_live_usb);
 }
 
 static long long mono_ms(void)
@@ -97,14 +117,19 @@ static int claim_bulk(struct spd_usb *u)
 		err = libusb_claim_interface(h, num);
 		if (err < 0) {
 			fprintf(stderr, "claim interface %d: %s\n", num, libusb_error_name(err));
-			if (err == LIBUSB_ERROR_BUSY)
-				fprintf(stderr, "brom: reacq skipped: claim BUSY\n");
+			if (err == LIBUSB_ERROR_BUSY) {
+				fprintf(stderr,
+					"interface %d is busy: a previous run or another app still holds it.\n"
+					"Unplug the device, replug it into download mode and retry.\n",
+					num);
+			}
 			libusb_free_config_descriptor(cfg);
 			return -1;
 		}
 		u->ep_in = in;
 		u->ep_out = out;
 		u->out_mps = mps;
+		u->claimed_iface = num;
 		found = 1;
 	}
 	libusb_free_config_descriptor(cfg);
@@ -152,6 +177,8 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 			fprintf(stderr, "warning: set_configuration: %s\n", libusb_error_name(err));
 	}
 	if (accept_vendor(u, strict_pid) || claim_bulk(u)) {
+		/* claim failed: nothing to release. accept_vendor fail: no claim yet. */
+		u->claimed_iface = -1;
 		libusb_close(h);
 		u->handle = NULL;
 		return -1;
@@ -195,6 +222,7 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	u->vid = vid;
 	u->pid = pid;
 	u->reac_left = 4;
+	u->claimed_iface = -1;
 	u->fd_mode = fd >= 0;
 	u->last_bus[0] = 0;
 	{
@@ -205,9 +233,18 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	init_ctx(u, u->fd_mode);
 
 	if (fd >= 0) {
+		if (fcntl(fd, F_GETFD) == -1) {
+			fprintf(stderr, "USB FD %d is not open: %s\n", fd, strerror(errno));
+			exit(1);
+		}
 		err = libusb_wrap_sys_device(u->ctx, (intptr_t)fd, &h);
-		if (err < 0)
-			die_usb("libusb_wrap_sys_device", err);
+		if (err < 0) {
+			fprintf(stderr,
+				"libusb_wrap_sys_device(%d): %s\n"
+				"The descriptor must be a live usbfs FD from termux-usb.\n",
+				fd, libusb_error_name(err));
+			exit(1);
+		}
 	} else {
 		h = libusb_open_device_with_vid_pid(u->ctx, (uint16_t)vid, (uint16_t)pid);
 		if (!h) {
@@ -220,6 +257,8 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	 * the requested product id. */
 	if (adopt(u, h, fd < 0))
 		exit(1);
+	g_live_usb = u;
+	atexit(atexit_release);
 	return 0;
 }
 
@@ -236,6 +275,9 @@ void spd_usb_close(struct spd_usb *u)
 {
 	if (!u)
 		return;
+	release_claimed(u);
+	if (g_live_usb == u)
+		g_live_usb = NULL;
 	if (u->handle)
 		libusb_close(u->handle);
 	if (u->ctx)
@@ -379,8 +421,12 @@ int spd_usb_emit_fd(const char *sock_path)
 	}
 	errno = 0;
 	fd = strtol(env, &end, 10);
-	if (end == env || *end || fd < 0 || errno) {
-		fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s\n", env);
+	if (end == env || *end || errno || fd < 3 || fd > 0x7fffffff) {
+		fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s (need open FD >= 3)\n", env);
+		return 1;
+	}
+	if (fcntl((int)fd, F_GETFD) == -1) {
+		fprintf(stderr, "TERMUX_USB_FD/SPD_USB_FD %ld is not open: %s\n", fd, strerror(errno));
 		return 1;
 	}
 	sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -575,7 +621,9 @@ static int grab_termux(struct spd_usb *u)
 			libusb_device_handle *h = NULL;
 			int err = libusb_wrap_sys_device(u->ctx, (intptr_t)got, &h);
 			if (err < 0) {
-				fprintf(stderr, "reopen wrap: %s\n", libusb_error_name(err));
+				fprintf(stderr,
+					"reopen wrap FD %d: %s (need a live usbfs FD from termux-usb)\n",
+					got, libusb_error_name(err));
 				close(got);
 				got = -1;
 				continue;
@@ -652,6 +700,7 @@ int spd_usb_reacquire(struct spd_usb *u)
 	}
 	u->reac_left--;
 	if (u->handle) {
+		release_claimed(u);
 		libusb_close(u->handle);
 		u->handle = NULL;
 	}
