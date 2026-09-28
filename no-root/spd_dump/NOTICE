@@ -1,0 +1,5 @@
+Vendored TomKing / ilyakurdyukov spreadtrum_flash sources (spd_dump).
+Software is provided "AS IS" without warranty — see header in spd_dump.c.
+Upstream: https://github.com/TomKing062/spreadtrum_flash
+Original: https://github.com/ilyakurdyukov/spreadtrum_flash
+Seuj09 Termux FD packaging patches are included in this copy.

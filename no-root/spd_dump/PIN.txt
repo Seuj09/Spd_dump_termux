@@ -1,0 +1,12 @@
+TomKing062/spreadtrum_flash pin
+================================
+Upstream commit: f2fc779210d9e4b5ca1904c79a49cc5e114b58f3
+  ("put FindPort in loop")
+
+Vendored here from Seuj09/spreadtrum_flash feature/termux-usb tip
+  7be15c0cf6b7fe815f8985de61df5c467c634fb2
+  (pin + --usb-fd next-arg + TERMUX_USB_FD/SPD_USB_FD + scripts/spd_dump-usb)
+
+Do not track full TomKing git history in this subdirectory.
+Upstream: https://github.com/TomKing062/spreadtrum_flash
+Original: https://github.com/ilyakurdyukov/spreadtrum_flash
