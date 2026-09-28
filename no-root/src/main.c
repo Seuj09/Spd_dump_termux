@@ -23,6 +23,7 @@ static void usage(void)
 		"\n"
 		"Options:\n"
 		"  --usb-fd N          adopt an already-open usbfs descriptor\n"
+"  env TERMUX_USB_FD / SPD_USB_FD  same as --usb-fd when unset\n"
 		"  --vid/--pid         desktop enumeration (default 1782:4d00)\n"
 		"  --timeout MS        bulk timeout (default 1000)\n"
 		"  --step N            partition chunk size (default 4096, max 65024)\n"
@@ -320,13 +321,15 @@ int main(int argc, char **argv)
 	}
 
 	envfd = getenv("TERMUX_USB_FD");
+	if ((!envfd || !envfd[0]) && (envfd = getenv("SPD_USB_FD")) && envfd[0])
+		; /* fall through: SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts */
 	if (fd < 0 && envfd && envfd[0]) {
 		char *end = NULL;
 		long v;
 		errno = 0;
 		v = strtol(envfd, &end, 10);
 		if (end == envfd || *end || errno || v < 0) {
-			fprintf(stderr, "bad TERMUX_USB_FD: %s\n", envfd);
+			fprintf(stderr, "bad TERMUX_USB_FD/SPD_USB_FD: %s\n", envfd);
 			return 2;
 		}
 		fd = (int)v;
