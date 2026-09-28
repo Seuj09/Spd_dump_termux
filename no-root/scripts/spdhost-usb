@@ -4,15 +4,31 @@
 #        spdhost-usb /dev/bus/usb/N/M -- [spdhost options and commands ...]
 #
 # Environment:
-#   SPD_USB_WAIT=N       seconds to wait for the device to show up (default 90)
-#   SPD_WAKE_LOCK=0      do not hold a Termux wake lock while spdhost runs
-#   SPDHOST_USB_BUS      set by this script to the chosen /dev/bus/usb path
-#                        (post-EXEC reacq in spdhost reads it)
+#   SPD_USB_WAIT=N            seconds to wait for the device to show up (default 90)
+#   SPD_WAKE_LOCK=0           do not hold a Termux wake lock while spdhost runs
+#   SPD_USB_ATTACHED_GRACE=N  seconds before accepting an already-attached single
+#                             device (warm path). Default 0 — shrink Allow→spawn
+#                             latency when racing a short BootROM window. Cold
+#                             new-device detection is unchanged.
+#   SPD_USB_SKIP_REQUEST=1    omit termux-usb -r (warm already-authorized
+#                             experiments only). Default keeps -r so Android
+#                             shows Allow after every replug.
+#   SPD_USB_LIST_TIMEOUT=N    timeout seconds for each termux-usb -l (default 8)
+#   SPDHOST_BROM_TRACE=1      also enables host usb millis lines (those lines
+#                             are always-on either way — see usb: breadcrumbs)
+#   SPDHOST_USB_BUS           set by this script to the chosen /dev/bus/usb path
+#                             (post-EXEC reacq in spdhost reads it)
+#
+# Always-on thin stderr timing (monotonic-ish ms from script start):
+#   usb: listed $dev @Xms
+#   usb: termux-usb -e start @Yms
+#   usb: child start fd=N @Zms   (inside the generated launcher, before exec)
 #
 # How it works: termux-usb opens the device through the Termux:API app and runs
 # a launcher with the file descriptor. Newer termux-api packages export it as
 # TERMUX_USB_FD (-E); older ones pass it as the first argument. The launcher
-# accepts both and hands it to spdhost as --usb-fd.
+# accepts both and hands it to spdhost as --usb-fd <fd> (next-arg form —
+# spdhost reads the argument after --usb-fd, not last-argv like sfd_tool).
 set -euo pipefail
 
 run= rcfile= wl=0
@@ -22,6 +38,45 @@ cleanup() {
 	if (( wl )); then termux-wake-unlock >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
+
+# Monotonic-ish ms since script start (EPOCHREALTIME / %s%N / seconds*1000).
+_usb_t0=
+_usb_now_ms() {
+	if [[ -n ${EPOCHREALTIME-} ]]; then
+		# bash 5+: seconds.microseconds
+		awk -v t="$EPOCHREALTIME" -v t0="${_usb_t0:-0}" 'BEGIN { printf "%d", (t - t0) * 1000 }'
+		return
+	fi
+	local ns
+	ns=$(date +%s%N 2>/dev/null) || ns=
+	if [[ $ns =~ ^[0-9]+$ && ${#ns} -ge 10 ]]; then
+		# ns since epoch; t0 stored the same way
+		awk -v t="$ns" -v t0="${_usb_t0:-0}" 'BEGIN { printf "%d", (t - t0) / 1e6 }'
+		return
+	fi
+	# Fallback: whole seconds
+	awk -v t="$SECONDS" -v t0="${_usb_t0_sec:-0}" 'BEGIN { printf "%d", (t - t0) * 1000 }'
+}
+_usb_init_clock() {
+	if [[ -n ${EPOCHREALTIME-} ]]; then
+		_usb_t0=$EPOCHREALTIME
+	else
+		local ns
+		ns=$(date +%s%N 2>/dev/null) || ns=
+		if [[ $ns =~ ^[0-9]+$ && ${#ns} -ge 10 ]]; then
+			_usb_t0=$ns
+		else
+			_usb_t0=0
+			_usb_t0_sec=$SECONDS
+		fi
+	fi
+}
+_usb_init_clock
+
+usb_log() {
+	# Always-on thin timing lines (also useful when SPDHOST_BROM_TRACE=1).
+	printf 'usb: %s @%sms\n' "$*" "$(_usb_now_ms)" >&2
+}
 
 if ! command -v termux-usb >/dev/null 2>&1; then
 	echo "termux-usb is not on PATH. Install Termux:API from F-Droid and: pkg install termux-api" >&2
@@ -75,6 +130,64 @@ if [[ $# -eq 0 ]]; then
 	exit 2
 fi
 
+# Probe -E support once, early — before wait — so find→-e has no extra work.
+envflag=()
+usage=$(bounded 5 termux-usb -h 2>&1 || true)   # capture first: grep -q + pipefail is racy
+if [[ $usage == *" -E "* ]]; then
+	envflag=(-E)
+fi
+
+# Pre-build launcher + rcfile before the wait ends so find→-e is only export + exec.
+tmpdir=${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}
+mkdir -p "$tmpdir"
+run=$(mktemp "$tmpdir/spdhost-run.XXXXXX")
+rcfile=$(mktemp "$tmpdir/spdhost-rc.XXXXXX")
+# termux-callback runs the launcher as an unquoted word, so no whitespace.
+if [[ $run == *[[:space:]]* || $rcfile == *[[:space:]]* ]]; then
+	echo "temp directory path contains whitespace: $tmpdir (set TMPDIR to a plain path)" >&2
+	exit 1
+fi
+: > "$rcfile"   # stays empty unless spdhost actually ran
+
+# Termux:API executes this file itself, without Termux's /bin/bash shim.
+# The shebang has to be the real bash path.
+bash_bin=$(command -v bash)
+# Child timing: same clock basis as parent when EPOCHREALTIME / %s%N available.
+# Fall back to SECONDS*1000 inside the child if needed.
+{
+	printf '#!%s\n' "$bash_bin"
+	# stdout of a termux-usb -e child is buffered by termux-usb until it exits.
+	# Send it to stderr so progress is visible live.
+	printf 'exec 1>&2\n'
+	printf 'fd=${TERMUX_USB_FD:-${1:-}}\n'
+	printf 'if [ -z "$fd" ]; then\n'
+	printf '\techo "spdhost-usb: termux-usb gave no file descriptor" >&2\n'
+	printf '\techo 97 > %q\n\texit 97\nfi\n' "$rcfile"
+	# Thin child-start breadcrumb (always-on), ms since epoch-ish or SECONDS.
+	printf '_t0=%q\n' "${_usb_t0}"
+	printf 'if [ -n "${EPOCHREALTIME-}" ]; then\n'
+	printf '\t_ms=$(awk -v t="$EPOCHREALTIME" -v t0="$_t0" '\''BEGIN { printf "%%d", (t - t0) * 1000 }'\'')\n'
+	printf 'elif _ns=$(date +%%s%%N 2>/dev/null) && [ -n "$_ns" ]; then\n'
+	printf '\t_ms=$(awk -v t="$_ns" -v t0="$_t0" '\''BEGIN { printf "%%d", (t - t0) / 1e6 }'\'')\n'
+	printf 'else\n'
+	printf '\t_ms=$((SECONDS * 1000))\n'
+	printf 'fi\n'
+	printf 'echo "usb: child start fd=$fd @${_ms}ms" >&2\n'
+	# --usb-fd takes the NEXT argument (spdhost getopt), not last-argv.
+	printf '%q --usb-fd "$fd"' "$bin"
+	printf ' %q' "$@"
+	printf '\n'
+	printf 'rc=$?\n'
+	printf 'echo "$rc" > %q\n' "$rcfile"
+	printf 'exit "$rc"\n'
+} > "$run"
+chmod +x "$run"
+if ! "$bash_bin" -n "$run"; then
+	echo "generated launcher failed a syntax check:" >&2
+	cat "$run" >&2
+	exit 1
+fi
+
 # Fills the global array devs. termux-usb -l returns immediately; an empty list
 # is normal until the cable is plugged in, so the caller has to poll.
 devs=()
@@ -102,6 +215,9 @@ api_hint() {
 	echo "  - you opened the Termux:API app once, and battery optimisation is off for it" >&2
 	echo "  - the package is installed: pkg install termux-api" >&2
 }
+
+attached_grace=${SPD_USB_ATTACHED_GRACE:-0}
+[[ $attached_grace =~ ^[0-9]+$ ]] || attached_grace=0
 
 if [[ -z $dev ]]; then
 	wait_s=${SPD_USB_WAIT:-90}
@@ -144,8 +260,8 @@ if [[ -z $dev ]]; then
 			exit 1
 		fi
 		# Nothing new. If exactly one device was attached from the start (for
-		# example re-running at the FDL1 stage), use it after a short grace.
-		if (( ${#base[@]} == 1 && ${#devs[@]} == 1 && SECONDS - start >= 3 )); then
+		# example re-running at the FDL1 stage), use it after grace (default 0).
+		if (( ${#base[@]} == 1 && ${#devs[@]} == 1 && SECONDS - start >= attached_grace )); then
 			dev=${devs[0]}
 			echo >&2
 			echo "using already attached $dev" >&2
@@ -169,62 +285,27 @@ if [[ -z $dev ]]; then
 	fi
 fi
 
-# Older termux-api packages have no -E; then the fd is appended as argument 1.
-envflag=()
-usage=$(bounded 5 termux-usb -h 2>&1 || true)   # capture first: grep -q + pipefail is racy
-if [[ $usage == *" -E "* ]]; then
-	envflag=(-E)
-fi
-
-tmpdir=${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}
-mkdir -p "$tmpdir"
-run=$(mktemp "$tmpdir/spdhost-run.XXXXXX")
-rcfile=$(mktemp "$tmpdir/spdhost-rc.XXXXXX")
-# termux-callback runs the launcher as an unquoted word, so no whitespace.
-if [[ $run == *[[:space:]]* || $rcfile == *[[:space:]]* ]]; then
-	echo "temp directory path contains whitespace: $tmpdir (set TMPDIR to a plain path)" >&2
-	exit 1
-fi
-: > "$rcfile"   # stays empty unless spdhost actually ran
-
-# Termux:API executes this file itself, without Termux's /bin/bash shim.
-# The shebang has to be the real bash path.
-bash_bin=$(command -v bash)
-{
-	printf '#!%s\n' "$bash_bin"
-	# stdout of a termux-usb -e child is buffered by termux-usb until it exits.
-	# Send it to stderr so progress is visible live.
-	printf 'exec 1>&2\n'
-	printf 'fd=${TERMUX_USB_FD:-${1:-}}\n'
-	printf 'if [ -z "$fd" ]; then\n'
-	printf '\techo "spdhost-usb: termux-usb gave no file descriptor" >&2\n'
-	printf '\techo 97 > %q\n\texit 97\nfi\n' "$rcfile"
-	printf '%q --usb-fd "$fd"' "$bin"
-	printf ' %q' "$@"
-	printf '\n'
-	printf 'rc=$?\n'
-	printf 'echo "$rc" > %q\n' "$rcfile"
-	printf 'exit "$rc"\n'
-} > "$run"
-chmod +x "$run"
-if ! "$bash_bin" -n "$run"; then
-	echo "generated launcher failed a syntax check:" >&2
-	cat "$run" >&2
-	exit 1
-fi
+usb_log "listed $dev"
 
 # Keep the CPU awake for long dumps (released on exit).
 if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
 	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
 fi
 
-# -r request permission (Android asks again after every replug);
+# -r request permission (Android asks again after every replug) unless
+# SPD_USB_SKIP_REQUEST=1 (warm already-authorized experiments).
 # -E export TERMUX_USB_FD when supported; -e run launcher with that FD.
+# Keep a single combined termux-usb -r … -e round (do not split).
 # Child spdhost remembers this path for post-EXEC reacquire when several
 # USB nodes appear.
 export SPDHOST_USB_BUS=$dev
+reqflag=(-r)
+if [[ ${SPD_USB_SKIP_REQUEST:-0} == 1 ]]; then
+	reqflag=()
+fi
+usb_log "termux-usb -e start"
 set +e
-termux-usb -r ${envflag[@]+"${envflag[@]}"} -e "$run" "$dev"
+termux-usb ${reqflag[@]+"${reqflag[@]}"} ${envflag[@]+"${envflag[@]}"} -e "$run" "$dev"
 term_rc=$?
 set -e
 
