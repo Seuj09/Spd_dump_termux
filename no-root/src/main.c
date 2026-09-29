@@ -10,6 +10,30 @@
 #include <string.h>
 #include <unistd.h>
 
+volatile sig_atomic_t spd_interrupted = 0;
+
+/* SIGINT/SIGTERM: set a flag and return. Everything unsafe to call from a
+ * signal handler (libusb, fprintf) happens later, at a checkpoint the caller
+ * already visits between tries/chunks — never here. A second signal restores
+ * the default action, so a stuck loop can still be force-killed by hitting
+ * Ctrl-C twice. */
+static void on_interrupt(int sig)
+{
+	spd_interrupted = 1;
+	signal(sig, SIG_DFL);
+}
+
+static void install_signal_handlers(void)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_interrupt;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0; /* no SA_RESTART: let a blocked syscall return EINTR */
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+}
+
 static void usage(void)
 {
 	fprintf(stderr,
@@ -259,7 +283,9 @@ int main(int argc, char **argv)
 
 	emit = getenv("SPDHOST_EMIT_SOCK");
 	if (emit && emit[0])
-		return spd_usb_emit_fd(emit);
+		return spd_usb_emit_fd(emit); /* short helper process; no signal handling needed */
+
+	install_signal_handlers();
 
 	while ((c = getopt_long(argc, argv, "+h", opts, NULL)) != -1) {
 		switch (c) {

@@ -1,7 +1,15 @@
 #ifndef SPDHOST_USB_H
 #define SPDHOST_USB_H
 
+#include <signal.h>
 #include <stdint.h>
+
+/* Set by a SIGINT/SIGTERM handler (main.c). Long-running loops in both this
+ * file and proto.c check it between tries/chunks/polls and return cleanly
+ * instead of dying mid-operation, so the normal exit() path runs and
+ * atexit() releases the claimed USB interface — a raw kill-by-signal skips
+ * atexit entirely and can leave the next run seeing LIBUSB_ERROR_BUSY. */
+extern volatile sig_atomic_t spd_interrupted;
 
 struct spd_usb {
 	void *ctx;

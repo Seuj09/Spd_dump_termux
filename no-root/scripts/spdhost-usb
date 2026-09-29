@@ -14,6 +14,9 @@
 #                             experiments only). Default keeps -r so Android
 #                             shows Allow after every replug.
 #   SPD_USB_LIST_TIMEOUT=N    timeout seconds for each termux-usb -l (default 8)
+#   SPD_USB_NOTIFY=0          disable termux-toast/termux-vibrate feedback on
+#                             device-found / done / error (default on; silently
+#                             does nothing if those commands aren't installed)
 #   SPDHOST_BROM_TRACE=1      also enables host usb millis lines (those lines
 #                             are always-on either way — see usb: breadcrumbs)
 #   SPDHOST_USB_BUS           set by this script to the chosen /dev/bus/usb path
@@ -82,6 +85,23 @@ if ! command -v termux-usb >/dev/null 2>&1; then
 	echo "termux-usb is not on PATH. Install Termux:API from F-Droid and: pkg install termux-api" >&2
 	exit 1
 fi
+
+# Termux-friendly feedback: a toast + a short buzz so someone who has
+# switched away from the terminal (common while holding a volume-down combo
+# with both hands) still notices "device found" and the final result.
+# Best-effort: silently does nothing if the commands aren't installed, and
+# never lets a notification failure affect the exit code.
+# SPD_USB_NOTIFY=0 turns this off entirely.
+notify_on=1
+[[ ${SPD_USB_NOTIFY:-1} == 0 ]] && notify_on=0
+notify_toast() {
+	(( notify_on )) || return 0
+	command -v termux-toast >/dev/null 2>&1 && termux-toast -s "$1" >/dev/null 2>&1 || true
+}
+notify_vibrate() {
+	(( notify_on )) || return 0
+	command -v termux-vibrate >/dev/null 2>&1 && termux-vibrate -d "${1:-150}" >/dev/null 2>&1 || true
+}
 
 # Bounded runner: termux-usb can hang forever if the Termux:API app is missing
 # or was killed by battery optimisation.
@@ -251,6 +271,8 @@ if [[ -z $dev ]]; then
 			dev=${new[0]}
 			echo >&2
 			echo "found $dev" >&2
+			notify_vibrate 100
+			notify_toast "spdhost: device found"
 			break
 		fi
 		if (( ${#new[@]} > 1 )); then
@@ -273,6 +295,7 @@ if [[ -z $dev ]]; then
 	done
 	echo >&2
 	if [[ -z $dev ]]; then
+		notify_toast "spdhost: no device found"
 		if (( ${#base[@]} > 1 )); then
 			echo "several USB devices are attached and none is new:" >&2
 			printf '  %s\n' "${base[@]}" >&2
@@ -311,6 +334,7 @@ set -e
 
 rc=$(cat "$rcfile" 2>/dev/null || true)
 if [[ -z $rc ]]; then
+	notify_toast "spdhost: failed to start"
 	echo "spdhost never started (termux-usb exit $term_rc). Look at the message above:" >&2
 	echo "  Permission denied / timeout: tap OK on the dialog within 30 seconds." >&2
 	echo "  No such device: the device left download mode; replug and retry." >&2
@@ -320,5 +344,12 @@ fi
 if [[ $rc == 97 ]]; then
 	echo "termux-usb ran the launcher without a file descriptor." >&2
 	echo "Update the package: pkg upgrade termux-api" >&2
+fi
+if [[ $rc == 0 ]]; then
+	notify_vibrate 60
+	notify_toast "spdhost: done"
+else
+	notify_vibrate 300
+	notify_toast "spdhost: exited with an error"
 fi
 exit "$rc"

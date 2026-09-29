@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "usb.h"
+#include "usb.h" /* also declares spd_interrupted, shared with the USB layer */
 
 #define SPD_F_CRC16 1
 #define SPD_F_TRANSCODE 2

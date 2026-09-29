@@ -635,11 +635,16 @@ static int grab_termux(struct spd_usb *u)
 	}
 
 	for (i = 0; i < 60 && got < 0; i++) {
-		int n = list_one_device(dev, sizeof(dev), u->last_bus);
+		int n;
 		pid_t pid;
 		struct pollfd pfd;
 		int status;
 
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; giving up on reacquire\n");
+			break;
+		}
+		n = list_one_device(dev, sizeof(dev), u->last_bus);
 		if (n < 0) {
 			fprintf(stderr, "termux-usb -l failed. Is Termux:API installed?\n");
 			break;
@@ -719,14 +724,23 @@ static int grab_termux(struct spd_usb *u)
 }
 
 /* After a loader starts the product id may change; vendor stays 1782.
- * Enumerate that vendor and adopt the first matching bulk device.
- * Updates u->pid when the product id differs from the initial open. */
+ * Enumerate that vendor. On a desktop several 1782 devices can be attached
+ * at once (another phone, a hub full of unrelated gear that happens to
+ * share the vendor ID). To avoid silently reattaching to the wrong one,
+ * prefer a device whose product id still matches what we had before this
+ * reset; only fall back to "first one that opens" when nothing matches,
+ * and say so, since that fallback is a guess. */
 static int grab_enum(struct spd_usb *u)
 {
 	int i;
 	for (i = 0; i < 60; i++) {
 		libusb_device **list = NULL;
 		ssize_t n, k;
+		unsigned vendor_matches = 0;
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; giving up on reacquire\n");
+			break;
+		}
 		if (i == 0)
 			fprintf(stderr, "waiting for vendor %04x to reappear (any product)\n", u->vid);
 		n = libusb_get_device_list(u->ctx, &list);
@@ -734,6 +748,33 @@ static int grab_enum(struct spd_usb *u)
 			usleep(250000);
 			continue;
 		}
+		for (k = 0; k < n; k++) {
+			struct libusb_device_descriptor d;
+			if (libusb_get_device_descriptor(list[k], &d) == 0 && d.idVendor == u->vid)
+				vendor_matches++;
+		}
+		/* Pass 1: exact match on the product id we had before the reset. */
+		for (k = 0; k < n; k++) {
+			struct libusb_device_descriptor d;
+			libusb_device_handle *h = NULL;
+			if (libusb_get_device_descriptor(list[k], &d) < 0)
+				continue;
+			if (d.idVendor != u->vid || d.idProduct != u->pid)
+				continue;
+			if (libusb_open(list[k], &h) < 0 || !h)
+				continue;
+			if (adopt(u, h, 1) == 0) { /* strict_pid=1: this pass only wants the exact match */
+				fprintf(stderr, "reopened %04x:%04x\n", u->vid, u->pid);
+				libusb_free_device_list(list, 1);
+				return 0;
+			}
+		}
+		if (vendor_matches > 1)
+			fprintf(stderr, "reacquire: %u devices share vendor %04x and none matches"
+				" the previous product id %04x; guessing the first one that opens\n",
+				vendor_matches, u->vid, u->pid);
+		/* Pass 2: any product under this vendor (loader legitimately changed it,
+		 * or this is the first reacquire after adopting by fd, pid unknown yet). */
 		for (k = 0; k < n; k++) {
 			struct libusb_device_descriptor d;
 			libusb_device_handle *h = NULL;

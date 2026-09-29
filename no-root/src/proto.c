@@ -440,13 +440,37 @@ static int reopen_if_gone(struct spd *io)
 	return 0;
 }
 
+/* Per-try receive timeout for BootROM hello try i (0-based) of `tries`.
+ * Ramps from hello_to_min up to hello_to_max over the first `ramp` tries,
+ * then stays at hello_to_max. Below hello_to_min, LIBUSB_ERROR_TIMEOUT is
+ * indistinguishable from "BootROM not listening yet"; above hello_to_max,
+ * the ceiling exists because some phones genuinely take that long to answer
+ * once they are listening. The device can't tell you which situation you're
+ * in, so the ramp buys more attempts at cheap timeouts early — when "not
+ * listening yet" is the likelier explanation — while still reaching the full
+ * patient timeout by the time enough short tries have failed to make that
+ * less likely. Rationale, not a guarantee: on some phones the narrow window
+ * really does need a near-hello_to_max wait from the very first try, which
+ * is what SPDHOST_BROM_NO_RAMP=1 is for. */
+static int ramp_hello_to(int i, int lo, int hi, int ramp)
+{
+	if (ramp <= 1 || lo >= hi)
+		return hi;
+	if (i >= ramp - 1)
+		return hi;
+	return lo + (int)((long long)(hi - lo) * i / (ramp - 1));
+}
+
 int spd_check_baud(struct spd *io, int nbytes, int tries)
 {
 	int i;
 	int brom = (nbytes == 1);
 	int pause;
-	int hello_to;
+	int hello_to;      /* ceiling; also this try's timeout when brom==0 */
+	int hello_to_min;  /* brom only: ramp floor */
+	int ramp_tries;    /* brom only: tries to reach the ceiling over */
 	int wall_ms;
+	int wall_explicit;
 	int brom_trace;
 	int reacqs_max = 0;
 	int reacqs_done = 0;
@@ -455,28 +479,61 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 	/* BootROM hello (raw 1×0x7e): patient defaults + wall; tries arg ignored.
 	 * hello_to uses SPDHOST_BROM_TIMEOUT only (default 3000) — not max'd with
 	 * global --timeout / usb.timeout_ms (that still applies to CONNECT/bulk/loader).
-	 * Wall default 20000 ms: ~5–6 full tries at hello_to=3000+pause 500; for ≥8
-	 * tries set SPDHOST_BROM_WALL_MS≈30000 (no auto-scaling). */
+	 *
+	 * Each try's own receive timeout ramps from SPDHOST_BROM_TIMEOUT_MIN
+	 * (default 250) up to SPDHOST_BROM_TIMEOUT over SPDHOST_BROM_TIMEOUT_RAMP
+	 * tries (default 6), then holds at the ceiling. A timed-out try that used
+	 * a short timeout costs little wall budget, so more of them fit before
+	 * SPDHOST_BROM_WALL_MS runs out — which matters because the BootROM's
+	 * listen window is often shorter than one try at the old fixed 3000ms.
+	 * SPDHOST_BROM_NO_RAMP=1 disables this and every try uses the ceiling,
+	 * matching the previous fixed-timeout behaviour.
+	 *
+	 * If SPDHOST_BROM_WALL_MS is not set, the wall is computed from `tries`
+	 * and the ramp so that all of them actually fit (previously the 20000ms
+	 * default only fit 5-6 of the documented 15 tries; the rest were silently
+	 * never attempted). An explicit SPDHOST_BROM_WALL_MS always wins. */
 	if (brom) {
 		tries = env_int("SPDHOST_BROM_TRIES", 15, 1, 100);
 		pause = env_int("SPDHOST_BROM_PAUSE_MS", 500, 0, 5000);
 		hello_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
-		wall_ms = env_int("SPDHOST_BROM_WALL_MS", 20000, 1000, 120000);
+		hello_to_min = env_int("SPDHOST_BROM_TIMEOUT_MIN", 250, 1, hello_to);
+		ramp_tries = env_int("SPDHOST_BROM_TIMEOUT_RAMP", 6, 1, tries);
+		if (env_int("SPDHOST_BROM_NO_RAMP", 0, 0, 1))
+			hello_to_min = hello_to; /* ramp_hello_to() then returns hello_to for every i */
 		brom_trace = io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1);
 		/* Default OFF: forced USB close/reopen mid-hello re-prompts termux-usb
 		 * Allow and often hits claim BUSY. Soft OUT TIMEOUT retries + wall stay
 		 * on the same FD. REACQ>0 = soft same-handle settle+retry only (no reopen). */
 		reacqs_max = env_int("SPDHOST_BROM_REACQ", 0, 0, 2);
+		{
+			const char *w = getenv("SPDHOST_BROM_WALL_MS");
+			wall_explicit = w && w[0];
+		}
+		if (wall_explicit) {
+			wall_ms = env_int("SPDHOST_BROM_WALL_MS", 20000, 1000, 120000);
+		} else {
+			long long budget = 0;
+			for (i = 0; i < tries; i++) {
+				if (i) budget += pause;
+				budget += ramp_hello_to(i, hello_to_min, hello_to, ramp_tries);
+			}
+			wall_ms = (int)(budget > 120000 ? 120000 : budget < 1000 ? 1000 : budget);
+		}
 		t0 = mono_ms();
 		/* Always-on short start line (hello_to + wall + tries). */
-		fprintf(stderr, "brom: hello hello_to=%d wall=%d tries=%d\n",
-			hello_to, wall_ms, tries);
+		fprintf(stderr, "brom: hello hello_to=%d..%d(x%d) wall=%d%s tries=%d\n",
+			hello_to_min, hello_to, ramp_tries, wall_ms,
+			wall_explicit ? "" : "(auto)", tries);
 		if (brom_trace)
-			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d wall=%d reacq=%d @%lldms\n",
-				tries, pause, hello_to, wall_ms, reacqs_max, t0);
+			fprintf(stderr, "brom: check-baud start nbytes=1 tries=%d pause=%d hello_to=%d..%d(x%d) wall=%d%s reacq=%d @%lldms\n",
+				tries, pause, hello_to_min, hello_to, ramp_tries, wall_ms,
+				wall_explicit ? "" : "(auto)", reacqs_max, t0);
 	} else {
 		pause = 200;
 		hello_to = io->usb.timeout_ms;
+		hello_to_min = hello_to;
+		ramp_tries = 1;
 		wall_ms = 0;
 		brom_trace = 0;
 	}
@@ -486,8 +543,13 @@ reacq_restart:
 		int n;
 		int rc;
 		int saved_to;
+		int try_to = brom ? ramp_hello_to(i, hello_to_min, hello_to, ramp_tries) : hello_to;
 		long long now;
 
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; stopping check-baud\n");
+			return -1;
+		}
 		if (brom) {
 			now = mono_ms();
 			if (now - t0 >= wall_ms) {
@@ -501,6 +563,10 @@ reacq_restart:
 		}
 		if (i)
 			pause_ms(pause);
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; stopping check-baud\n");
+			return -1;
+		}
 		if (brom) {
 			now = mono_ms();
 			if (now - t0 >= wall_ms) {
@@ -512,12 +578,12 @@ reacq_restart:
 		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
 		/* Hello-only timeout for send; do not leave global usb.timeout_ms raised. */
 		saved_to = io->usb.timeout_ms;
-		io->usb.timeout_ms = hello_to;
+		io->usb.timeout_ms = try_to;
 		rc = spd_send(io);
 		io->usb.timeout_ms = saved_to;
 		if (brom && brom_trace)
-			fprintf(stderr, "brom: try %d of %d send rc=%d @%lldms\n",
-				i + 1, tries, rc, mono_ms() - t0);
+			fprintf(stderr, "brom: try %d of %d send rc=%d to=%dms @%lldms\n",
+				i + 1, tries, rc, try_to, mono_ms() - t0);
 		if (rc < 0) {
 			if (reopen_if_gone(io) == 0)
 				continue;
@@ -536,7 +602,7 @@ reacq_restart:
 			}
 			return -1;
 		}
-		n = spd_recv(io, hello_to);
+		n = spd_recv(io, try_to);
 		if (brom && brom_trace) {
 			if (n == 0)
 				fprintf(stderr, "brom: try %d of %d recv timeout @%lldms\n",
@@ -593,6 +659,10 @@ reacq_restart:
 		if (brom_trace)
 			fprintf(stderr, "brom: soft reacq %d of %d done; restarting check-baud (fresh wall=%d @0ms)\n",
 				reacqs_done, reacqs_max, wall_ms);
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; stopping check-baud\n");
+			return -1;
+		}
 		goto reacq_restart;
 	}
 	return -1;
@@ -788,6 +858,12 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 
 	while (done < size) {
 		uint8_t req[12];
+		if (spd_interrupted) {
+			fclose(fo);
+			fprintf(stderr, "interrupted; stopped read at %llu of %llu bytes (%s left as-is)\n",
+				(unsigned long long)done, (unsigned long long)size, out_path);
+			return -1;
+		}
 		uint64_t left = size - done;
 		uint64_t pos = offset + done;
 		uint32_t n = left > (uint64_t)step ? (uint32_t)step : (uint32_t)left;
@@ -853,6 +929,13 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	for (off = 0; off < len; ) {
 		uint64_t left = len - off;
 		size_t n = left > (uint64_t)step ? (size_t)step : (size_t)left;
+		if (spd_interrupted) {
+			fclose(fi);
+			fprintf(stderr, "interrupted; stopped write at %llu of %llu bytes into '%s'"
+				" (partition is now incomplete)\n",
+				(unsigned long long)off, (unsigned long long)len, name);
+			return -1;
+		}
 		if (fread(io->temp, 1, n, fi) != n)
 			die("short read");
 		spd_encode(io, BSL_CMD_MIDST_DATA, io->temp, n);
@@ -896,6 +979,12 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 	for (off = 0; off < (uint64_t)len; ) {
 		uint64_t left = (uint64_t)len - off;
 		size_t n = left > (uint64_t)step ? (size_t)step : (size_t)left;
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; stopped write at %llu of %llu bytes into '%s'"
+				" (partition is now incomplete)\n",
+				(unsigned long long)off, (unsigned long long)len, name);
+			return -1;
+		}
 		spd_encode(io, BSL_CMD_MIDST_DATA, buf + off, n);
 		if (spd_send(io) < 0)
 			die("send failed during write");

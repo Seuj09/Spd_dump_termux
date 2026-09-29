@@ -407,11 +407,24 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
 `--timeout 5000` still applies to CONNECT / bulk / loader paths. BootROM
 hello send/recv uses `SPDHOST_BROM_TIMEOUT` only (default **3000**), not
 `max(--timeout, BROM_TIMEOUT)`, so a larger global timeout no longer starves
-the try budget under the wall. Every BootROM start prints one always-on line
-like `brom: hello hello_to=3000 wall=20000 tries=15`. With defaults
-(`hello_to=3000`, pause 500, wall **20000**) expect ~5–6 full tries before
-the wall; for ≥8 tries set `SPDHOST_BROM_WALL_MS=30000` (or similar). There
-is no auto-scaling of the wall.
+the try budget under the wall.
+
+Each try's own timeout now ramps from `SPDHOST_BROM_TIMEOUT_MIN` (default
+**250** ms) up to `SPDHOST_BROM_TIMEOUT` over `SPDHOST_BROM_TIMEOUT_RAMP`
+tries (default **6**), then holds at the ceiling. A try that times out at
+250ms costs far less of the wall budget than one at 3000ms, so more tries
+land inside a short BootROM listen window before giving up. Every BootROM
+start prints one always-on line like
+`brom: hello hello_to=250..3000(x6) wall=43750(auto) tries=15`.
+`SPDHOST_BROM_NO_RAMP=1` disables the ramp (every try uses the ceiling,
+matching pre-ramp behaviour) for phones where even the first try needs the
+full timeout.
+
+If `SPDHOST_BROM_WALL_MS` is **not** set, the wall is now computed from
+`tries` and the ramp so all of them actually get attempted — previously the
+fixed 20000ms default only fit ~5–6 of the documented 15 tries and the rest
+were silently never sent. Set `SPDHOST_BROM_WALL_MS` explicitly to override
+this (it always wins over the auto value; still capped at 120000).
 
 Optional sfd-aligned settle=0 probe (`sfd_tool` has no post-line-state
 settle; menu arm 2). Keeps hello_to at 3000 via `--timeout 3000` /
@@ -440,16 +453,24 @@ SPDHOST_TIMEOUT=5000 SPDHOST_VERBOSE=1 SPDHOST_BROM_TRACE=1 \
 
 BootROM hello (`check-baud` with raw `0x7e`) also reads optional env knobs
 (defaults are patient; shrink them to bisect): `SPDHOST_BROM_TRIES` (15),
-`SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000; BootROM hello
-only — not max'd with `--timeout`), `SPDHOST_BROM_WALL_MS` (**20000**; for
-≥8 tries use ≈30000), `SPDHOST_BROM_TRACE` (1 = breadcrumb timestamps even
-without `--verbose`; open/claim, line-state done, try N of M, wall, settle,
-reacq), `SPDHOST_BROM_REACQ` (default **0** = off — Termux-safe; no mid-ping
+`SPDHOST_BROM_PAUSE_MS` (500), `SPDHOST_BROM_TIMEOUT` (3000; the ceiling a
+try ramps up to — BootROM hello only, not max'd with `--timeout`),
+`SPDHOST_BROM_TIMEOUT_MIN` (250; ramp floor), `SPDHOST_BROM_TIMEOUT_RAMP` (6;
+tries to reach the ceiling over), `SPDHOST_BROM_NO_RAMP` (0; `1` = every try
+uses the ceiling, old behaviour), `SPDHOST_BROM_WALL_MS` (auto-computed from
+`tries` + the ramp unless set explicitly; explicit always wins, capped at
+120000), `SPDHOST_BROM_TRACE` (1 = breadcrumb timestamps even
+without `--verbose`; open/claim, device speed/endpoints, clear_halt,
+line-state done, try N of M with its timeout, wall, settle, reacq),
+`SPDHOST_BROM_REACQ` (default **0** = off — Termux-safe; no mid-ping
 USB close/reopen / second Allow dialog. Soft OUT TIMEOUT retries + wall stay
 on the **same FD**. Set to `1`/`2` for soft same-handle settle+retry after
 try/wall miss — still no termux-usb reopen; max `2`),
 `SPDHOST_BROM_SETTLE_MS` (default **100** ms pause after line-state),
-`SPDHOST_BROM_DRAIN` (default **0**; `1` = short bulk-IN drain after settle).
+`SPDHOST_BROM_DRAIN` (default **0**; `1` = short bulk-IN drain after settle),
+`SPDHOST_NO_CLEAR_HALT` (default **0**; `1` = skip the `libusb_clear_halt` on
+both bulk endpoints that now runs right after claim, before line-state — set
+this to check whether a data-toggle reset changes anything for your phone).
 Cold-unplug ≥5 s between sessions; success once ≠ stickier later without a
 replug. BootROM OUT `LIBUSB_ERROR_TIMEOUT` during check-baud is soft (same as
 recv timeout): remaining tries continue on the same handle; it does not abort
@@ -457,7 +478,12 @@ the session. A forced USB reacquire mid-hello was removed: it hit
 `LIBUSB_ERROR_BUSY` and a second termux-usb Allow. If claim returns BUSY
 (leftover claim after a prior unclean exit — Termux:API keeps the FD), stderr
 prints an unplug/replug hint; spdhost also `libusb_release_interface` before
-close and on atexit so the next run can claim cleanly.
+close and on atexit so the next run can claim cleanly. `spdhost` now also
+traps SIGINT/SIGTERM: Ctrl-C during a hello, read-part, write-part or
+erase-part stops that operation at its next checkpoint and exits normally
+(so the interface-release above actually runs), instead of the process dying
+outright and leaving the interface claimed for the next run. A second
+Ctrl-C, if the first one is somehow not enough, restores the default action.
 
 On a Linux PC that can open the device node (root, or a udev rule for
 vendor `1782`, product `4d00`), drop `spdhost-usb` and call the binary
