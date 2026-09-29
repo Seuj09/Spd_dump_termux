@@ -271,8 +271,12 @@ if [[ -z $dev ]]; then
 			dev=${new[0]}
 			echo >&2
 			echo "found $dev" >&2
-			notify_vibrate 100
-			notify_toast "spdhost: device found"
+			# Backgrounded: each termux-vibrate/termux-toast call is a Termux:API
+			# round-trip (hundreds of ms), and this line sits between "found" and
+			# termux-usb -e — the exact Allow/spawn race the ramp is trying to
+			# win. Do not block that on notification latency.
+			notify_vibrate 100 &
+			notify_toast "spdhost: device found" &
 			break
 		fi
 		if (( ${#new[@]} > 1 )); then
