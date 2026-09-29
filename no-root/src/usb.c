@@ -89,26 +89,35 @@ static void trace_device(struct spd_usb *u)
 		u->ep_out, u->out_mps, u->ep_in, u->in_mps, d.bMaxPacketSize0);
 }
 
-/* EXPERIMENT (item 1): CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints.
- * Also resets the data toggle on both sides, which rules out a toggle
- * mismatch after an earlier cancelled transfer. Errors are not fatal (some
- * BootROMs stall the request); they are only shown with the trace.
+/* CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints, called only from
+ * spd_brom_after_line_state() — i.e. only on the BootROM-hello path, after
+ * line-state, never from every open/reacquire (that included post-FDL EXEC
+ * reacquires, which this has nothing to do with). Also resets the data
+ * toggle on both sides, which rules out a toggle mismatch after an earlier
+ * cancelled transfer. Errors are not fatal (some BootROMs stall the
+ * request) but are always printed, trace or not — a real failure here is
+ * worth knowing about even outside a debugging session.
  * Disable for A/B testing with SPDHOST_NO_CLEAR_HALT=1. */
-static void clear_halts(struct spd_usb *u)
+void spd_usb_clear_halts(struct spd_usb *u)
 {
 	const char *off = getenv("SPDHOST_NO_CLEAR_HALT");
-	int eo, ei;
+	int ei, eo;
 
+	if (!u || !u->handle)
+		return;
 	if (off && off[0] && off[0] != '0') {
 		if (brom_trace_on())
 			fprintf(stderr, "brom: clear_halt skipped (SPDHOST_NO_CLEAR_HALT)\n");
 		return;
 	}
-	eo = libusb_clear_halt(u->handle, (unsigned char)u->ep_out);
 	ei = libusb_clear_halt(u->handle, (unsigned char)u->ep_in);
+	eo = libusb_clear_halt(u->handle, (unsigned char)u->ep_out);
 	if (brom_trace_on())
-		fprintf(stderr, "brom: clear_halt out=%s in=%s @%lldms\n",
-			libusb_error_name(eo), libusb_error_name(ei), mono_ms());
+		fprintf(stderr, "brom: clear_halt in=%s out=%s @%lldms\n",
+			libusb_error_name(ei), libusb_error_name(eo), mono_ms());
+	else if (ei < 0 || eo < 0)
+		fprintf(stderr, "brom: clear_halt in=%s out=%s\n",
+			libusb_error_name(ei), libusb_error_name(eo));
 }
 
 static int claim_bulk(struct spd_usb *u)
@@ -241,7 +250,6 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 		u->handle = NULL;
 		return -1;
 	}
-	clear_halts(u);
 	return 0;
 }
 

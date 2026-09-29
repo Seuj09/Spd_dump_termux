@@ -49,6 +49,11 @@ int spd_usb_reacquire(struct spd_usb *u);
  * is the CDC control interface, not necessarily the bulk interface. */
 int spd_usb_line_state(struct spd_usb *u);
 
+/* CLEAR_FEATURE(ENDPOINT_HALT) on bulk IN+OUT. Only meant to be called from
+ * spd_brom_after_line_state() (proto.c), on the BootROM-hello path — not a
+ * general-purpose reset for every open/reacquire. See usb.c for why. */
+void spd_usb_clear_halts(struct spd_usb *u);
+
 int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len);
 /* >0 byte count, 0 timeout, -1 disconnect (u->gone set), -2 other error. */
 int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms);

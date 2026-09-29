@@ -190,6 +190,7 @@ only — `spd_dump` does not ship that SM here).
 | `libusb_claim_interface failed : LIBUSB_ERROR_BUSY` | An earlier run or another app still holds the interface. Unplug, replug into download mode, retry. `spd_dump` now releases the interface on exit, including on error exits. |
 | `Device xxxx:yyyy is not a Spreadtrum/Unisoc download-mode device` | Wrong device selected, or the phone is in a different mode. Pass the right `/dev/bus/usb/N/M`, or `SPD_USB_ANY=1` to override. |
 | `spd_dump never started` | Read the `termux-usb` line above it (`Permission denied.`, `No such device.`, `Open device failed.`). |
+| A BootROM/FDL reply seems to go missing right at the edge of a timeout | `spd_dump` used to discard any bytes libusb returned together with `LIBUSB_ERROR_TIMEOUT`, even when some had actually arrived. It now keeps them instead of returning empty — a real reply landing a few ms after the timeout fired is no longer silently dropped (`recv_msg_orig` and all three `ChangeMode` bulk-IN reads). |
 
 `termux-usb` also accepts `vendorId productId` instead of a path, but the
 current Termux:API app source does not read those fields, so the wrapper always

@@ -428,7 +428,11 @@ int recv_msg_orig(spdio_t *io) {
 			int err = libusb_bulk_transfer(io->dev_handle, io->endp_in, io->recv_buf, RECV_BUF_LEN, &len, io->timeout);
 			if (err == LIBUSB_ERROR_NO_DEVICE)
 				ERR_EXIT("connection closed\n");
-			else if (err < 0) {
+			/* exp/brom-hello-diag: keep any bytes transferred on TIMEOUT. */
+			else if (err == LIBUSB_ERROR_TIMEOUT) {
+				if (!len) return 0;
+				/* fall through with partial len > 0 */
+			} else if (err < 0) {
 				DBG_LOG("usb_recv failed : %s\n", libusb_error_name(err)); return 0;
 			}
 #else
@@ -2475,7 +2479,8 @@ void ChangeMode(spdio_t *io, int ms, int bootmode, int at) {
 			err = libusb_bulk_transfer(io->dev_handle, io->endp_in, io->recv_buf, RECV_BUF_LEN, &bytes_read, io->timeout);
 			if (err == LIBUSB_ERROR_NO_DEVICE)
 				ERR_EXIT("connection closed\n");
-			else if (err < 0)
+			/* exp/brom-hello-diag: keep TIMEOUT partials (empty TIMEOUT → !bytes_read below). */
+			else if (err < 0 && err != LIBUSB_ERROR_TIMEOUT)
 				ERR_EXIT("usb_recv failed : %s\n", libusb_error_name(err));
 			if (!bytes_read) ERR_EXIT("read response from boot mode failed\n");
 			if (io->verbose >= 2) {
@@ -2510,7 +2515,8 @@ void ChangeMode(spdio_t *io, int ms, int bootmode, int at) {
 		err = libusb_bulk_transfer(io->dev_handle, io->endp_in, io->recv_buf, RECV_BUF_LEN, &bytes_read, io->timeout);
 		if (err == LIBUSB_ERROR_NO_DEVICE)
 			DBG_LOG("connection closed\n");
-		else if (err < 0)
+		/* exp/brom-hello-diag: keep TIMEOUT partials (skip ERR_EXIT; use bytes_read). */
+		else if (err < 0 && err != LIBUSB_ERROR_TIMEOUT)
 			ERR_EXIT("usb_recv failed : %s\n", libusb_error_name(err));
 		else if (bytes_read) {
 			if (io->verbose >= 2) {
@@ -2543,7 +2549,8 @@ void ChangeMode(spdio_t *io, int ms, int bootmode, int at) {
 					err = libusb_bulk_transfer(io->dev_handle, io->endp_in, io->recv_buf, RECV_BUF_LEN, &bytes_read, io->timeout);
 					if (err == LIBUSB_ERROR_NO_DEVICE)
 						DBG_LOG("connection closed\n");
-					else if (err < 0)
+					/* exp/brom-hello-diag: keep TIMEOUT partials (skip ERR_EXIT; use bytes_read). */
+					else if (err < 0 && err != LIBUSB_ERROR_TIMEOUT)
 						ERR_EXIT("usb_recv failed : %s\n", libusb_error_name(err));
 					else if (bytes_read) {
 						if (io->verbose >= 2) {

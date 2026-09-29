@@ -469,8 +469,10 @@ try/wall miss — still no termux-usb reopen; max `2`),
 `SPDHOST_BROM_SETTLE_MS` (default **100** ms pause after line-state),
 `SPDHOST_BROM_DRAIN` (default **0**; `1` = short bulk-IN drain after settle),
 `SPDHOST_NO_CLEAR_HALT` (default **0**; `1` = skip the `libusb_clear_halt` on
-both bulk endpoints that now runs right after claim, before line-state — set
-this to check whether a data-toggle reset changes anything for your phone).
+both bulk endpoints that now runs right after line-state, before settle, on
+the BootROM-hello path only — not on every open/reacquire, including
+post-FDL EXEC ones, which it has nothing to do with. Set this to check
+whether a data-toggle reset changes anything for your phone).
 Cold-unplug ≥5 s between sessions; success once ≠ stickier later without a
 replug. BootROM OUT `LIBUSB_ERROR_TIMEOUT` during check-baud is soft (same as
 recv timeout): remaining tries continue on the same handle; it does not abort

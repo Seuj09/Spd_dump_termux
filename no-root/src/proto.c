@@ -405,6 +405,8 @@ void spd_brom_after_line_state(struct spd *io)
 
 	if (!io)
 		return;
+	/* BootROM-hello only, right after line-state — see spd_usb_clear_halts(). */
+	spd_usb_clear_halts(&io->usb);
 	settle = env_int("SPDHOST_BROM_SETTLE_MS", 100, 0, 2000);
 	if (settle > 0) {
 		if (io->verbose || env_int("SPDHOST_BROM_TRACE", 0, 0, 1))
