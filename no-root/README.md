@@ -74,11 +74,20 @@ The menu's own typed `yes` (it shows the sha256 of the bytes) is the gate: it th
 passes `--confirm-token <sha256>`, and spdhost writes misc only if the bytes it is
 about to send hash to exactly that value (one misc write per session). Without a
 token, spdhost prompts on `/dev/tty` and accepts `yes` with trailing CR/LF/spaces.
-The frames match vendored spd_dump (`tests/reboot-seq.sh`): START_DATA misc
-2048, one 2048-byte MIDST, END_DATA, NORMAL_RESET. Like spd_dump, spdhost
-stops the command list after `reset`, `power-off` or `reboot-*` succeeds.
+A 2048-byte BCB is one MIDST (`--step` is forced to 0x1000 for that write).
+Like spd_dump, spdhost stops the command list after `reset`, `power-off` or
+`reboot-*` succeeds.
 
-Guard a misc write with `misc-backup FILE` on the same line, after `parts`:
+`reboot-*` and `write-part misc` read the whole misc partition once before
+writing, unless this same session already ran `misc-backup`. The automatic
+copy is `misc-before-YYYYMMDD-HHMMSS.img` in the current directory. After the
+write, spdhost reads misc back: the new bytes must match and the rest must be
+unchanged, or it does not reset. `write-part misc` accepts only a 2048-byte
+BCB or a file the size of the whole partition (run `parts` first so that size
+is the live one).
+
+Guard a misc write with `misc-backup FILE` on the same line, after `parts`,
+when you want the copy at a chosen path:
 
 ```sh
 spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
@@ -307,11 +316,45 @@ spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
 `64M` is 64 mebibytes. `K` and `G` work the same way. A bare number or a
 `0x` hex number is a byte count.
 
-`write-part NAME FILE` writes a file onto a partition. `erase-part NAME`
-erases one. `reboot-recovery` and `reboot-fastboot` write a 2048-byte BCB
-to `misc` then reset (see misc section). All of these stop and ask you to
+`write-part NAME FILE` writes one file. `misc` is only a 2048-byte BCB or
+the whole partition (backup and read-back, see above). A name containing
+`fixnv1` is sent with spd_dump's NV framing (checksum in the start packet),
+not as a raw copy. `calinv` is skipped. `runtimenv` is written; spd_dump
+erases that name instead. On a phone that is not A/B, a same-size `NAME_bak`
+is written with a normal transfer. vbmeta flags are left as they are in the
+file. There is no `w_force` (that repartitions to rename a row, which can
+brick the disk if it stops halfway).
+
+`write-parts DIR` (and `write-parts-a` / `write-parts-b`) writes
+`DIR/<partition>.img` after `parts`, then sets the active slot when the
+device is A/B. `super.img` without `metadata.img` erases `metadata`, same as
+spd_dump. The scan includes every regular file; spd_dump's directory loop
+skips one entry. Junk names (`*.txt`, `SHA256SUMS`, `misc-slotinfo`,
+`misc-before-*`, `*_bak`) are skipped.
+
+`repartition FILE.xml` sends `<Partition id="name" size="N"/>` rows
+(`N` is the XML integer, MiB, or `0xffffffff` for the last row). It asks
+for `yes`. Run `parts` again afterwards; the cached table is stale.
+
+`set-active a|b` rewrites the 32-byte slot block at misc offset `0x800` and
+writes the whole misc image back, with the same backup and read-back.
+`pack-slot a|b IN OUT` does that patch offline, with no phone attached.
+
+`erase-part NAME` erases one partition. It refuses `persist`, `all`, and
+`splloader` (no FRP helper, no erase-everything, no bootloader-unlock erase).
+
+`reboot-recovery` and `reboot-fastboot` write a 2048-byte BCB to `misc` then
+reset (see misc section). Writes, erases, repartition, and reboot ask you to
 type `yes`. `--yes` skips that prompt. Do not put `--yes` in front of the
 device path. Options go before the commands:
+
+The menu (`scripts/menu.sh`) can flash `input/*.img`, restore a backup
+folder, repartition, set the slot, and dump the imei set (`miscdata`,
+`prodnv`, `l_fixnv1`, `l_fixnv2`, `l_runtimenv1`, `l_runtimenv2`). Unlock
+BootLoader, disable-verity, and FRP reset are listed and temporary disabled:
+nothing is sent. Only the ums9230 Infinix loader pair is shipped. The release
+menu's second exec address `0x65015f48` is used only when
+`custom_exec_no_verify_65015f48.bin` is actually on disk.
 
 ```sh
 spdhost-usb --yes fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \

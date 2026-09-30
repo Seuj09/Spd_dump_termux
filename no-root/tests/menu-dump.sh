@@ -15,7 +15,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 make -C "$root/spd_dump" GITVER.h >/dev/null
 mkdir -p "$tmp/pkg/fdl/ums9230"
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/spd_dump" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen_expected" || exit 1
@@ -67,20 +67,13 @@ check "KiB table: shift 10 like spd_dump" test "$PARTS_SHIFT" = 10
 check "fmt_size 4194304=4M 1572864=1.5M 262144=256K 6442450944=6G" \
 	test "$(fmt_size 4194304) $(fmt_size 1572864) $(fmt_size 262144) $(fmt_size 6442450944)" = "4M 1.5M 256K 6G"
 sz=$(stat -c %s "$DUMP_DIR/misc-slotinfo.img" 2>/dev/null || echo 0)
-check "misc read is 1048576 bytes (got $sz)" test "$sz" = 1048576
+check "slot record is 32 bytes at misc+0x800 (got $sz)" test "$sz" = 32
 spd_all "$tmp/s1" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=a
-check "misc bytes == spd_dump misc.bin" cmp -s "$DUMP_DIR/misc-slotinfo.img" "$tmp/s1/misc.bin"
-"$tmp/gen_expected" misc 0 1048576 > "$tmp/misc.exp"
-check "misc bytes == mock contents" cmp -s "$DUMP_DIR/misc-slotinfo.img" "$tmp/misc.exp"
-# Frame compare: spdhost misc READ_START..READ_END == spd_dump read_part misc 0 1048576.
-blk() { awk -v n="$2" '/^SEQ 10 /{buf=""; on=(index($0,n)>0)} on{buf=buf $0 "\n"} on&&/^SEQ 12 /{last=buf; on=0} END{printf "%s", last}' "$1"; }
-mkdir -p "$tmp/rp"; ( cd "$tmp/rp" && MOCK_PTABLE="$tmp/pt" MOCK_LOG="$tmp/rp/rp.seq" TERMUX_USB_FD=7 timeout 60 "$tmp/spd_dump" \
-	exec_addr 0x65015f08 fdl "$tmp/fdl1-dl.bin" 0x65000800 fdl "$tmp/fdl2-dl.bin" 0x9efffe00 exec \
-	read_part misc 0 1048576 rp_misc.bin reset 7</dev/null </dev/null >/dev/null 2>&1 )
-misc_hex=6d0069007300630000 # "misc\0" as UTF-16LE prefix in READ_START
-blk "$tmp/rp/rp.seq" "$misc_hex" > "$tmp/sd.misc"; blk "$tmp/mock.seq" "$misc_hex" > "$tmp/sh.misc"
-check "misc read frames identical to spd_dump ($(grep -c '^SEQ 11' "$tmp/sh.misc") MIDST)" \
-	bash -c "[ -s '$tmp/sd.misc' ] && diff -q '$tmp/sd.misc' '$tmp/sh.misc' >/dev/null"
+dd if="$tmp/s1/misc.bin" of="$tmp/slot.exp" bs=1 skip=2048 count=32 status=none
+check "slot record == spd_dump misc.bin[0x800:0x820]" cmp -s "$DUMP_DIR/misc-slotinfo.img" "$tmp/slot.exp"
+# One READ_MIDST: 32 bytes at offset 0x800 (le32 length, le32 offset). Not a 1 MiB misc read.
+check "slot read is one 32-byte MIDST at 0x800" \
+	grep -q '^SEQ 11 len=8 2000000000080000 ' "$tmp/mock.seq"
 check "slot a detected" test "$ACTIVE_SLOT" = a
 dump_matched_parts all_lite "$(parts_bytes_path)" </dev/null >"$tmp/c1d.log" 2>&1; rc=$?
 check "slot a all_lite rc=0 ($rc)" test "$rc" = 0
@@ -113,11 +106,12 @@ MOCK_FAIL_MID=boot_b dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$
 check "failure: nonzero rc ($rc)" test "$rc" != 0
 check "failure: failed list names boot_b only" grep -qx 'FAILED (1 of 6): boot_b' "$tmp/c3.log"
 check "failure: boot_b.img.partial kept, short" bash -c "[ -f '$DUMP_DIR/boot_b.img.partial' ] && (( \$(stat -c %s '$DUMP_DIR/boot_b.img.partial') < 4194304 ))"
-check "failure: previous boot_b.img restored, not in SHA256SUMS" \
+check "failure: previous boot_b.img kept, not in SHA256SUMS" \
 	bash -c "[ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && ! grep -q ' boot_b.img\$' '$DUMP_DIR/SHA256SUMS'"
 check "failure: partitions after it still dumped + verified" \
 	bash -c "cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 5 ] && grep -q ' uboot_b.img\$' SHA256SUMS && sha256sum -c --quiet SHA256SUMS"
-check "failure: spdhost logged --keep-going + list" grep -q 'read-part failed (1): boot_b' "$tmp/c3.log"
+check "failure: spdhost logged the failed partition" grep -q 'dump failed (1): boot_b' "$tmp/c3.log"
+check "failure: older boot_b.img called out" grep -q 'OLDER copy' "$tmp/c3.log"
 DUMP_DIR=$tmp/b3n; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
 load_parts_state
 MOCK_FAIL_START=uboot_a dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c3n.log" 2>&1; rc=$?
@@ -188,9 +182,9 @@ printf 'y\nall_lite\n' | dump_partition >"$tmp/c11.log" 2>&1; rc=$?
 check "menu Refresh=y then all_lite: ONE session, slot b live (rc=$rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c11.log') = 1 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ]"
 DUMP_DIR=$tmp/b12; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
-printf 'n\nboot\n\n' | dump_partition >"$tmp/c12.log" 2>&1; rc=$?
-check "menu Refresh=n (cached path unchanged): read-part boot_b 4194304, rc=$rc" \
-	bash -c "[ $rc = 0 ] && grep -q 'read-part boot_b 0 4194304 ' '$tmp/c12.log' && ! grep '^+ ' '$tmp/c12.log' | grep -q ' parts ' && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp'"
+printf 'n\nboot\n' | dump_partition >"$tmp/c12.log" 2>&1; rc=$?
+check "menu Refresh=n still re-reads the live table and slot (rc=$rc)" \
+	bash -c "[ $rc = 0 ] && grep -q ' parts .* dump boot ' '$tmp/c12.log' && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp'"
 check "menu never passes --yes" bash -c "! grep -h '^+ ' '$tmp'/c*.log | grep -q -- '--yes'"
 
 # ---- case 6: guarded misc write via the menu helper ----
@@ -214,6 +208,16 @@ DUMP_DIR=$tmp/g3; mkdir -p "$DUMP_DIR"
 MISC_CONFIRM_TOKEN=$(sha256sum "$b" | awk '{print $1}')
 MOCK_MISC_OUT=$tmp/g3.misc guarded_misc_session "restore misc" write-part misc "$b" reset </dev/null >"$tmp/g3.log" 2>&1; rc=$?
 check "guarded restore from backup: rc=$rc, misc == backup" bash -c "[ $rc = 0 ] && cmp -s '$tmp/g3.misc' '$b'"
+
+# nv1: spd_dump reads the nv2 name from offset 512, file keeps the nv1 name.
+# Units stay >= 1024 so the KiB divisor does not change (128 would).
+printf '%s\n' 'l_fixnv1 1024' 'l_fixnv2 1024' 'misc 1024' 'uboot_a 1024' > "$tmp/ptnv"
+DUMP_DIR=$tmp/bnv
+export MOCK_PTABLE=$tmp/ptnv MOCK_SLOT=a
+dump_live_session l_fixnv1 </dev/null >"$tmp/cnv.log" 2>&1; rc=$?
+spd_all "$tmp/snv" l_fixnv1 MOCK_PTABLE="$tmp/ptnv" MOCK_SLOT=a
+check "nv1 dump matches spd_dump (nv2 at +512, 1048064 bytes, rc=$rc)" \
+	bash -c "[ $rc = 0 ] && [ -f '$tmp/snv/l_fixnv1.bin' ] && cmp -s '$DUMP_DIR/l_fixnv1.img' '$tmp/snv/l_fixnv1.bin' && [ \$(stat -c %s '$DUMP_DIR/l_fixnv1.img') = 1048064 ]"
 
 echo "menu-dump: $pass passed, $fail failed"
 (( fail == 0 ))

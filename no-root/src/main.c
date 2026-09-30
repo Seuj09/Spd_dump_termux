@@ -3,6 +3,7 @@
 
 #include "proto.h"
 #include "dumpcmd.h"
+#include "writecmd.h"
 #include "sha256.h"
 
 #include <errno.h>
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 volatile sig_atomic_t spd_interrupted = 0;
@@ -59,7 +61,7 @@ static void usage(void)
 		"  --keep-going        a failed read-part is logged and the next command\n"
 		"                      runs; exit status is 1 and failures are listed\n"
 		"  --no-line-state     skip the smartphone line-state control transfer\n"
-		"  --yes               do not prompt before write-part / erase-part / reboot-*\n"
+		"  --yes               do not prompt before write / erase / repartition / reboot-*\n"
 		"  --confirm-token SHA256  authorize ONE misc write (reboot-*, write-part\n"
 		"                      misc) whose exact bytes have this sha256; any\n"
 		"                      other bytes are refused before sending. For a\n"
@@ -91,8 +93,20 @@ static void usage(void)
 		"                               a later misc write in this session is\n"
 		"                               then read back and verified. Failure\n"
 		"                               stops the session before any write.\n"
-		"  write-part NAME FILE\n"
-		"  erase-part NAME\n"
+		"  write-part NAME FILE     one partition. misc is 2048 bytes or the\n"
+		"                          whole partition. fixnv1 uses NV framing.\n"
+		"                          A same-size NAME_bak is also written when\n"
+		"                          the device is not A/B. No vbmeta flag edit.\n"
+		"  write-parts DIR         every image in DIR (NAME.img), then the\n"
+		"                          active slot. write-parts-a / write-parts-b\n"
+		"                          force that slot when those files exist.\n"
+		"                          Run parts first. super without metadata.img\n"
+		"                          erases metadata. No w_force repartition.\n"
+		"  repartition FILE.xml    replace the partition table from XML\n"
+		"                          <Partition id=\"..\" size=\"..\"/>. Destructive.\n"
+		"  set-active a|b          rewrite misc slot bytes (backup + verify)\n"
+		"  pack-slot a|b IN OUT    offline: patch a misc image at offset 0x800\n"
+		"  erase-part NAME         not persist, not splloader, not all\n"
 		"  chip-uid\n"
 		"  reboot-recovery            write 2048-byte BCB to misc, then reset\n"
 		"  reboot-fastboot            same with --fastboot recovery arg\n"
@@ -300,6 +314,9 @@ static int is_command(const char *s)
 		strcmp(s, "exec_addr") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
+		strcmp(s, "write-parts") == 0 || strcmp(s, "write-parts-a") == 0 ||
+		strcmp(s, "write-parts-b") == 0 || strcmp(s, "repartition") == 0 ||
+		strcmp(s, "set-active") == 0 || strcmp(s, "pack-slot") == 0 ||
 		strcmp(s, "chip-uid") == 0 ||
 		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
 		strcmp(s, "reset") == 0 || strcmp(s, "dump") == 0 ||
@@ -388,6 +405,8 @@ static void do_ping(struct spd *io, int line, int fdl)
 /* Android bootloader_message: first 0x800 bytes of misc. A/B metadata @0x800. */
 enum { SPD_MISC_BCB_LEN = 0x800 };
 
+static int ensure_misc_backup(struct spd *io);
+
 /* kind: 0 = recovery only, 1 = recovery + --fastboot at 0x40. */
 static int do_reboot_bcb(struct spd *io, int yes, int kind)
 {
@@ -403,6 +422,10 @@ static int do_reboot_bcb(struct spd *io, int yes, int kind)
 		memcpy(buf + 0x40, "recovery\n--fastboot\n", 20);
 
 	authorize_write(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", "misc", buf, sizeof(buf));
+	/* One full-misc read, and only if this session has not already backed up.
+	 * The menu's misc-backup arms the guard, so this does not read twice. */
+	if (ensure_misc_backup(io))
+		return -1;
 	fprintf(stderr, "%s: writing %zu-byte BCB\n", label, sizeof(buf));
 	if (sizeof(buf) != (size_t)SPD_MISC_BCB_LEN) {
 		fprintf(stderr, "internal error: misc BCB length %zu != 2048\n", sizeof(buf));
@@ -418,11 +441,183 @@ static int do_reboot_bcb(struct spd *io, int yes, int kind)
 		if (rc)
 			return -1;
 	}
-	if (spd_misc_guard_armed() && spd_misc_verify(io, buf, sizeof(buf))) {
+	if (spd_misc_verify(io, buf, sizeof(buf))) {
 		fprintf(stderr, "misc read-back mismatch: NOT resetting. Restore misc from the backup.\n");
 		return -1;
 	}
 	return spd_simple(io, 0x05); /* BSL_CMD_NORMAL_RESET */
+}
+
+/* Backup misc once per session before any misc write. The file lands in the
+ * current directory so a bare reboot-* or write-part misc can be restored. */
+static int ensure_misc_backup(struct spd *io)
+{
+	char path[64];
+	time_t now;
+	struct tm tm;
+	if (spd_misc_guard_armed())
+		return 0;
+	now = time(NULL);
+	if (!localtime_r(&now, &tm))
+		return -1;
+	snprintf(path, sizeof(path), "misc-before-%04d%02d%02d-%02d%02d%02d.img",
+		tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+		tm.tm_hour, tm.tm_min, tm.tm_sec);
+	fprintf(stderr, "misc: reading the partition into %s before writing\n", path);
+	return spd_misc_backup(io, path);
+}
+
+static int have_part(struct spd *io, const char *name)
+{
+	int i;
+	for (i = 0; i < io->nparts; i++)
+		if (strcmp(io->ptab[i].name, name) == 0)
+			return 1;
+	return 0;
+}
+
+/* 2048-byte BCB or a full-partition misc image. Backup, write, read back.
+ * gate=0 means the caller already confirmed this session (write-parts). */
+static int write_misc_image(struct spd *io, int yes, const char *path, int gate)
+{
+	size_t n = 0;
+	uint64_t full = spd_misc_size(io);
+	uint8_t *w = load_small_file(path, &n, (size_t)full);
+	int saved, rc;
+	if (!w)
+		return -1;
+	if (n != SPD_MISC_BCB_LEN && n != full) {
+		fprintf(stderr,
+			"write misc: refusing %zu bytes (need %d for a BCB, or %llu for the whole partition)\n",
+			n, SPD_MISC_BCB_LEN, (unsigned long long)full);
+		free(w);
+		return -1;
+	}
+	if (gate)
+		authorize_write(yes, "write", "misc", w, n);
+	if (ensure_misc_backup(io)) {
+		free(w);
+		return -1;
+	}
+	fprintf(stderr, "write misc: %zu bytes from %s\n", n, path);
+	saved = io->step;
+	if (n == SPD_MISC_BCB_LEN)
+		io->step = 0x1000;
+	rc = spd_write_part_buf(io, "misc", w, n);
+	io->step = saved;
+	if (rc) {
+		free(w);
+		return -1;
+	}
+	if (spd_misc_verify(io, w, n)) {
+		free(w);
+		fprintf(stderr, "misc read-back mismatch: stopping (no reset). Restore misc from the backup.\n");
+		return -1;
+	}
+	free(w);
+	return 0;
+}
+
+/* spd_dump set_active: 32-byte bootloader_control at misc+0x800, then the
+ * whole misc image is written back. Backup and read-back stay in front. */
+static int set_active_slot(struct spd *io, int yes, char which, int gate)
+{
+	uint64_t full;
+	uint8_t *img, abc[32];
+	if (which != 'a' && which != 'b') {
+		fprintf(stderr, "set-active: want a or b\n");
+		return -1;
+	}
+	if (io->nparts <= 0 || !have_part(io, "misc")) {
+		fprintf(stderr, "set-active: run parts first (misc must be in the table)\n");
+		return -1;
+	}
+	full = spd_misc_size(io);
+	if (full < 0x820 || full > (uint64_t)SIZE_MAX) {
+		fprintf(stderr, "set-active: misc size %llu is not usable\n", (unsigned long long)full);
+		return -1;
+	}
+	img = malloc((size_t)full);
+	if (!img)
+		return -1;
+	if (spd_read_part_mem(io, "misc", 0, full, img)) {
+		free(img);
+		return -1;
+	}
+	if (spd_fill_slot_abc(abc, which)) {
+		free(img);
+		return -1;
+	}
+	memcpy(img + 0x800, abc, 32);
+	if (gate)
+		authorize_write(yes, "set-active", "misc", img, (size_t)full);
+	if (ensure_misc_backup(io)) {
+		free(img);
+		return -1;
+	}
+	fprintf(stderr, "set-active: slot %c (32 bytes at misc+0x800, %llu-byte rewrite)\n",
+		which, (unsigned long long)full);
+	if (spd_write_part_buf(io, "misc", img, (size_t)full)) {
+		free(img);
+		return -1;
+	}
+	if (spd_misc_verify(io, img, (size_t)full)) {
+		free(img);
+		fprintf(stderr, "misc read-back mismatch: slot was NOT confirmed. Restore misc from the backup.\n");
+		return -1;
+	}
+	free(img);
+	return 0;
+}
+
+static int erase_refused(const char *name)
+{
+	if (!strcmp(name, "persist") || !strcmp(name, "persist_a") || !strcmp(name, "persist_b") ||
+		!strcmp(name, "all") || !strcmp(name, "erase_all") ||
+		!strcmp(name, "splloader") || !strcmp(name, "splloader_bak")) {
+		fprintf(stderr,
+			"erase-part: refusing '%s' (no persist erase, no erase-all, no splloader erase)\n",
+			name);
+		return 1;
+	}
+	return 0;
+}
+
+static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab)
+{
+	struct spd_op *ops;
+	int n = 0, k;
+	confirm(yes, "write all partitions from", dir);
+	ops = spd_plan_writes(io, dir, force_ab, &n);
+	if (!ops)
+		return -1;
+	for (k = 0; k < n; k++) {
+		if (ops[k].kind == SPD_OP_WRITE && !strcmp(ops[k].name, "misc")) {
+			if (write_misc_image(io, yes, ops[k].path, 0)) {
+				free(ops);
+				return -1;
+			}
+		} else if (ops[k].kind == SPD_OP_WRITE) {
+			int part_slot = ops[k].slot == 'a' ? 1 : ops[k].slot == 'b' ? 2 : 0;
+			if (spd_write_named(io, ops[k].name, ops[k].path, part_slot)) {
+				free(ops);
+				return -1;
+			}
+		} else if (ops[k].kind == SPD_OP_ERASE_METADATA) {
+			fprintf(stderr, "write-parts: erasing metadata\n");
+			if (spd_erase_part(io, "metadata")) {
+				free(ops);
+				return -1;
+			}
+		} else if (ops[k].kind == SPD_OP_SET_SLOT) {
+			if (set_active_slot(io, yes, ops[k].slot, 0)) {
+				free(ops);
+				return -1;
+			}
+		}
+	}
+	free(ops);
+	return 0;
 }
 
 /* Default stub for exec_addr ADDR: custom_exec_no_verify_<hex>.bin (lowercase,
@@ -593,7 +788,32 @@ int main(int argc, char **argv)
 			fprintf(stderr, "self-test: sha256(448-bit) wrong: %s\n", h);
 			return 1;
 		}
+		{
+			/* Bytes spd_dump set_active writes at misc+0x800 (packed bootloader_control). */
+			static const uint8_t slot_a[32] = {
+				0x5f,0x61,0x00,0x00,0x42,0x43,0x41,0x42,0x01,0x02,0x00,0x00,0x6f,0x00,0x1e,0x00,
+				0,0,0,0,0,0,0,0,0,0,0,0,0xe6,0xbf,0xea,0xc5
+			};
+			static const uint8_t slot_b[32] = {
+				0x5f,0x62,0x00,0x00,0x42,0x43,0x41,0x42,0x01,0x02,0x00,0x00,0x1e,0x00,0x6f,0x00,
+				0,0,0,0,0,0,0,0,0,0,0,0,0x9e,0xe2,0x10,0x70
+			};
+			uint8_t abc[32];
+			if (spd_fill_slot_abc(abc, 'a') || memcmp(abc, slot_a, 32) ||
+				spd_fill_slot_abc(abc, 'b') || memcmp(abc, slot_b, 32)) {
+				fprintf(stderr, "self-test: set-active slot block differs from spd_dump\n");
+				return 1;
+			}
+		}
 		return spd_selftest();
+	}
+	if (optind < argc && strcmp(argv[optind], "pack-slot") == 0) {
+		if (optind + 3 >= argc || (argv[optind + 1][0] != 'a' && argv[optind + 1][0] != 'b') ||
+			argv[optind + 1][1]) {
+			fprintf(stderr, "pack-slot a|b IN OUT\n");
+			return 2;
+		}
+		return spd_pack_slot_file(argv[optind + 1][0], argv[optind + 2], argv[optind + 3]) ? 1 : 0;
 	}
 	if (optind >= argc) {
 		usage();
@@ -756,35 +976,57 @@ int main(int argc, char **argv)
 				return 1; /* never --keep-going past a failed backup */
 			i += 2;
 		} else if (strcmp(cmd, "write-part") == 0) {
+			int part_slot;
 			need(argc, i, 2, "write-part");
 			need_fdl2(io, "write-part");
 			if (strcmp(argv[i + 1], "misc") == 0) {
-				/* misc: hash, write and verify the SAME in-memory bytes. */
-				size_t n = 0;
-				uint8_t *w = load_small_file(argv[i + 2], &n, (size_t)spd_misc_size(io));
-				if (!w)
+				if (write_misc_image(io, yes, argv[i + 2], 1))
 					return 1;
-				authorize_write(yes, "write", "misc", w, n);
-				fprintf(stderr, "write misc: %zu bytes from %s\n", n, argv[i + 2]);
-				if (spd_write_part_buf(io, "misc", w, n)) {
-					free(w);
-					return 1;
-				}
-				if (spd_misc_guard_armed() && spd_misc_verify(io, w, n)) {
-					free(w);
-					fprintf(stderr, "misc read-back mismatch: stopping (no reset). Restore misc from the backup.\n");
-					return 1;
-				}
-				free(w);
 			} else {
 				authorize_write(yes, "write", argv[i + 1], NULL, 0);
-				if (spd_write_part(io, argv[i + 1], argv[i + 2]))
+				part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
+				if (spd_write_named(io, argv[i + 1], argv[i + 2], part_slot))
 					return 1;
 			}
 			i += 3;
+		} else if (strcmp(cmd, "write-parts") == 0 || strcmp(cmd, "write-parts-a") == 0 ||
+			strcmp(cmd, "write-parts-b") == 0) {
+			int force = 0;
+			need(argc, i, 1, cmd);
+			need_fdl2(io, cmd);
+			if (!strcmp(cmd, "write-parts-a"))
+				force = 1;
+			else if (!strcmp(cmd, "write-parts-b"))
+				force = 2;
+			if (run_write_plan(io, yes, argv[i + 1], force))
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "repartition") == 0) {
+			need(argc, i, 1, "repartition");
+			need_fdl2(io, "repartition");
+			if (access(argv[i + 1], R_OK) != 0) {
+				fprintf(stderr, "repartition: file does not exist: %s\n", argv[i + 1]);
+				return 1;
+			}
+			confirm(yes, "repartition from", argv[i + 1]);
+			if (spd_repartition_xml(io, argv[i + 1]))
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "set-active") == 0) {
+			need(argc, i, 1, "set-active");
+			need_fdl2(io, "set-active");
+			if ((argv[i + 1][0] != 'a' && argv[i + 1][0] != 'b') || argv[i + 1][1]) {
+				fprintf(stderr, "set-active: want a or b\n");
+				return 1;
+			}
+			if (set_active_slot(io, yes, argv[i + 1][0], 1))
+				return 1;
+			i += 2;
 		} else if (strcmp(cmd, "erase-part") == 0) {
 			need(argc, i, 1, "erase-part");
 			need_fdl2(io, "erase-part");
+			if (erase_refused(argv[i + 1]))
+				return 1;
 			confirm(yes, "erase", argv[i + 1]);
 			if (spd_erase_part(io, argv[i + 1]))
 				return 1;

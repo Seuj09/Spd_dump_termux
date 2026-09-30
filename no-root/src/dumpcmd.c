@@ -9,22 +9,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <errno.h>
 #include <unistd.h>
 
 #define SPLLOADER_BYTES (256u * 1024u)
 #define MISC_SLOT_BYTES 1048576u
+/* spd_dump select_ab reads 0x20 bytes at misc+0x800, not the whole partition. */
+#define SLOT_ABC_OFF 0x800u
+#define SLOT_ABC_LEN 32u
 
-/* AOSP bootloader_control at misc+0x800 (spd_dump common.h): slot_suffix[4],
- * magic, version, nb_slot:3..., slot_info[4] (2 bytes each). Returns 1/2 for
- * slot a/b, 0 for "not A/B" (spd_dump select_ab semantics). */
-static int slot_from_misc(const uint8_t *misc, size_t len, int have_uboot_a)
+/* AOSP bootloader_control (spd_dump common.h): slot_suffix[4], magic, version,
+ * nb_slot:3..., slot_info[4] (2 bytes each). ABC is those 32 bytes, already
+ * sliced at misc+0x800. Returns 1/2 for slot a/b, 0 for "not A/B". */
+int spd_slot_from_bytes(const uint8_t *abc, int have_uboot_a);
+
+static int slot_from_abc(const uint8_t *abc, int have_uboot_a)
 {
-	const uint8_t *abc;
 	int nb, p0, p1, ok0, ok1, t0, t1, d;
-	if (len < 0x820)
-		return 0;
-	abc = misc + 0x800;
 	nb = abc[9] & 7;
 	if (nb != 2)
 		return 0;
@@ -39,6 +41,115 @@ static int slot_from_misc(const uint8_t *misc, size_t len, int have_uboot_a)
 	return d < 0 ? 2 : 1;
 }
 
+int spd_slot_from_bytes(const uint8_t *abc, int have_uboot_a)
+{
+	return slot_from_abc(abc, have_uboot_a);
+}
+
+static uint32_t crc32_le(const uint8_t *p, int n)
+{
+	uint32_t crc = ~0u;
+	while (n--) {
+		int b;
+		crc ^= *p++;
+		for (b = 0; b < 8; b++)
+			crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+	}
+	return crc ^ ~0u;
+}
+
+int spd_fill_slot_abc(uint8_t abc[32], char which)
+{
+	int slot, i;
+	if (which != 'a' && which != 'b')
+		return -1;
+	memset(abc, 0, 32);
+	abc[0] = '_';
+	abc[1] = (uint8_t)which;
+	abc[4] = 0x42; abc[5] = 0x43; abc[6] = 0x41; abc[7] = 0x42; /* "BCAB" */
+	abc[8] = 1; /* version */
+	abc[9] = 2; /* nb_slot */
+	slot = which - 'a';
+	/* slot_info[i] is 2 bytes at offset 12. priority:4, tries:3, success:1. */
+	abc[12 + slot * 2] = (uint8_t)(15 | (6 << 4));
+	abc[12 + (1 - slot) * 2] = (uint8_t)(14 | (1 << 4));
+	{
+		uint32_t c = crc32_le(abc, 0x1c);
+		for (i = 0; i < 4; i++)
+			abc[28 + i] = (uint8_t)(c >> (8 * i));
+	}
+	return 0;
+}
+
+int spd_pack_slot_file(char which, const char *in_path, const char *out_path)
+{
+	FILE *fi, *fo;
+	uint8_t *buf, abc[32];
+	long sz;
+	fi = fopen(in_path, "rb");
+	if (!fi) {
+		fprintf(stderr, "pack-slot: open %s: %s\n", in_path, strerror(errno));
+		return -1;
+	}
+	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) < 0x820 || fseeko(fi, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "pack-slot: %s must be a full misc image (at least 0x820 bytes)\n", in_path);
+		fclose(fi);
+		return -1;
+	}
+	buf = malloc((size_t)sz);
+	if (!buf || fread(buf, 1, (size_t)sz, fi) != (size_t)sz) {
+		fprintf(stderr, "pack-slot: short read\n");
+		free(buf);
+		fclose(fi);
+		return -1;
+	}
+	fclose(fi);
+	if (spd_fill_slot_abc(abc, which)) {
+		free(buf);
+		return -1;
+	}
+	memcpy(buf + 0x800, abc, 32);
+	fo = fopen(out_path, "wb");
+	if (!fo || fwrite(buf, 1, (size_t)sz, fo) != (size_t)sz) {
+		fprintf(stderr, "pack-slot: write %s failed\n", out_path);
+		if (fo)
+			fclose(fo);
+		free(buf);
+		return -1;
+	}
+	fclose(fo);
+	free(buf);
+	fprintf(stderr, "pack-slot: %c -> %s (%ld bytes, slot block at 0x800)\n", which, out_path, sz);
+	return 0;
+}
+
+/* spd_dump dump_partition: a name containing "nv1" is read from the same
+ * name with its last '1' turned into '2', starting at offset 512, length
+ * shortened by 512. The output file keeps the original name. */
+static void nv_read_adjust(const char *name, char *alt, size_t cap,
+	uint64_t *off, uint64_t *n)
+{
+	const char *p;
+	size_t i;
+	*off = 0;
+	if (!strstr(name, "nv1"))
+		return;
+	p = strrchr(name, '1');
+	if (!p)
+		return;
+	i = (size_t)(p - name);
+	if (i + strlen(p) >= cap)
+		return;
+	memcpy(alt, name, i);
+	alt[i] = '2';
+	memcpy(alt + i + 1, p + 1, strlen(p + 1) + 1);
+	*off = 512;
+	if (*n > 512)
+		*n -= 512;
+	fprintf(stderr, "dump: %s reads %s at offset 512, %llu bytes (spd_dump nv1)\n",
+		name, alt, (unsigned long long)*n);
+}
+
 static int find_part(struct spd *io, const char *name)
 {
 	int i;
@@ -48,8 +159,57 @@ static int find_part(struct spd *io, const char *name)
 	return -1;
 }
 
-/* Decide the active slot for this table (reads misc 0 1048576 like spd_dump's
- * "saving slot info"). Returns 0 (not A/B), 1 (a) or 2 (b). */
+int spd_lookup_part(struct spd *io, const char *name, int slot,
+	char *out, size_t cap, uint64_t *size)
+{
+	int i, all_digit;
+	char alt[40];
+	if (!name || !name[0] || strlen(name) > 35 || cap < 36)
+		return -1;
+	all_digit = 1;
+	for (i = 0; name[i]; i++)
+		if (!isdigit((unsigned char)name[i]))
+			all_digit = 0;
+	if (all_digit) {
+		int id = atoi(name);
+		if (id == 0) {
+			snprintf(out, cap, "splloader");
+			*size = SPLLOADER_BYTES;
+			return 0;
+		}
+		if (io->nparts <= 0)
+			return -2;
+		if (id < 1 || id > io->nparts)
+			return -1;
+		snprintf(out, cap, "%s", io->ptab[id - 1].name);
+		*size = io->ptab[id - 1].size;
+		return *size ? 0 : -1;
+	}
+	/* spd_dump get_partition_info: splloader* is 256 KiB even with no table row. */
+	if (!memcmp(name, "splloader", 9)) {
+		snprintf(out, cap, "%s", name);
+		*size = SPLLOADER_BYTES;
+		return 0;
+	}
+	if (io->nparts <= 0) {
+		snprintf(out, cap, "%s", name);
+		*size = 0;
+		return -2;
+	}
+	i = find_part(io, name);
+	if (i < 0 && slot > 0) {
+		snprintf(alt, sizeof(alt), "%s_%c", name, slot == 1 ? 'a' : 'b');
+		i = find_part(io, alt);
+	}
+	if (i < 0)
+		return -1;
+	snprintf(out, cap, "%s", io->ptab[i].name);
+	*size = io->ptab[i].size;
+	return *size ? 0 : -1;
+}
+
+/* Active slot: one 32-byte read at misc+0x800 (spd_dump select_ab). A refused
+ * read is "not A/B" and the dump continues. Returns 0, 1 (a) or 2 (b). */
 static int write_file(const char *path, const uint8_t *buf, size_t len)
 {
 	FILE *f = fopen(path, "wb");
@@ -65,23 +225,18 @@ static int write_file(const char *path, const uint8_t *buf, size_t len)
 static const char *slot_copy_path;
 int spd_active_slot(struct spd *io)
 {
-	uint8_t *misc;
+	uint8_t abc[SLOT_ABC_LEN];
 	int slot, have_a;
 	if (find_part(io, "misc") < 0)
 		return 0;
-	misc = malloc(MISC_SLOT_BYTES);
-	if (!misc)
-		return 0;
-	if (spd_read_part_mem(io, "misc", 0, MISC_SLOT_BYTES, misc)) {
-		fprintf(stderr, "slot: misc read failed; treating as not A/B\n");
-		free(misc);
+	if (spd_read_part_mem(io, "misc", SLOT_ABC_OFF, SLOT_ABC_LEN, abc)) {
+		fprintf(stderr, "slot: misc+0x800 read failed; treating as not A/B\n");
 		return 0;
 	}
-	if (slot_copy_path && write_file(slot_copy_path, misc, MISC_SLOT_BYTES))
+	if (slot_copy_path && write_file(slot_copy_path, abc, SLOT_ABC_LEN))
 		fprintf(stderr, "slot: could not save %s\n", slot_copy_path);
 	have_a = find_part(io, "uboot_a") >= 0;
-	slot = slot_from_misc(misc, MISC_SLOT_BYTES, have_a);
-	free(misc);
+	slot = slot_from_abc(abc, have_a);
 	fprintf(stderr, "slot: %s\n", slot == 1 ? "a" : slot == 2 ? "b" : "not A/B");
 	return slot;
 }
@@ -106,20 +261,28 @@ static FILE *manifest;
 static int dump_one(struct spd *io, const char *name, uint64_t size, const char *outdir,
 	char *failed, size_t failcap, int *nfail)
 {
-	char out[1024], tmp[1100], part[1100];
+	char out[1024], tmp[1100], part[1100], alt[40];
+	const char *read_name = name;
+	uint64_t off = 0, n = size;
+	if (!strcmp(name, "super") || size >= (512ull << 20))
+		fprintf(stderr, "dump: %s is %llu bytes\n", name, (unsigned long long)size);
+	nv_read_adjust(name, alt, sizeof(alt), &off, &n);
+	if (off)
+		read_name = alt;
 	snprintf(out, sizeof(out), "%s/%s.img", outdir, name);
 	snprintf(tmp, sizeof(tmp), "%s.tmp", out);
 	snprintf(part, sizeof(part), "%s.partial", out);
 	/* manifest: "start NAME BYTES FILE" before, "ok|fail NAME" after. A start
-	 * without an ok line (spdhost died mid-read) is a failure too. */
+	 * without an ok line (spdhost died mid-read) is a failure too. BYTES is
+	 * what will be read (nv1 is 512 bytes shorter than the table size). */
 	if (manifest) {
-		fprintf(manifest, "start %s %llu %s.img\n", name, (unsigned long long)size, name);
+		fprintf(manifest, "start %s %llu %s.img\n", name, (unsigned long long)n, name);
 		fflush(manifest);
 	}
 	unlink(part);
 	/* Read into NAME.img.tmp; only a complete read replaces NAME.img. A
 	 * failed one is left as NAME.img.partial (an older NAME.img stays). */
-	if (spd_read_part(io, name, 0, size, tmp) == 0) {
+	if (spd_read_part(io, read_name, off, n, tmp) == 0) {
 		if (rename(tmp, out) == 0) {
 			if (manifest) {
 				fprintf(manifest, "ok %s\n", name);
@@ -143,7 +306,6 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 		}
 		return -1;
 	}
-	return 0;
 }
 
 /* dump TARGET OUTDIR, where TARGET is all, all_lite, or a partition name.
@@ -235,31 +397,42 @@ uint64_t spd_misc_size(struct spd *io)
  * go on to a misc write. */
 int spd_misc_backup(struct spd *io, const char *out)
 {
-	uint64_t n = spd_misc_size(io);
-	uint8_t *chk;
+	uint64_t n = spd_misc_size(io), off;
+	uint8_t chk[65536];
 	FILE *f;
 	free(guard_before);
-	guard_before = malloc(n);
-	chk = malloc(n);
-	if (!guard_before || !chk)
+	guard_before = NULL;
+	if (!n || n > (uint64_t)SIZE_MAX) {
+		fprintf(stderr, "misc-backup: refusing a %llu-byte misc read\n", (unsigned long long)n);
+		goto fail;
+	}
+	guard_before = malloc((size_t)n);
+	if (!guard_before)
 		goto fail;
 	if (spd_read_part_mem(io, "misc", 0, n, guard_before))
 		goto fail;
-	if (write_file(out, guard_before, n))
+	if (write_file(out, guard_before, (size_t)n))
 		goto fail;
 	f = fopen(out, "rb");
-	if (!f || fread(chk, 1, n, f) != n || fgetc(f) != EOF || memcmp(chk, guard_before, n)) {
-		if (f)
+	if (!f)
+		goto fail;
+	for (off = 0; off < n; ) {
+		size_t m = (size_t)((n - off) > sizeof(chk) ? sizeof(chk) : (n - off));
+		if (fread(chk, 1, m, f) != m || memcmp(chk, guard_before + off, m)) {
 			fclose(f);
+			goto fail;
+		}
+		off += m;
+	}
+	if (fgetc(f) != EOF) {
+		fclose(f);
 		goto fail;
 	}
 	fclose(f);
-	free(chk);
 	guard_len = n;
 	fprintf(stderr, "misc-backup: %llu bytes -> %s (read back OK)\n", (unsigned long long)n, out);
 	return 0;
 fail:
-	free(chk);
 	free(guard_before);
 	guard_before = NULL;
 	guard_len = 0;

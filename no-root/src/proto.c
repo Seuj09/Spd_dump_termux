@@ -22,6 +22,7 @@
 #define BSL_CMD_EXEC_DATA 0x04
 #define BSL_CMD_NORMAL_RESET 0x05
 #define BSL_CMD_ERASE_FLASH 0x0a
+#define BSL_CMD_REPARTITION 0x0b
 #define BSL_CMD_READ_START 0x10
 #define BSL_CMD_READ_MIDST 0x11
 #define BSL_CMD_READ_END 0x12
@@ -1209,6 +1210,295 @@ int spd_erase_part(struct spd *io, const char *name)
 	if (spd_check_ok(io))
 		return -1;
 	fprintf(stderr, "erased %s\n", name);
+	return 0;
+}
+
+/* CRC-16/ARC, the checksum spd_dump puts in a fixnv image before sending it. */
+static uint16_t crc16_arc(const uint8_t *p, size_t n)
+{
+	uint16_t crc = 0;
+	while (n--) {
+		int b;
+		crc ^= *p++;
+		for (b = 0; b < 8; b++)
+			crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0xA001) : (uint16_t)(crc >> 1);
+	}
+	return crc;
+}
+
+/* Walk a fixnv blob the way spd_dump load_nv_partition does. On success MEM
+ * is the body (after an optional 0x4e56 + 0x200 header) and *LEN is the
+ * framed length, including the 8 bytes after 0xffff. */
+static int nv_frame(uint8_t *mem, size_t flen, size_t *len_out)
+{
+	size_t len;
+	if (flen >= 4 && rd32le(mem) == 0x4e56u) {
+		if (flen < 0x200 + 4)
+			return -1;
+		mem += 0x200;
+		flen -= 0x200;
+	}
+	len = 4;
+	for (;;) {
+		uint16_t id, n;
+		uint32_t pad;
+		if (len + 4 > flen)
+			return -1;
+		id = (uint16_t)(mem[len] | (mem[len + 1] << 8));
+		n = (uint16_t)(mem[len + 2] | (mem[len + 3] << 8));
+		(void)id;
+		if (!n)
+			return -1;
+		len += 4u + n;
+		if (len > flen)
+			return -1;
+		pad = ((len + 3u) & ~3u) - (uint32_t)len;
+		if (len + pad + 2 > flen)
+			return -1;
+		len += pad;
+		if ((uint16_t)(mem[len] | (mem[len + 1] << 8)) == 0xffff) {
+			if (len + 8 > flen)
+				return -1;
+			len += 8;
+			break;
+		}
+	}
+	*len_out = len;
+	return 0;
+}
+
+int spd_write_nv(struct spd *io, const char *name, const char *path)
+{
+	FILE *fi;
+	uint8_t *mem, *body, pkt[80];
+	size_t flen, len, off;
+	uint16_t crc;
+	uint32_t cs;
+	int step = 4096; /* spd_dump load_nv_partition ignores blk_size and uses 4096 */
+	long sz;
+
+	fi = fopen(path, "rb");
+	if (!fi) {
+		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) < 4 || fseeko(fi, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "write nv %s: %s is not an NV image\n", name, path);
+		fclose(fi);
+		return -1;
+	}
+	flen = (size_t)sz;
+	mem = malloc(flen);
+	if (!mem || fread(mem, 1, flen, fi) != flen) {
+		fprintf(stderr, "write nv %s: short read\n", name);
+		free(mem);
+		fclose(fi);
+		return -1;
+	}
+	fclose(fi);
+	body = mem;
+	if (rd32le(mem) == 0x4e56u)
+		body = mem + 0x200;
+	if (nv_frame(mem, flen, &len)) {
+		fprintf(stderr,
+			"write nv %s: not an NV image (spd_dump skips a broken fixnv1 file); nothing sent\n",
+			name);
+		free(mem);
+		return -1;
+	}
+	crc = crc16_arc(body + 2, len - 2);
+	body[0] = (uint8_t)(crc >> 8);
+	body[1] = (uint8_t)crc;
+	cs = 0;
+	for (off = 0; off < len; off++)
+		cs += body[off];
+	fprintf(stderr, "write nv %s: framed %zu bytes, checksum 0x%x\n", name, len, cs);
+	memset(pkt, 0, sizeof(pkt));
+	if (put_name(pkt, 36, name))
+		die("partition name too long");
+	wr32le(pkt + 72, (uint32_t)len);
+	wr32le(pkt + 76, cs);
+	spd_encode(io, BSL_CMD_START_DATA, pkt, sizeof(pkt));
+	if (spd_check_ok(io)) {
+		free(mem);
+		return -1;
+	}
+	for (off = 0; off < len; ) {
+		size_t n = len - off;
+		if (n > (size_t)step)
+			n = (size_t)step;
+		spd_encode(io, BSL_CMD_MIDST_DATA, body + off, n);
+		if (spd_send(io) < 0)
+			die("send failed during write");
+		{
+			int got = spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000);
+			if (got == 0)
+				die("timeout during write");
+			if (got < 0)
+				die("device reset during write; this write was not resumed");
+		}
+		if (spd_type(io) != BSL_REP_ACK) {
+			fprintf(stderr, "write nv response 0x%04x at offset %zu\n", spd_type(io), off);
+			free(mem);
+			return -1;
+		}
+		off += n;
+	}
+	free(mem);
+	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+	if (spd_check_ok(io))
+		return -1;
+	return 0;
+}
+
+/* One <Partition id="NAME" size="NUM"/> record. NUM is decimal or 0x hex
+ * (spd_dump's own partition_list writer emits 0xffffffff for the last row). */
+static int xml_one(const char *tag, char *name, size_t namecap, uint32_t *size)
+{
+	const char *id, *ide, *sz, *sze;
+	char *end;
+	unsigned long long v;
+	size_t n;
+	if (strncmp(tag, "Partition", 9) != 0)
+		return -1;
+	id = strstr(tag, "id=\"");
+	sz = strstr(tag, "size=\"");
+	if (!id || !sz)
+		return -1;
+	id += 4;
+	ide = strchr(id, '"');
+	sz += 6;
+	sze = strchr(sz, '"');
+	if (!ide || !sze || ide == id)
+		return -1;
+	n = (size_t)(ide - id);
+	if (n >= namecap || n > 35)
+		return -1;
+	memcpy(name, id, n);
+	name[n] = 0;
+	errno = 0;
+	v = strtoull(sz, &end, 0);
+	if (end == sz || end != sze || errno || v > 0xffffffffull)
+		return -1;
+	*size = (uint32_t)v;
+	return 0;
+}
+
+int spd_repartition_xml(struct spd *io, const char *path)
+{
+	FILE *fi;
+	char *src, *p, *end;
+	uint8_t *buf, *w;
+	long sz;
+	int n = 0, cap = 128;
+
+	fi = fopen(path, "rb");
+	if (!fi) {
+		fprintf(stderr, "repartition: open %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) <= 0 || sz > 1024 * 1024 ||
+		fseeko(fi, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "repartition: %s is empty or over 1 MiB\n", path);
+		fclose(fi);
+		return -1;
+	}
+	src = malloc((size_t)sz + 1);
+	if (!src || fread(src, 1, (size_t)sz, fi) != (size_t)sz) {
+		fprintf(stderr, "repartition: short read\n");
+		free(src);
+		fclose(fi);
+		return -1;
+	}
+	fclose(fi);
+	if (memchr(src, 0, (size_t)sz)) {
+		fprintf(stderr, "repartition: XML contains a zero byte\n");
+		free(src);
+		return -1;
+	}
+	src[sz] = 0;
+	p = strstr(src, "<Partitions>");
+	end = p ? strstr(p, "</Partitions>") : NULL;
+	if (!p || !end || strstr(end + 1, "<Partitions>")) {
+		fprintf(stderr, "repartition: need one <Partitions> list\n");
+		free(src);
+		return -1;
+	}
+	buf = calloc((size_t)cap, 0x4c);
+	if (!buf) {
+		free(src);
+		return -1;
+	}
+	w = buf;
+	p += strlen("<Partitions>");
+	while (p < end) {
+		char *lt, *gt, name[36];
+		uint32_t size;
+		int i;
+		while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+			p++;
+		if (p >= end)
+			break;
+		if (*p != '<') {
+			fprintf(stderr, "repartition: unexpected text in <Partitions>\n");
+			free(buf);
+			free(src);
+			return -1;
+		}
+		if (!strncmp(p, "<!--", 4)) {
+			char *c = strstr(p + 4, "-->");
+			if (!c || c >= end) {
+				fprintf(stderr, "repartition: unclosed comment\n");
+				free(buf);
+				free(src);
+				return -1;
+			}
+			p = c + 3;
+			continue;
+		}
+		lt = p + 1;
+		gt = strchr(lt, '>');
+		if (!gt || gt >= end) {
+			fprintf(stderr, "repartition: unclosed tag\n");
+			free(buf);
+			free(src);
+			return -1;
+		}
+		*gt = 0;
+		if (xml_one(lt, name, sizeof(name), &size)) {
+			fprintf(stderr, "repartition: bad Partition tag near '%s'\n", lt);
+			free(buf);
+			free(src);
+			return -1;
+		}
+		if (n >= cap) {
+			fprintf(stderr, "repartition: more than %d partitions\n", cap);
+			free(buf);
+			free(src);
+			return -1;
+		}
+		memset(w, 0, 0x4c);
+		for (i = 0; name[i]; i++)
+			w[i * 2] = (uint8_t)name[i];
+		wr32le(w + 0x48, size);
+		fprintf(stderr, "repartition: [%d] %s size=%u\n", n + 1, name, size);
+		w += 0x4c;
+		n++;
+		p = gt + 1;
+	}
+	free(src);
+	if (n < 1) {
+		fprintf(stderr, "repartition: no Partition entries\n");
+		free(buf);
+		return -1;
+	}
+	spd_encode(io, BSL_CMD_REPARTITION, buf, (size_t)n * 0x4c);
+	free(buf);
+	if (spd_check_ok(io)) {
+		fprintf(stderr, "repartition: device refused the table; partition layout unchanged by this ack\n");
+		return -1;
+	}
+	fprintf(stderr, "repartition: sent %d entries. Run parts again before another write; the cached table is stale.\n", n);
 	return 0;
 }
 

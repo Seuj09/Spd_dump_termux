@@ -66,6 +66,10 @@ int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible);
 int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path);
 int spd_write_part(struct spd *io, const char *name, const char *path);
 int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len);
+/* fixnv1 image: same NV framing spd_dump load_nv_partition uses (not a raw copy). */
+int spd_write_nv(struct spd *io, const char *name, const char *path);
+/* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
+int spd_repartition_xml(struct spd *io, const char *path);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
 /* Read [offset, offset+size) of NAME into MEM (exactly size bytes or error). */

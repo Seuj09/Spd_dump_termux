@@ -161,7 +161,9 @@ static void log_out(const uint8_t *buf, int len)
 	case 0x01: if (plen >= 76) { /* partition START_DATA: name[36]wchar + size lo (+hi) */
 		char nm[40]; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;
 		strcpy(wr_part, nm); wr_off = 0; wr_size = le32(raw + 4 + 72); wr_on = 1;
-		if (plen >= 80) wr_size |= (uint64_t)le32(raw + 4 + 76) << 32;
+		/* 88-byte START is a 64-bit size. 80-byte START is an NV write:
+		 * size plus a checksum, not a high size word. */
+		if (plen >= 88) wr_size |= (uint64_t)le32(raw + 4 + 76) << 32;
 		if (streq_env("MOCK_FAIL_WRITE", nm) || !part_size(nm) || wr_size > part_size(nm)) { wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
 		}
 		make_reply(0x80, NULL, 0, crc); return;

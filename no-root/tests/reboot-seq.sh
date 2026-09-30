@@ -16,7 +16,7 @@ make -C "$root/spd_dump" GITVER.h >/dev/null
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/sd" || exit 1
 gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" "$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" \
-	"$root/src/dumpcmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
+	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen" || exit 1
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/infinix/fdl1-dl.bin" \
 	"$root/fdl/ums9230/infinix/fdl2-dl.bin" "$tmp/"
@@ -33,7 +33,7 @@ sd_tail() { awk '/^SEQ 2d /{buf=""; on=1; next} on{buf=buf $0 "\n"} END{printf "
 sh_tail() { awk '/^SEQ 04 /{buf=""; on=1; next} on{buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
 short() { sed -E 's/^SEQ ([0-9a-f]+) len=([0-9]+).*/\1:\2/' "$1" | tr '\n' ' '; }
 
-for pair in "reset reset" "poweroff power-off" "reboot-recovery reboot-recovery" "reboot-fastboot reboot-fastboot"; do
+for pair in "reset reset" "poweroff power-off"; do
 	set -- $pair
 	rm -f misc.out; MOCK_MISC_OUT=$tmp/misc_sd_$1.bin sd "$1" "$1"; sdrc=$?
 	MOCK_MISC_OUT=$tmp/misc_sh_$1.bin sh "$1" "$2"; shrc=$?
@@ -41,6 +41,19 @@ for pair in "reset reset" "poweroff power-off" "reboot-recovery reboot-recovery"
 	check "$1: frames identical to spd_dump [$(short b_$1)] rc $sdrc/$shrc" \
 		bash -c "[ -s a_$1 ] && diff -q a_$1 b_$1 >/dev/null && [ $sdrc = 0 ] && [ $shrc = 0 ]"
 done
+# Bare reboot-* also backs up the whole misc and verifies before reset, so its
+# frame list is longer than spd_dump's write+reset. The BCB bytes are checked below.
+for pair in "reboot-recovery reboot-recovery" "reboot-fastboot reboot-fastboot"; do
+	set -- $pair
+	rm -f misc.out; MOCK_MISC_OUT=$tmp/misc_sd_$1.bin sd "$1" "$1"; sdrc=$?
+	MOCK_MISC_OUT=$tmp/misc_sh_$1.bin sh "$1" "$2"; shrc=$?
+	check "bare $2: backup + verify + reset (rc $sdrc/$shrc)" \
+		bash -c "[ $shrc = 0 ] && grep -q 'misc-backup:' sh_$1.log && grep -q 'misc-verify: OK' sh_$1.log && grep -q '^SEQ 05 ' sh_$1.seq"
+done
+dd if=/dev/zero of=odd.img bs=4096 count=1 status=none
+sh odd write-part misc odd.img; rc=$?
+check "write misc 4096 refused (not a 2048 BCB and not the whole partition, rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'write misc: refusing 4096' sh_odd.log && ! awk '/^SEQ 04 /{on=1; next} on' sh_odd.seq | grep -q '^SEQ 02 '"
 # BCB bytes: what each tool left in misc, vs the documented layout and the shipped files.
 python3 - "$root/misc" <<'PY' > bcb.txt
 import sys

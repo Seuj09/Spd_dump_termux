@@ -13,7 +13,14 @@ FDL2_ADDR_DEFAULT=0x9efffe00
 # SPDHOST_EXEC_ADDR=0 (or off) disables; any 0x... overrides. Also EXEC_ADDR=
 # in the menu config. Environment wins over config.
 EXEC_ADDR_DEFAULT=0x65015f08
+# Release menu "hex mode 2" for ums9230. The stub is not shipped here.
+EXEC_ADDR_ALT=0x65015f48
 EXEC_ADDR=""
+# Images named <partition>.img (release menu "Pasang Partisi" / input/).
+INPUT_DIR="${SPDHOST_INPUT_DIR:-$PWD/input}"
+# Appended after flash / restore. recovery and fastbootd stay on the reboot menu
+# because those write misc and need their own confirm token.
+BOOT_AFTER=reset
 
 # Prefer this package's own scripts/ over PATH, so an unzipped release never
 # picks up an older spdhost-usb installed in $PREFIX/bin. PATH is last resort.
@@ -244,6 +251,34 @@ exec_addr_value() {
 	printf '%s\n' "$v"
 }
 
+# custom_exec_no_verify_<hex>.bin for exec_addr, same name spdhost looks up.
+# Fail here, before the plug-in wait, when the stub is not on disk.
+exec_stub_present() {
+	local ea=$1 hex name d
+	local -a places=()
+	hex=$(printf '%x' "$((ea))" 2>/dev/null) || return 1
+	name="custom_exec_no_verify_${hex}.bin"
+	places+=(
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/ums9230/$name"
+		"$PWD/fdl/ums9230/$name"
+		"$PWD/$name"
+		"$HOME/spdhost/fdl/ums9230/$name"
+		"$HOME/Spd_dump_termux/no-root/fdl/ums9230/$name"
+	)
+	if [[ -n ${FDL1:-} ]]; then
+		places+=("$(dirname "$FDL1")/$name" "$(dirname "$FDL1")/../$name")
+	fi
+	if [[ -n ${RUNNER[0]:-} ]]; then
+		places+=("$(dirname "${RUNNER[0]}")/../fdl/ums9230/$name")
+	fi
+	for d in "${places[@]}"; do
+		[[ -f $d ]] && return 0
+	done
+	echo "missing $name for exec_addr $ea." >&2
+	echo "Put it in fdl/ums9230/, or set SPDHOST_EXEC_ADDR=0 to use BSL EXEC." >&2
+	return 1
+}
+
 run_session() {
 	local -a prefix=(--timeout "${SPDHOST_TIMEOUT:-3000}")
 	local ea
@@ -261,8 +296,11 @@ run_session() {
 	done
 	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it.
 	if [[ ${1:-} == fdl ]]; then
-		ea=$(exec_addr_value)
-		[[ -n $ea ]] && set -- exec_addr "$ea" "$@"
+		ea=$(exec_addr_value) || ea=
+		if [[ -n $ea ]]; then
+			exec_stub_present "$ea" || return 1
+			set -- exec_addr "$ea" "$@"
+		fi
 	fi
 	echo "+ ${RUNNER[*]} ${prefix[*]} $*"
 	"${RUNNER[@]}" "${prefix[@]}" "$@"
@@ -284,15 +322,19 @@ parts_bytes_path() {
 	printf '%s\n' "$DUMP_DIR/partition_bytes.txt"
 }
 
-# misc as read by the parts session (1048576 bytes, like spd_dump's
-# "saving slot info" dump_partition(io, "misc", 0, 1048576, "misc.bin")).
+# 32-byte bootloader_control from misc+0x800 (spd_dump select_ab). An older
+# full misc image (>= 0x820 bytes) is still accepted by slot_from_misc.
 slot_misc_path() {
 	mkdir -p "$DUMP_DIR"
 	printf '%s\n' "$DUMP_DIR/misc-slotinfo.img"
 }
 
-SPD_MISC_READ_BYTES=1048576
+SPD_SLOT_OFF=0x800
+SPD_SLOT_BYTES=32
+SPD_MISC_READ_BYTES=1048576 # fallback when the table has no misc size
 SPD_SPLLOADER_BYTES=262144 # spd_dump dumps splloader as 256 KiB (not in the table)
+# Shipped misc/misc-wipe.bin (boot-recovery + recovery\n--wipe_data\n at 0x40).
+MISC_WIPE_SHA=bd6b67e852d6072e6fb87040f2ac40216d5b661b7fa661e7024569ecf8ddb3a7
 ACTIVE_SLOT=""
 PARTS_SHIFT=""
 
@@ -320,14 +362,20 @@ parts_units_to_bytes() {
 # -> b, else a. No uboot_a in the table -> not A/B (selected_ab = 0).
 # Prints a, b, or nothing (unknown / not A/B).
 slot_from_misc() {
-	local misc=$1 table=$2 sz b nb s0 s1 p0 p1 t0 t1 ok0 ok1
+	local misc=$1 table=$2 sz base=0 b nb s0 s1 p0 p1 t0 t1 ok0 ok1
 	[[ -f $misc ]] || return 0
 	sz=$(stat -c %s "$misc" 2>/dev/null) || return 0
-	(( sz >= 0x820 )) || return 0
+	if (( sz == SPD_SLOT_BYTES )); then
+		base=0
+	elif (( sz >= 0x820 )); then
+		base=0x800
+	else
+		return 0
+	fi
 	if [[ -f $table ]] && ! grep -qE '^uboot_a[[:space:]]' "$table"; then
 		return 0
 	fi
-	read -r nb _ _ s0 _ s1 _ < <(od -An -v -tu1 -j $((0x809)) -N 7 "$misc")
+	read -r nb _ _ s0 _ s1 _ < <(od -An -v -tu1 -j $((base + 9)) -N 7 "$misc")
 	[[ -n ${s1:-} ]] || return 0
 	(( (nb & 7) == 2 )) || return 0
 	p0=$((s0 & 15)); t0=$(((s0 >> 4) & 7)); ok0=$((s0 >> 7))
@@ -490,24 +538,24 @@ show_parts_list() {
 	echo "  all_lite  — same, and skip the inactive slot"
 }
 
-# One session: parts table (units) + misc 1048576 bytes for the slot.
+# One session: parts table (units) + 32 bytes at misc+0x800 for the slot.
 fetch_parts_table() {
 	local raw misc rc sz
 	raw=$(parts_cache_path)
 	misc=$(slot_misc_path)
-	echo "Fetching live partition table into $raw (+ misc slot info)"
+	echo "Fetching live partition table into $raw (+ 32-byte slot record)"
 	ready
 	rm -f "$raw" "$misc"
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$raw" read-part misc 0 "$SPD_MISC_READ_BYTES" "$misc"
+		parts "$raw" read-part misc "$SPD_SLOT_OFF" "$SPD_SLOT_BYTES" "$misc"
 	rc=$?
 	if [[ ! -s $raw ]]; then
 		echo "parts failed (exit $rc)." >&2
 		return 1
 	fi
 	sz=$(stat -c %s "$misc" 2>/dev/null || echo 0)
-	if (( sz != SPD_MISC_READ_BYTES )); then
-		echo "note: misc read gave $sz of $SPD_MISC_READ_BYTES bytes; active slot unknown." >&2
+	if (( sz != SPD_SLOT_BYTES )); then
+		echo "note: slot read gave $sz of $SPD_SLOT_BYTES bytes; active slot unknown." >&2
 		rm -f "$misc"
 	fi
 	load_parts_state || { echo "could not convert $raw to bytes" >&2; return 1; }
@@ -589,38 +637,11 @@ run_dump_queue() {
 	return 0
 }
 
+# Same dumper as a live refresh: one spdhost session reads the table, the
+# 32-byte slot record, and the partitions. The cached byte table is only a hint.
 dump_matched_parts() {
-	local mode=$1 parts_file=$2
-	local name size out
-	mkdir -p "$DUMP_DIR"
-	DQ_NAMES=() DQ_SIZES=() DQ_OUTS=()
-	if [[ $mode == all_lite && -z $ACTIVE_SLOT ]]; then
-		echo "note: active slot unknown; all_lite keeps both slots (spd_dump selected_ab=0)"
-	fi
-	# spd_dump r all / all_lite: splloader (256 KiB) first.
-	if ! grep -qE '^splloader[[:space:]]' "$parts_file"; then
-		DQ_NAMES+=(splloader) DQ_SIZES+=("$SPD_SPLLOADER_BYTES") DQ_OUTS+=("$DUMP_DIR/splloader.img")
-		echo "queue splloader size=$(fmt_size "$SPD_SPLLOADER_BYTES") ($SPD_SPLLOADER_BYTES) -> $DUMP_DIR/splloader.img"
-	fi
-	while read -r name size _; do
-		[[ -z ${name:-} || -z ${size:-} ]] && continue
-		[[ $size =~ ^[0-9]+$ ]] || continue
-		(( size > 0 )) || continue
-		if should_skip_bulk "$name" "$mode"; then
-			echo "skip $name"
-			continue
-		fi
-		out="$DUMP_DIR/${name}.img"
-		echo "queue $name size=$(fmt_size "$size") ($size) -> $out"
-		DQ_NAMES+=("$name") DQ_SIZES+=("$size") DQ_OUTS+=("$out")
-	done < "$parts_file"
-	if (( ${#DQ_NAMES[@]} == 0 )); then
-		echo "Nothing to dump."
-		return 1
-	fi
-	echo "Will dump ${#DQ_NAMES[@]} partition(s) in one session (keeps going on errors)."
-	ready
-	run_dump_queue
+	local mode=$1
+	dump_live_session "$mode"
 }
 
 # Check what one `parts RAW dump TARGET DUMP_DIR` session produced, using
@@ -721,6 +742,27 @@ live_dump_target() {
 	printf '%s\n' "$q"
 }
 
+# Release menu "imei": miscdata, prodnv, both fixnv, both runtimenv.
+# nv1 names are read from the nv2 partition at offset 512 inside spdhost.
+dump_imei_session() {
+	local raw rc
+	raw=$(parts_cache_path)
+	mkdir -p "$DUMP_DIR"
+	echo "One session: refresh the table, then dump miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2."
+	ready
+	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$raw" \
+		dump miscdata "$DUMP_DIR" \
+		dump prodnv "$DUMP_DIR" \
+		dump l_fixnv1 "$DUMP_DIR" \
+		dump l_fixnv2 "$DUMP_DIR" \
+		dump l_runtimenv1 "$DUMP_DIR" \
+		dump l_runtimenv2 "$DUMP_DIR"
+	rc=$?
+	[[ -s $raw ]] && load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
+	return "$rc"
+}
+
 dump_partition() {
 	local parts_file raw reply query matched name size out refresh=0 target rc
 	need_loaders || return
@@ -747,11 +789,17 @@ dump_partition() {
 		else
 			echo "Type a partition name (boot, boot.img, boot_a, splloader), or all / all_lite."
 		fi
-		read -r -p "Partition name (or all / all_lite): " query
+		read -r -p "Partition name (or all / all_lite / imei): " query
 		if [[ -z ${query:-} ]]; then
 			echo "Cancelled."
 			pause
 			return
+		fi
+		if [[ ${query,,} == imei ]]; then
+			dump_imei_session
+			rc=$?
+			pause
+			return "$rc"
 		fi
 		target=$(live_dump_target "$query" "$parts_file") || { pause; return 1; }
 		echo "Will dump '$target' using the live table."
@@ -767,15 +815,22 @@ dump_partition() {
 	fi
 	cls
 	show_parts_list "$parts_file"
-	read -r -p "Partition name (or all / all_lite): " query
+	read -r -p "Partition name (or all / all_lite / imei): " query
 	if [[ -z ${query:-} ]]; then
 		echo "Cancelled."
 		pause
 		return
 	fi
 	case ${query,,} in
+		imei)
+			dump_imei_session
+			rc=$?
+			pause
+			return "$rc"
+			;;
 		all|all_lite)
-			dump_matched_parts "${query,,}" "$parts_file"
+			echo "Reading the live table, then dumping ${query,,}."
+			dump_live_session "${query,,}"
 			rc=$?
 			pause
 			return "$rc"
@@ -786,15 +841,11 @@ dump_partition() {
 		return 1
 	}
 	read -r name size <<<"$matched"
-	out="$DUMP_DIR/${name}.img"
 	echo
-	echo "Matched '$query' -> $name  size=$(fmt_size "$size") ($size bytes)"
-	read -r -e -p "Output file [$out]: " reply
-	[[ -n ${reply:-} ]] && out=$reply
-	echo "Will read $name at offset 0, size $size bytes, into $out"
-	ready
-	DQ_NAMES=("$name") DQ_SIZES=("$size") DQ_OUTS=("$out")
-	run_dump_queue
+	echo "Cached match '$query' -> $name  size=$(fmt_size "$size") ($size bytes)"
+	echo "The dump re-reads the device. A name without _a/_b follows the live slot."
+	target=$(live_dump_target "$query" "$parts_file") || { pause; return 1; }
+	dump_live_session "$target"
 	rc=$?
 	pause
 	return "$rc"
@@ -884,8 +935,18 @@ confirm_wipe_userdata() {
 		echo "refusing wipe-userdata without a TTY (no silent --yes)" >&2
 		return 1
 	fi
+	local sz
+	sz=$(stat -c %s "$misc" 2>/dev/null || echo 0)
+	if (( sz != 2048 )); then
+		echo "refusing wipe: $misc is $sz bytes; a wipe BCB is exactly 2048." >&2
+		return 1
+	fi
 	digest=$(sha256sum "$misc" | awk '{print $1}')
-	echo "WARNING: This writes a recovery --wipe_data BCB to misc ($(stat -c %s "$misc") bytes), then reset."
+	if [[ $digest != "$MISC_WIPE_SHA" ]]; then
+		echo "refusing wipe: $misc sha256 $digest is not the shipped misc-wipe.bin." >&2
+		return 1
+	fi
+	echo "WARNING: This writes a recovery --wipe_data BCB to misc ($sz bytes), then reset."
 	echo "Recovery will ERASE USERDATA on the next boot. It does not erase persist here."
 	echo "misc-wipe.bin sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path and destroy user data."
@@ -905,6 +966,23 @@ confirm_reboot_cmd() {
 	echo "BCB sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
 	menu_typed_yes "type yes to continue: " "$digest"
+}
+
+# Typed yes for actions that do not write misc (system reboot, power off).
+confirm_action() {
+	local prompt=$1 reply
+	if [[ ! -t 0 ]]; then
+		echo "refusing without a TTY (no silent confirm)" >&2
+		return 1
+	fi
+	if ! read -r -p "$prompt" reply; then
+		reply=
+	fi
+	while [[ $reply == *[$' \t\r\n'] ]]; do reply=${reply%?}; done
+	if [[ $reply != yes ]]; then
+		echo "menu: not confirmed"
+		return 1
+	fi
 }
 
 # Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
@@ -1083,10 +1161,12 @@ guarded_misc_session() {
 		echo "To restore misc later (typed confirm, no --yes):"
 		echo "  bash scripts/spdhost-usb fdl <fdl1> $FDL1_ADDR fdl <fdl2> $FDL2_ADDR write-part misc $backup reset"
 		echo "  (or menu [2] -> [6] restore misc from a backup)"
+	elif (( rc == 0 )); then
+		echo "backup size $sz differs from the table ($want bytes). spdhost exited 0, so the write did happen. Backup kept: $backup" >&2
 	else
 		echo "misc backup missing or wrong size ($sz of $want bytes): the write was NOT done." >&2
 		rm -f "$backup"
-		(( rc != 0 )) || rc=1
+		rc=1
 	fi
 	if (( rc != 0 )); then
 		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no reset happens after a failed backup or a misc read-back mismatch."
@@ -1139,6 +1219,10 @@ reboot_mode() {
 	case $choice in
 		1)
 			echo "Normal reset after the loaders."
+			if ! confirm_action "type yes to reboot to system: "; then
+				pause
+				return
+			fi
 			ready
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset
 			;;
@@ -1161,6 +1245,10 @@ reboot_mode() {
 			;;
 		4)
 			echo "Power off. The target stays off."
+			if ! confirm_action "type yes to power off: "; then
+				pause
+				return
+			fi
 			ready
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			;;
@@ -1190,6 +1278,201 @@ reboot_mode() {
 	pause
 }
 
+# Release menu option 2: every input/<partition>.img, then BOOT_AFTER.
+flash_input_menu() {
+	local -a files=() names=()
+	local f base
+	need_loaders || return
+	mkdir -p "$INPUT_DIR"
+	shopt -s nullglob
+	for f in "$INPUT_DIR"/*.bin; do
+		mv -n "$f" "${f%.bin}.img"
+	done
+	for f in "$INPUT_DIR"/*.img; do
+		files+=("$f")
+		base=$(basename "$f")
+		names+=("${base%.img}")
+	done
+	shopt -u nullglob
+	if (( ${#files[@]} == 0 )); then
+		echo "No .img files in $INPUT_DIR."
+		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
+		return 1
+	fi
+	echo "Flash these images from $INPUT_DIR, then $BOOT_AFTER:"
+	for f in "${names[@]}"; do
+		echo "  $f"
+	done
+	echo "misc.img, if present, is backed up and verified. splloader.img is written if you put it here."
+	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
+	echo "super.img without metadata.img also erases metadata (same as spd_dump write_parts)."
+	if ! confirm_action "type yes to flash these partitions: "; then
+		return 1
+	fi
+	echo "spdhost asks once more on the terminal before it sends anything."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" write-parts "$INPUT_DIR" $BOOT_AFTER
+}
+
+# Release menu option 4: write_parts of the backup folder.
+restore_backup_menu() {
+	need_loaders || return
+	if [[ ! -d $DUMP_DIR ]]; then
+		echo "No backup directory $DUMP_DIR."
+		return 1
+	fi
+	echo "Restore images in $DUMP_DIR (partition-name.img), then $BOOT_AFTER."
+	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, *_bak.img."
+	echo "The active slot is written back after the files. Inactive _a/_b images are skipped."
+	echo "super.img without metadata.img erases metadata."
+	if ! confirm_action "type yes to restore this backup: "; then
+		return 1
+	fi
+	echo "spdhost asks once more on the terminal before it sends anything."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" write-parts "$DUMP_DIR" $BOOT_AFTER
+}
+
+repartition_menu() {
+	local xml
+	need_loaders || return
+	read -r -p "Partition XML path: " xml
+	if [[ -z ${xml:-} || ! -f $xml ]]; then
+		echo "No such file."
+		return 1
+	fi
+	echo "Repartition replaces the on-device partition map. A wrong XML can brick the phone."
+	echo "Entries:"
+	grep -E 'Partition id=' "$xml" || true
+	if ! confirm_action "type yes to repartition from this XML: "; then
+		return 1
+	fi
+	echo "spdhost asks once more on the terminal before it sends the table."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		repartition "$xml" $BOOT_AFTER
+}
+
+set_slot_menu() {
+	local which
+	need_loaders || return
+	echo "Set the active A/B slot. This rewrites 32 bytes at misc+0x800"
+	echo "and then rewrites the whole misc partition (backup + read-back)."
+	echo "[1] slot a"
+	echo "[2] slot b"
+	read -r -p "Choice: " which
+	case $which in
+		1) which=a ;;
+		2) which=b ;;
+		*) echo "Unchanged."; return 1 ;;
+	esac
+	if ! confirm_action "type yes to set the active slot to $which: "; then
+		return 1
+	fi
+	echo "spdhost asks once more on the terminal after it has read misc."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" set-active "$which" $BOOT_AFTER
+}
+
+boot_after_menu() {
+	local choice
+	echo "What to do after a flash, restore, or repartition."
+	echo "Recovery and fastbootd stay on menu [2]: those write misc."
+	echo "[1] system reset (current: $BOOT_AFTER)"
+	echo "[2] power off"
+	read -r -p "Choice: " choice
+	case $choice in
+		1) BOOT_AFTER=reset; echo "After flash/restore: reset." ;;
+		2) BOOT_AFTER=power-off; echo "After flash/restore: power off." ;;
+		*) echo "Unchanged ($BOOT_AFTER)." ;;
+	esac
+}
+
+hex_mode_menu() {
+	local cur alt
+	cur=$(exec_addr_value || true)
+	echo "exec_addr now: ${cur:-disabled}."
+	echo "ums9230 primary stub is 0x65015f08 (shipped)."
+	echo "The release menu's second address is $EXEC_ADDR_ALT."
+	echo "This package does not include custom_exec_no_verify_65015f48.bin."
+	if exec_stub_present "$EXEC_ADDR_ALT"; then
+		alt=$EXEC_ADDR_ALT
+		if [[ ${cur,,} == "${alt,,}" ]]; then
+			EXEC_ADDR=$EXEC_ADDR_DEFAULT
+		else
+			EXEC_ADDR=$alt
+		fi
+		save_config
+		echo "exec_addr is now $(exec_addr_value)."
+	else
+		echo "Second stub is not on disk. Staying on ${cur:-$EXEC_ADDR_DEFAULT}."
+		EXEC_ADDR=${cur:-$EXEC_ADDR_DEFAULT}
+	fi
+}
+
+# Shown so the entry exists. Nothing is sent.
+unlock_bootloader_menu() {
+	echo "Unlock BootLoader: temporary disabled."
+	echo "The release menu backs up and erases splloader, writes a modified uboot,"
+	echo "and sends spl-unlock.bin. That can leave the phone unable to boot."
+	echo "This menu does not run it."
+	return 1
+}
+
+extra_menu() {
+	local choice
+	echo "Extra"
+	echo "[1] Factory reset (recovery wipe BCB; already on reboot menu)"
+	echo "[2] Set active slot (a/b)"
+	echo "[3] Power off"
+	echo "[4] Disable verity: temporary disabled (would edit vbmeta; not sent)"
+	echo "[5] Reset FRP: temporary disabled (would erase persist; not sent)"
+	echo "[6] Reboot recovery"
+	echo "[7] Reboot fastbootd"
+	echo "[8] Unlock BootLoader: temporary disabled"
+	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
+	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
+	read -r -p "Choice: " choice
+	case $choice in
+		1)
+			echo "Factory reset is reboot menu [5]: shipped misc-wipe.bin, no persist erase."
+			reboot_mode
+			;;
+		2) set_slot_menu ;;
+		3)
+			if confirm_action "type yes to power off: "; then
+				ready
+				run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
+			fi
+			;;
+		4)
+			echo "Disable verity: temporary disabled."
+			echo "spd_dump verity 0 clears vbmeta flags. This tool does not send that."
+			;;
+		5)
+			echo "Reset FRP: temporary disabled."
+			echo "The release menu reads and erases persist. This tool does not erase persist."
+			;;
+		6)
+			if confirm_reboot_cmd reboot-recovery; then
+				guarded_misc_session reboot-recovery reboot-recovery
+			fi
+			;;
+		7)
+			if confirm_reboot_cmd reboot-fastboot; then
+				guarded_misc_session reboot-fastboot reboot-fastboot
+			fi
+			;;
+		8) unlock_bootloader_menu ;;
+		9) hex_mode_menu ;;
+		10) boot_after_menu ;;
+		*) echo "Unchanged." ;;
+	esac
+}
+
 # Test hook: SPDHOST_MENU_LIB=1 + `source menu.sh` loads functions only.
 if [[ ${SPDHOST_MENU_LIB:-} == 1 ]]; then
 	return 0 2>/dev/null || exit 0
@@ -1205,12 +1488,18 @@ while true; do
 	echo "FDL1: ${FDL1:-unset} ${FDL1_ADDR:-}"
 	echo "FDL2: ${FDL2:-unset} ${FDL2_ADDR:-}"
 	echo "Dumps go to: $DUMP_DIR"
+	echo "Flash input: $INPUT_DIR"
+	echo "After flash/restore: $BOOT_AFTER"
 	echo
-	echo "[1] Dump a partition (list + closest match + size)"
+	echo "[1] Dump a partition (list + closest match + size, or imei)"
 	echo "[2] Reboot into a mode"
-	echo "[3] Change loader files"
+	echo "[3] Change loader files (ums9230 Infinix is the shipped pair)"
 	echo "[4] List partitions only"
 	echo "[5] Smoke test (safe checks, no writes)"
+	echo "[6] Flash images from input/"
+	echo "[7] Restore a backup folder"
+	echo "[8] Repartition from XML"
+	echo "[9] Extra (slot, hex mode, disabled unlock / verity / FRP)"
 	echo "[0] Quit"
 	read -r -p "Choice: " choice
 	case ${choice:-} in
@@ -1219,6 +1508,10 @@ while true; do
 		3) configure_loaders; pause ;;
 		4) list_partitions_menu ;;
 		5) smoke_test ;;
+		6) flash_input_menu; pause ;;
+		7) restore_backup_menu; pause ;;
+		8) repartition_menu; pause ;;
+		9) extra_menu; pause ;;
 		0) exit 0 ;;
 		*) echo "Not a choice."; pause ;;
 	esac
