@@ -8,23 +8,24 @@ DUMP_DIR="${SPDHOST_DUMP_DIR:-$PWD/backup}"
 FDL1_ADDR_DEFAULT=0x65000800
 FDL2_ADDR_DEFAULT=0x9efffe00
 
-# Prefer PATH, then this package's scripts/ (works from no-root/ or scripts/).
+# Prefer this package's own scripts/ over PATH, so an unzipped release never
+# picks up an older spdhost-usb installed in $PREFIX/bin. PATH is last resort.
 # Always run the wrapper by absolute path so spdhost-usb can resolve ../spdhost via $0.
 script_dir=$(cd "$(dirname "$0")" && pwd)
 RUNNER=()
-if command -v spdhost-usb >/dev/null 2>&1; then
+for cand in \
+	"$script_dir/spdhost-usb" \
+	"$PWD/scripts/spdhost-usb" \
+	"$PWD/spdhost-usb"
+do
+	if [[ -x $cand && -f $cand ]]; then
+		RUNNER=("$(cd "$(dirname "$cand")" && printf '%s/%s' "$(pwd)" "$(basename "$cand")")")
+		break
+	fi
+done
+if (( ${#RUNNER[@]} == 0 )) && command -v spdhost-usb >/dev/null 2>&1; then
 	RUNNER=("$(command -v spdhost-usb)")
-else
-	for cand in \
-		"$script_dir/spdhost-usb" \
-		"$PWD/scripts/spdhost-usb" \
-		"$PWD/spdhost-usb"
-	do
-		if [[ -x $cand && -f $cand ]]; then
-			RUNNER=("$(cd "$(dirname "$cand")" && printf '%s/%s' "$(pwd)" "$(basename "$cand")")")
-			break
-		fi
-	done
+	echo "note: using spdhost-usb from PATH (${RUNNER[0]}); package copy not found" >&2
 fi
 if (( ${#RUNNER[@]} == 0 )); then
 	echo "spdhost-usb not found next to this tree or on PATH." >&2
@@ -765,6 +766,7 @@ apply_ums9230_infinix_defaults
 while true; do
 	cls
 	echo "spdhost test menu"
+	echo "wrapper: ${RUNNER[0]}"
 	echo "FDL1: ${FDL1:-unset} ${FDL1_ADDR:-}"
 	echo "FDL2: ${FDL2:-unset} ${FDL2_ADDR:-}"
 	echo "Dumps go to: $DUMP_DIR"
