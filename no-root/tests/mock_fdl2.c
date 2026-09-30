@@ -8,6 +8,11 @@
  *   MOCK_FAIL_MID=P   2nd READ_MIDST of partition P gets 0x82 instead of data.
  *   MOCK_FAIL_START=P READ_START of P is NACKed.
  *   MOCK_ZERO=P       partition P reads as zeros (fast >4 GiB test).
+ *   MOCK_FAIL_WRITE=P START_DATA of partition P is NACKed.
+ *   MOCK_MISC_DROPWRITE=1  misc writes are ACKed but not stored (read-back test).
+ *   MOCK_MISC_OUT=F   (misc is always a live 1 MiB buffer) (partition writes land in it,
+ *                     later reads see them); written to F after each END_DATA
+ *                     and at READ_END of misc.
  * Data bytes are pattern_byte(offset) ^ name_seed(name) (see mock_pattern.h).
  *
  * Stateful fake libusb: BootROM -> FDL1 -> FDL2 with partition reads.
@@ -30,6 +35,12 @@ static char cur_part[40];
 static uint64_t cur_size;
 static int connects;
 static int midst_count;
+static uint8_t *miscmem; static uint64_t misclen;
+static char wr_part[40]; static uint64_t wr_off, wr_size; static int wr_on;
+static void misc_init(void);
+static void misc_save(void)
+{ const char *f = getenv("MOCK_MISC_OUT"); FILE *o; if (!f || !miscmem) return;
+  if ((o = fopen(f, "wb"))) { fwrite(miscmem, 1, misclen, o); fclose(o); } }
 
 static unsigned crc16(const uint8_t *s, unsigned len)
 { unsigned crc = 0; while (len--) { int i; crc ^= (unsigned)(*s++) << 8;
@@ -71,6 +82,12 @@ static uint64_t part_size(const char *n)
 	if (!strcmp(n, "boot_a") || !strcmp(n, "boot_b")) return 64 << 20;
 	return 0;
 }
+
+static void misc_init(void)
+{ uint64_t k; if (miscmem) return; misclen = part_size("misc"); if (!misclen) return;
+  const char *in = getenv("MOCK_MISC_IN"); FILE *f;
+  miscmem = malloc(misclen); for (k = 0; k < misclen; k++) miscmem[k] = part_byte("misc", k);
+  if (in && (f = fopen(in, "rb"))) { if (fread(miscmem, 1, misclen, f)) {} fclose(f); } }
 
 static void make_reply(unsigned type, const uint8_t *data, int n, int crc)
 {
@@ -122,7 +139,8 @@ static void log_out(const uint8_t *buf, int len)
 		if (++midst_count == 2 && streq_env("MOCK_FAIL_MID", cur_part)) { make_reply(0x82, NULL, 0, crc); return; }
 		if (off + want > cur_size) want = (uint32_t)(cur_size - off);
 		if (want > 0xffff) want = 0xffff;
-		if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
+		if (!strcmp(cur_part, "misc") && (misc_init(), miscmem) && off + want <= misclen) memcpy(data, miscmem + off, want);
+		else if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
 		else for (k = 0; k < want; k++) data[k] = part_byte(cur_part, off + k);
 		make_reply(0x93, data, (int)want, crc); return; }
 	case 0x2d: load_tab(); if (ntab > 0) {
@@ -138,6 +156,20 @@ static void log_out(const uint8_t *buf, int len)
 			for (j = 0; t[k].n[j]; j++) r[2 * j] = t[k].n[j];
 			r[0x48] = t[k].kb; r[0x49] = t[k].kb >> 8; r[0x4a] = t[k].kb >> 16; r[0x4b] = t[k].kb >> 24; }
 		make_reply(0xba, data, k * 0x4c, crc); return; }
+		make_reply(0x80, NULL, 0, crc); return;
+	case 0x12: if (!strcmp(cur_part, "misc")) misc_save(); make_reply(0x80, NULL, 0, crc); return;
+	case 0x01: if (plen >= 76) { /* partition START_DATA: name[36]wchar + size lo (+hi) */
+		char nm[40]; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;
+		strcpy(wr_part, nm); wr_off = 0; wr_size = le32(raw + 4 + 72); wr_on = 1;
+		if (plen >= 80) wr_size |= (uint64_t)le32(raw + 4 + 76) << 32;
+		if (streq_env("MOCK_FAIL_WRITE", nm) || !part_size(nm) || wr_size > part_size(nm)) { wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
+		}
+		make_reply(0x80, NULL, 0, crc); return;
+	case 0x02: if (wr_on && !strcmp(wr_part, "misc") && !getenv("MOCK_MISC_DROPWRITE")) { misc_init();
+		if (miscmem && wr_off + plen <= misclen) memcpy(miscmem + wr_off, raw + 4, plen); }
+		if (wr_on) wr_off += plen;
+		make_reply(0x80, NULL, 0, crc); return;
+	case 0x03: if (wr_on && !strcmp(wr_part, "misc")) misc_save(); wr_on = 0;
 		make_reply(0x80, NULL, 0, crc); return;
 	default: make_reply(0x80, NULL, 0, crc); return;
 	}

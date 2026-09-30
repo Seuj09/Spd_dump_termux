@@ -70,6 +70,23 @@ spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR reboot-fastboot
 
 They ask you to type `yes` unless you pass `--yes` (CLI automation only).
 `scripts/menu.sh` never passes `--yes` for reboot or misc writes.
+The frames match vendored spd_dump (`tests/reboot-seq.sh`): START_DATA misc
+2048, one 2048-byte MIDST, END_DATA, NORMAL_RESET. Like spd_dump, spdhost
+stops the command list after `reset`, `power-off` or `reboot-*` succeeds.
+
+Guard a misc write with `misc-backup FILE` on the same line, after `parts`:
+
+```sh
+spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
+  parts backup/partition_list.txt misc-backup backup/misc-before.img reboot-recovery
+```
+
+`misc-backup` reads the whole of misc, writes FILE, and reads FILE back. If
+any of that fails, spdhost stops before writing, even with `--keep-going`.
+After a misc write (from `reboot-*` or `write-part misc`), spdhost reads misc
+back. The written bytes must match and the rest must be unchanged, or spdhost
+stops without resetting. The menu always does this and names the backup
+`backup/misc-before-<time>.img`. Menu reboot `[6]` restores one.
 
 **FDL must match the exact chip.** A wrong loader or address can brick the
 phone. The shipped `fdl/ums9230/infinix/` pair is one example only.
@@ -315,6 +332,15 @@ USB timeouts and a device reset still stop the run. The menu's `all` and
 `all_lite` use it, check that every file has the expected byte size, rename
 short files to `NAME.img.partial`, and add the good ones to `backup/SHA256SUMS`.
 
+`dump all|all_lite|NAME DIR` (after `parts` on the same line) takes names and
+sizes from the table it just read. It converts units to bytes the same way
+spd_dump does, reads misc for the active slot, adds `splloader` (256 KiB) to
+`all`/`all_lite`, and skips blackbox/cache/userdata. A plain NAME gets the
+active slot suffix. It writes `DIR/NAME.img`, or `NAME.img.partial` if the
+read fails, plus `DIR/dump-manifest.txt`. When you answer y to "Refresh from
+device?" the menu runs the refresh and the dump in one session this way, so
+FDL2 is not lost in between.
+
 If more than one USB device is plugged in, `spdhost-usb` stops and lists
 them. Copy one path from `termux-usb -l` and put it first. The `--` is
 required so the path is not read as an option:
@@ -338,8 +364,8 @@ Dump (option 1) fetches the live `parts` table into
 menu's LIST PARTISI, then resolves what you type to the closest name
 (`boot.img` or `boot` → `boot_a` when that slot exists) and uses that
 row's size for `read-part`. `all` / `all_lite` match the rooted menu
-bulk dump (skip userdata/cache/blackbox; `all_lite` also skips `_b`
-when `_a` exists). Option 4 only refreshes the list. Reboot choices are
+bulk dump (splloader, then everything except userdata/cache/blackbox;
+`all_lite` also skips the inactive slot read from misc). Option 4 only refreshes the list. Reboot choices are
 system (`reset`), recovery (`reboot-recovery`), fastbootd
 (`reboot-fastboot`), power off, and optional wipe userdata via
 `misc/misc-wipe.bin` (BCB + reset only). Misc/reboot/wipe paths always use

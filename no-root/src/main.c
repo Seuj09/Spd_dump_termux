@@ -2,6 +2,7 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "proto.h"
+#include "dumpcmd.h"
 
 #include <errno.h>
 #include <getopt.h>
@@ -74,6 +75,16 @@ static void usage(void)
 		"  fdl FILE ADDR                send one loader and execute it\n"
 		"  parts [FILE]                 list partitions (FILE or '-' optional)\n"
 		"  read-part NAME OFF SIZE OUT\n"
+		"  dump all|all_lite|NAME DIR   after parts, same session: size from the\n"
+		"                               live table (units -> bytes like spd_dump),\n"
+		"                               slot from misc, splloader 256K in all*,\n"
+		"                               skips blackbox/cache/userdata. Writes\n"
+		"                               DIR/NAME.img (failed: NAME.img.partial),\n"
+		"                               DIR/dump-manifest.txt. Keeps going.\n"
+		"  misc-backup FILE             read all of misc to FILE and check it;\n"
+		"                               a later misc write in this session is\n"
+		"                               then read back and verified. Failure\n"
+		"                               stops the session before any write.\n"
 		"  write-part NAME FILE\n"
 		"  erase-part NAME\n"
 		"  chip-uid\n"
@@ -166,7 +177,8 @@ static int is_command(const char *s)
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "chip-uid") == 0 ||
 		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
-		strcmp(s, "reset") == 0 ||
+		strcmp(s, "reset") == 0 || strcmp(s, "dump") == 0 ||
+		strcmp(s, "misc-backup") == 0 ||
 		strcmp(s, "power-off") == 0;
 }
 
@@ -270,8 +282,20 @@ static int do_reboot_bcb(struct spd *io, int yes, int kind)
 		fprintf(stderr, "internal error: misc BCB length %zu != 2048\n", sizeof(buf));
 		return -1;
 	}
-	if (spd_write_part_buf(io, "misc", buf, sizeof(buf)))
+	{
+		/* spd_dump reboot-* uses w_mem_to_part_offset(..., 0x1000): the
+		 * chunk is 0x1000 whatever blk_size/--step is (one 2048-byte MIDST). */
+		int saved = io->step, rc;
+		io->step = 0x1000;
+		rc = spd_write_part_buf(io, "misc", buf, sizeof(buf));
+		io->step = saved;
+		if (rc)
+			return -1;
+	}
+	if (spd_misc_guard_armed() && spd_misc_verify(io, buf, sizeof(buf))) {
+		fprintf(stderr, "misc read-back mismatch: NOT resetting. Restore misc from the backup.\n");
 		return -1;
+	}
 	return spd_simple(io, 0x05); /* BSL_CMD_NORMAL_RESET */
 }
 
@@ -560,12 +584,45 @@ int main(int argc, char **argv)
 				}
 			}
 			i += 5;
+		} else if (strcmp(cmd, "dump") == 0) {
+			need(argc, i, 2, "dump");
+			need_fdl2(io, "dump");
+			if (spd_dump(io, argv[i + 1], argv[i + 2])) {
+				if (!keep_going)
+					return 1;
+				nfailed++;
+				if (strlen(failed) + strlen(argv[i + 1]) + 8 < sizeof(failed)) {
+					strcat(failed, " dump:");
+					strcat(failed, argv[i + 1]);
+				}
+			}
+			i += 3;
+		} else if (strcmp(cmd, "misc-backup") == 0) {
+			need(argc, i, 1, "misc-backup");
+			need_fdl2(io, "misc-backup");
+			if (spd_misc_backup(io, argv[i + 1]))
+				return 1; /* never --keep-going past a failed backup */
+			i += 2;
 		} else if (strcmp(cmd, "write-part") == 0) {
 			need(argc, i, 2, "write-part");
 			need_fdl2(io, "write-part");
 			confirm(yes, "write", argv[i + 1]);
 			if (spd_write_part(io, argv[i + 1], argv[i + 2]))
 				return 1;
+			if (strcmp(argv[i + 1], "misc") == 0 && spd_misc_guard_armed()) {
+				FILE *f = fopen(argv[i + 2], "rb");
+				uint64_t cap = spd_misc_size(io);
+				uint8_t *w = malloc(cap + 1);
+				size_t n = (f && w) ? fread(w, 1, cap + 1, f) : 0;
+				int vr = (n && n <= cap) ? spd_misc_verify(io, w, n) : -1;
+				if (f)
+					fclose(f);
+				free(w);
+				if (vr) {
+					fprintf(stderr, "misc read-back mismatch: stopping (no reset). Restore misc from the backup.\n");
+					return 1;
+				}
+			}
 			i += 3;
 		} else if (strcmp(cmd, "erase-part") == 0) {
 			need(argc, i, 1, "erase-part");
@@ -583,24 +640,30 @@ int main(int argc, char **argv)
 			if (do_reboot_bcb(io, yes, 0))
 				return 1;
 			i++;
+			break;
 		} else if (strcmp(cmd, "reboot-fastboot") == 0) {
 			need_fdl2(io, "reboot-fastboot");
 			if (do_reboot_bcb(io, yes, 1))
 				return 1;
 			i++;
+			break;
 		} else if (strcmp(cmd, "reset") == 0) {
 			if (spd_simple(io, 0x05))
 				return 1;
 			i++;
+			break; /* spd_dump: `if (!send_and_check(io)) break;` */
 		} else if (strcmp(cmd, "power-off") == 0) {
 			if (spd_simple(io, 0x17))
 				return 1;
 			i++;
+			break;
 		} else {
 			fprintf(stderr, "unknown command: %s\n", cmd);
 			return 2;
 		}
 	}
+	if (i < argc)
+		fprintf(stderr, "note: ignored after reset/power-off/reboot-*: %s ... (the device left FDL2)\n", argv[i]);
 
 	if (!dry)
 		spd_usb_close(&io->usb);

@@ -204,6 +204,7 @@ void spd_free(struct spd *io)
 	free(io->enc);
 	free(io->recv);
 	free(io->temp);
+	free(io->ptab);
 	free(io);
 }
 
@@ -997,9 +998,10 @@ static void select_part(struct spd *io, const char *name, uint64_t size, unsigne
 	spd_encode(io, cmd, pkt, (size_t)n);
 }
 
-int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path)
+static int read_part_core(struct spd *io, const char *name, uint64_t offset, uint64_t size,
+	const char *out_path, uint8_t *mem)
 {
-	FILE *fo;
+	FILE *fo = NULL;
 	uint64_t done = 0;
 	int mode64 = (offset + size) > 0xffffffffu;
 	int step = io->step;
@@ -1018,8 +1020,9 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		spd_check_ok(io);
 		return -1;
 	}
-	fo = fopen(out_path, "wb");
-	if (!fo) {
+	if (out_path)
+		fo = fopen(out_path, "wb");
+	if (out_path && !fo) {
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
 		spd_encode(io, BSL_CMD_READ_END, NULL, 0);
 		spd_check_ok(io);
@@ -1029,7 +1032,8 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 	while (done < size) {
 		uint8_t req[12];
 		if (spd_interrupted) {
-			fclose(fo);
+			if (fo)
+				fclose(fo);
 			fprintf(stderr, "interrupted; stopped read at %llu of %llu bytes (%s left as-is)\n",
 				(unsigned long long)done, (unsigned long long)size, out_path);
 			return -1;
@@ -1064,13 +1068,15 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		p = spd_payload(io, &plen);
 		if (plen > n)
 			die("device returned more than requested");
-		if (fwrite(p, 1, plen, fo) != plen)
+		if (fo && fwrite(p, 1, plen, fo) != plen)
 			die("write failed");
+		if (mem)
+			memcpy(mem + done, p, plen);
 		done += plen;
 		if (plen != n)
 			break;
 	}
-	if (fclose(fo) != 0) {
+	if (fo && fclose(fo) != 0) {
 		fprintf(stderr, "close %s: %s\n", out_path, strerror(errno));
 		bad = 1;
 	}
@@ -1080,8 +1086,18 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		bad = 1;
 	}
 	fprintf(stderr, "read %s: %llu of %llu bytes -> %s%s\n", name, (unsigned long long)done,
-		(unsigned long long)size, out_path, (bad || done != size) ? " (INCOMPLETE)" : "");
+		(unsigned long long)size, out_path ? out_path : "memory", (bad || done != size) ? " (INCOMPLETE)" : "");
 	return (!bad && done == size) ? 0 : -1;
+}
+
+int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path)
+{
+	return read_part_core(io, name, offset, size, out_path, NULL);
+}
+
+int spd_read_part_mem(struct spd *io, const char *name, uint64_t offset, uint64_t size, uint8_t *mem)
+{
+	return read_part_core(io, name, offset, size, NULL, mem);
 }
 
 int spd_write_part(struct spd *io, const char *name, const char *path)
@@ -1230,6 +1246,33 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		}
 	}
 	count = plen / 0x4c;
+	/* spd_dump partition_list() (common.c ~1109-1124): divisor starts at 10
+	 * and drops while any entry >> divisor is 0; bytes = units << (20 -
+	 * divisor). spd_dump would loop forever on a 0-size entry; skip those. */
+	{
+		int divisor = 10;
+		free(io->ptab);
+		io->ptab = calloc(count ? count : 1, sizeof(*io->ptab));
+		if (!io->ptab)
+			die("out of memory");
+		io->nparts = (int)count;
+		for (i = 0; i < count; i++) {
+			uint32_t u = rd32le(p + i * 0x4c + 0x48);
+			while (u && divisor > 0 && !(u >> divisor))
+				divisor--;
+		}
+		io->ptab_shift = 20 - divisor;
+		for (i = 0; i < count; i++) {
+			const uint8_t *rec = p + i * 0x4c;
+			unsigned k;
+			for (k = 0; k < 36 && rec[k * 2]; k++)
+				io->ptab[i].name[k] = (char)rec[k * 2];
+			io->ptab[i].name[k] = 0;
+			io->ptab[i].size = (uint64_t)rd32le(rec + 0x48) << io->ptab_shift;
+		}
+		fprintf(stderr, "parts: %u entries, units << %d = bytes (spd_dump divisor %d)\n",
+			count, io->ptab_shift, divisor);
+	}
 	for (i = 0; i < count; i++) {
 		const uint8_t *rec = p + i * 0x4c;
 		char name[37];

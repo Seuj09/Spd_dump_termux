@@ -29,6 +29,11 @@ struct spd {
 	uint32_t exec_addr; /* nonzero: BootROM exec_addr path (no END/EXEC) */
 	const char *exec_file; /* stub sent at exec_addr (custom_exec_no_verify) */
 	int dry_drop_ack;   /* dry-run: next recv reports a timeout (test hook) */
+	/* Live partition table from the last `parts` in this session, in bytes
+	 * (spd_dump partition_list(): units << (20 - divisor)). */
+	struct spd_part { char name[37]; uint64_t size; } *ptab;
+	int nparts;
+	int ptab_shift;
 };
 
 struct spd *spd_new(int verbose, int step);
@@ -63,6 +68,8 @@ int spd_write_part(struct spd *io, const char *name, const char *path);
 int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
+/* Read [offset, offset+size) of NAME into MEM (exactly size bytes or error). */
+int spd_read_part_mem(struct spd *io, const char *name, uint64_t offset, uint64_t size, uint8_t *mem);
 int spd_chip_uid(struct spd *io);
 int spd_simple(struct spd *io, unsigned type);
 

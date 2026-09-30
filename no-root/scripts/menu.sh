@@ -623,8 +623,106 @@ dump_matched_parts() {
 	run_dump_queue
 }
 
+# Check what one `parts RAW dump TARGET DUMP_DIR` session produced, using
+# DUMP_DIR/dump-manifest.txt from spdhost ("start NAME BYTES FILE", then
+# "ok NAME" / "fail NAME"). Every started entry must have an ok line AND a file
+# of exactly BYTES; good ones go to SHA256SUMS, others are listed as failed
+# (spdhost leaves a short read as NAME.img.partial and keeps an older NAME.img).
+verify_dump_manifest() {
+	local rc=$1 man="$DUMP_DIR/dump-manifest.txt" tag name bytes file sz n=0
+	local -a failed=()
+	local -A okset=()
+	if [[ ! -f $man ]]; then
+		echo "FAILED: spdhost wrote no $man (session exit $rc)"
+		(( rc != 0 )) || rc=1
+		return "$rc"
+	fi
+	while read -r tag name _; do
+		[[ $tag == ok ]] && okset[$name]=1
+	done < "$man"
+	echo
+	echo "Verifying (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
+	while read -r tag name bytes file; do
+		case $tag in
+			missing) failed+=("$name(not in live table)"); continue ;;
+			start) ;;
+			*) continue ;;
+		esac
+		((n++))
+		file="$DUMP_DIR/$file"
+		sz=$(stat -c %s "$file" 2>/dev/null || echo -1)
+		if [[ -n ${okset[$name]:-} ]] && (( sz == bytes )); then
+			record_sha256 "$file" || failed+=("$name")
+			continue
+		fi
+		failed+=("$name")
+		if [[ -f $file.partial ]]; then
+			echo "FAIL $name: got $(stat -c %s "$file.partial") of $bytes bytes -> $file.partial"
+		elif [[ -z ${okset[$name]:-} ]]; then
+			echo "FAIL $name: read did not complete (expected $bytes bytes)"
+		else
+			echo "FAIL $name: $file is $sz bytes, expected $bytes"
+		fi
+		[[ -e $file && -z ${okset[$name]:-} ]] && echo "     $file is an OLDER copy, not from this session"
+	done < "$man"
+	if (( ${#failed[@]} )); then
+		echo "FAILED (${#failed[@]} of $n): ${failed[*]}"
+		(( rc != 0 )) || rc=1
+		return "$rc"
+	fi
+	if (( rc != 0 )); then
+		echo "all $n file(s) complete, but spdhost exited $rc"
+		return "$rc"
+	fi
+	echo "all $n file(s) complete"
+	return 0
+}
+
+# Refresh + dump in ONE spdhost-usb session: exec_addr + fdl + fdl + parts +
+# dump TARGET. spdhost takes names/sizes from the table it just read (units ->
+# bytes and slot exactly like spd_dump), so FDL2 never drops between the two.
+# TARGET: all, all_lite, splloader, or a partition name (NAME or NAME without
+# the slot suffix: spdhost adds the live active slot).
+dump_live_session() {
+	local target=$1 raw rc
+	raw=$(parts_cache_path)
+	mkdir -p "$DUMP_DIR"
+	rm -f "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)"
+	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
+	ready
+	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$raw" dump "$target" "$DUMP_DIR"
+	rc=$?
+	if [[ -s $raw ]]; then
+		load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
+	fi
+	verify_dump_manifest "$rc"
+}
+
+# Name to hand spdhost `dump`: fuzzy-match against the cached table when there
+# is one (boot.img -> boot_a); drop a slot suffix the user did not type so the
+# live active slot is used. Without a cache, pass the normalized name.
+live_dump_target() {
+	local query=$1 parts_file=$2 q m name
+	q=$(normalize_part_query "$query")
+	case $q in all|all_lite|splloader) printf '%s\n' "$q"; return 0 ;; esac
+	if [[ -s $parts_file ]] && m=$(resolve_part_query "$query" "$parts_file" 2>/dev/null); then
+		read -r name _ <<<"$m"
+		if [[ $name == *_[ab] && $q != *_[ab] ]]; then
+			name=${name%_[ab]}
+		fi
+		printf '%s\n' "$name"
+		return 0
+	fi
+	if [[ -z $q || $q == */* || $q == *' '* ]]; then
+		echo "Name must be one word, like boot, boot.img, or boot_a." >&2
+		return 1
+	fi
+	printf '%s\n' "$q"
+}
+
 dump_partition() {
-	local parts_file raw reply query matched name size out
+	local parts_file raw reply query matched name size out refresh=0 target rc
 	need_loaders || return
 	cls
 	echo "Dump partition(s)"
@@ -635,11 +733,32 @@ dump_partition() {
 	if [[ -s $raw ]]; then
 		echo "Cached list: $raw"
 		read -r -p "Refresh from device? [y/N]: " reply
-		if [[ ${reply,,} == y || ${reply,,} == yes ]]; then
-			fetch_parts_table || { pause; return 1; }
-		fi
+		[[ ${reply,,} == y || ${reply,,} == yes ]] && refresh=1
 	else
-		fetch_parts_table || { pause; return 1; }
+		echo "No cached partition list: the table is read in the same session as the dump."
+		refresh=1
+	fi
+	if (( refresh )); then
+		# Ask first, then ONE session reads the table and dumps (no FDL2 drop).
+		if [[ -s $raw ]] && load_parts_state; then
+			cls
+			echo "(cached list below; sizes and slot are re-read from the device)"
+			show_parts_list "$parts_file"
+		else
+			echo "Type a partition name (boot, boot.img, boot_a, splloader), or all / all_lite."
+		fi
+		read -r -p "Partition name (or all / all_lite): " query
+		if [[ -z ${query:-} ]]; then
+			echo "Cancelled."
+			pause
+			return
+		fi
+		target=$(live_dump_target "$query" "$parts_file") || { pause; return 1; }
+		echo "Will dump '$target' using the live table."
+		dump_live_session "$target"
+		rc=$?
+		pause
+		return "$rc"
 	fi
 	if ! load_parts_state || [[ ! -s $parts_file ]]; then
 		echo "No partition list."
@@ -654,7 +773,6 @@ dump_partition() {
 		pause
 		return
 	fi
-	local rc
 	case ${query,,} in
 		all|all_lite)
 			dump_matched_parts "${query,,}" "$parts_file"
@@ -715,7 +833,7 @@ confirm_misc_write() {
 		return 1
 	fi
 	digest=$(sha256sum "$misc" | awk '{print $1}')
-	echo "About to write 2048 bytes to partition 'misc' ($kind), then reset."
+	echo "About to write $(stat -c %s "$misc") bytes to partition 'misc' ($kind), then reset."
 	echo "misc image sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
 	read -r -p "type yes to write misc: " reply
@@ -904,6 +1022,74 @@ smoke_test() {
 	pause
 }
 
+# Misc write guarded in ONE session: parts (live misc size) + misc-backup
+# backup/misc-before-<ts>.img (spdhost reads all of misc, writes the file,
+# reads the file back; any failure ends the session BEFORE the write) + the
+# write command (spdhost reads misc back and compares: written bytes equal,
+# rest unchanged; mismatch -> no reset) + reset. Then the menu re-checks the
+# backup size against the table and records its sha256 in SHA256SUMS.
+# No --yes: the caller already took a typed "yes" and spdhost asks again.
+guarded_misc_session() {
+	local kind=$1 ts backup raw rc want sz
+	shift
+	ts=$(date +%Y%m%d-%H%M%S)
+	mkdir -p "$DUMP_DIR"
+	backup="$DUMP_DIR/misc-before-$ts.img"
+	raw=$(parts_cache_path)
+	echo "misc will be backed up to $backup first; the write is skipped if that fails."
+	ready
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$raw" misc-backup "$backup" "$@"
+	rc=$?
+	load_parts_state >/dev/null 2>&1
+	want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
+	[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
+	sz=$(stat -c %s "$backup" 2>/dev/null || echo -1)
+	if (( sz == want )); then
+		record_sha256 "$backup"
+		echo "To restore misc later (typed confirm, no --yes):"
+		echo "  bash scripts/spdhost-usb fdl <fdl1> $FDL1_ADDR fdl <fdl2> $FDL2_ADDR write-part misc $backup reset"
+		echo "  (or menu [2] -> [6] restore misc from a backup)"
+	else
+		echo "misc backup missing or wrong size ($sz of $want bytes): the write was NOT done." >&2
+		rm -f "$backup"
+		(( rc != 0 )) || rc=1
+	fi
+	if (( rc != 0 )); then
+		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no reset happens after a failed backup or a misc read-back mismatch."
+	else
+		echo "$kind: misc written, read back and verified, then reset."
+	fi
+	return "$rc"
+}
+
+restore_misc_menu() {
+	local f reply
+	local -a list=()
+	mapfile -t list < <(ls -1t "$DUMP_DIR"/misc-before-*.img 2>/dev/null)
+	if (( ${#list[@]} == 0 )); then
+		echo "No $DUMP_DIR/misc-before-*.img backups."
+		return 1
+	fi
+	echo "misc backups (newest first):"
+	local i
+	for i in "${!list[@]}"; do
+		echo "  [$((i + 1))] ${list[i]}  $(stat -c %s "${list[i]}") bytes"
+	done
+	read -r -p "Restore which? [1]: " reply
+	reply=${reply:-1}
+	[[ $reply =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#list[@]} )) || { echo "Unchanged."; return 1; }
+	f=${list[reply - 1]}
+	if [[ -f $DUMP_DIR/SHA256SUMS ]] && grep -q " ${f##*/}\$" "$DUMP_DIR/SHA256SUMS"; then
+		( cd "$DUMP_DIR" && grep " ${f##*/}\$" SHA256SUMS | sha256sum -c --quiet ) || { echo "sha256 mismatch for $f; refusing." >&2; return 1; }
+		echo "sha256 OK (SHA256SUMS)"
+	else
+		echo "note: $f has no SHA256SUMS line"
+	fi
+	confirm_misc_write "restore $(basename "$f")" "$f" || return 1
+	guarded_misc_session "restore misc" write-part misc "$f" reset
+}
+
 reboot_mode() {
 	local choice misc
 	need_loaders || return
@@ -914,12 +1100,14 @@ reboot_mode() {
 	echo "[3] fastbootd"
 	echo "[4] power off"
 	echo "[5] wipe userdata (via recovery BCB; destructive)"
+	echo "[6] restore misc from a backup (backup/misc-before-*.img)"
+	echo "misc writes ([2],[3],[5],[6]) back up misc first and verify it after."
 	read -r -p "Choice: " choice
 	case $choice in
 		1)
 			echo "Normal reset after the loaders."
 			ready
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset || true
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset
 			;;
 		2)
 			echo "Writes 2048-byte recovery BCB to misc via reboot-recovery, then reset."
@@ -927,10 +1115,8 @@ reboot_mode() {
 				pause
 				return
 			fi
-			ready
 			# No --yes: spdhost prompts again on its TTY confirm path.
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-				reboot-recovery || true
+			guarded_misc_session reboot-recovery reboot-recovery
 			;;
 		3)
 			echo "Writes 2048-byte fastbootd BCB to misc via reboot-fastboot, then reset."
@@ -938,14 +1124,12 @@ reboot_mode() {
 				pause
 				return
 			fi
-			ready
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-				reboot-fastboot || true
+			guarded_misc_session reboot-fastboot reboot-fastboot
 			;;
 		4)
 			echo "Power off. The target stays off."
 			ready
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off || true
+			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			;;
 		5)
 			resolve_misc_dir || { pause; return; }
@@ -960,10 +1144,11 @@ reboot_mode() {
 				pause
 				return
 			fi
-			ready
 			# No --yes. spdhost write-part will also require typed yes.
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-				write-part misc "$misc" reset || true
+			guarded_misc_session wipe-userdata write-part misc "$misc" reset
+			;;
+		6)
+			restore_misc_menu
 			;;
 		*)
 			echo "Unchanged."

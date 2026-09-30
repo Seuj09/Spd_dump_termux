@@ -108,7 +108,7 @@ LIB=(-L"$sysroot/lib" -lusb-1.0)
 # --- spdhost ----------------------------------------------------------------
 echo "building spdhost"
 cc -static -s -O2 -Wall -Wextra -Wno-sign-compare -std=c11 -D_FILE_OFFSET_BITS=64 "${INC[@]}" \
-	-o "$OUT/spdhost" "$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" \
+	-o "$OUT/spdhost" "$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" \
 	"${LIB[@]}" -lpthread
 
 # --- spd_dump (vendored TomKing tree) ---------------------------------------

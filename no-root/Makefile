@@ -5,14 +5,14 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11 -D_FILE_OFFSET_BITS=64
 CPPFLAGS += $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0)
 
-SRCS = src/main.c src/usb.c src/proto.c
+SRCS = src/main.c src/usb.c src/proto.c src/dumpcmd.c
 BIN = spdhost
 ARCH := $(shell uname -m)
 
 .PHONY: all clean cross-arm32
 all: $(BIN)
 
-$(BIN): $(SRCS) src/usb.h src/proto.h
+$(BIN): $(SRCS) src/usb.h src/proto.h src/dumpcmd.h
 	@echo "spdhost: compiling for $(ARCH)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRCS) $(LDLIBS)
 

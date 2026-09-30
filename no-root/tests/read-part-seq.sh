@@ -11,7 +11,7 @@ make -C "$root/spd_dump" GITVER.h >/dev/null
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/sd" || exit 1
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen" || exit 1
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/infinix/fdl1-dl.bin" \
 	"$root/fdl/ums9230/infinix/fdl2-dl.bin" "$tmp/"

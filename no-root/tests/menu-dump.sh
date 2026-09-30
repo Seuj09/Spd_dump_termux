@@ -15,7 +15,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 make -C "$root/spd_dump" GITVER.h >/dev/null
 mkdir -p "$tmp/pkg/fdl/ums9230"
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/spd_dump" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen_expected" || exit 1
@@ -146,6 +146,77 @@ if [[ ${TEST_BIG:-1} != 0 ]]; then
 else
 	echo "SKIP: 6 GiB read (TEST_BIG=0)"
 fi
+
+# ---- case 5: refresh + dump in ONE session (spdhost `parts FILE dump ...`) ----
+export MOCK_PTABLE=$tmp/pt
+sessions() { grep -c '^+ ' "$1"; }
+DUMP_DIR=$tmp/b5; export MOCK_SLOT=b
+dump_live_session all_lite </dev/null >"$tmp/c5.log" 2>&1; rc=$?
+spd_all "$tmp/s5" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
+check "one-session all_lite (slot b): 1 spdhost run, rc=$rc" bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c5.log') = 1 ] && grep -q ' parts .* dump all_lite ' '$tmp/c5.log'"
+check "one-session all_lite == spd_dump r all_lite (slot b)" same_as_spd "$DUMP_DIR" "$tmp/s5"
+check "one-session: table cache refreshed, slot b, SHA256SUMS ok" \
+	bash -c "grep -qx 'boot_b 4096' '$DUMP_DIR/partition_list.txt' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 4 ] && sha256sum -c --quiet SHA256SUMS"
+DUMP_DIR=$tmp/b6
+dump_live_session all </dev/null >"$tmp/c6.log" 2>&1; rc=$?
+spd_all "$tmp/s6" all MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
+check "one-session all (rc=$rc) == spd_dump r all" same_as_spd "$DUMP_DIR" "$tmp/s6"
+DUMP_DIR=$tmp/b7
+t=$(live_dump_target boot.img "$tmp/none")
+dump_live_session "$t" </dev/null >"$tmp/c7.log" 2>&1; rc=$?
+"$tmp/gen_expected" boot_b 0 4194304 > "$tmp/boot_b.exp"
+check "one-session single 'boot.img' (no cache) -> boot_b from live slot, rc=$rc" \
+	bash -c "[ $rc = 0 ] && [ '$t' = boot ] && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp' && grep -q ' boot_b.img\$' '$DUMP_DIR/SHA256SUMS' && [ ! -e '$DUMP_DIR/boot_a.img' ]"
+# cached table said slot a (boot_a) but the live device is slot b: live wins
+t=$(ACTIVE_SLOT=a; live_dump_target boot "$tmp/b1/partition_bytes.txt")
+check "cached match boot_a is passed as 'boot' so the live slot decides ($t)" test "$t" = boot
+DUMP_DIR=$tmp/b8
+t=$(live_dump_target splloader "$tmp/none")
+dump_live_session "$t" </dev/null >"$tmp/c8.log" 2>&1; rc=$?
+check "one-session splloader: 262144 bytes, rc=$rc" bash -c "[ $rc = 0 ] && [ \$(stat -c %s '$DUMP_DIR/splloader.img') = 262144 ]"
+DUMP_DIR=$tmp/b9; mkdir -p "$DUMP_DIR"; echo stale > "$DUMP_DIR/boot_b.img"
+MOCK_FAIL_MID=boot_b dump_live_session all </dev/null >"$tmp/c9.log" 2>&1; rc=$?
+check "one-session keep-going: rc=$rc, boot_b failed, others verified" \
+	bash -c "[ $rc != 0 ] && grep -qx 'FAILED (1 of 6): boot_b' '$tmp/c9.log' && [ -f '$DUMP_DIR/boot_b.img.partial' ] && [ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && grep -q 'OLDER copy' '$tmp/c9.log' && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 5 ] && sha256sum -c --quiet SHA256SUMS"
+DUMP_DIR=$tmp/b10
+dump_live_session nosuch </dev/null >"$tmp/c10.log" 2>&1; rc=$?
+check "one-session unknown name: nonzero rc ($rc), reported" bash -c "[ $rc != 0 ] && grep -q 'nosuch(not in live table)' '$tmp/c10.log'"
+# dump_partition end to end (answers on stdin): cached table + 'y' refresh -> one session
+DUMP_DIR=$tmp/b11; mkdir -p "$DUMP_DIR"; cp "$tmp/b1/partition_list.txt" "$DUMP_DIR/"
+cls() { :; }; pause() { :; }; ready() { :; }
+printf 'y\nall_lite\n' | dump_partition >"$tmp/c11.log" 2>&1; rc=$?
+check "menu Refresh=y then all_lite: ONE session, slot b live (rc=$rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c11.log') = 1 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ]"
+DUMP_DIR=$tmp/b12; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
+printf 'n\nboot\n\n' | dump_partition >"$tmp/c12.log" 2>&1; rc=$?
+check "menu Refresh=n (cached path unchanged): read-part boot_b 4194304, rc=$rc" \
+	bash -c "[ $rc = 0 ] && grep -q 'read-part boot_b 0 4194304 ' '$tmp/c12.log' && ! grep '^+ ' '$tmp/c12.log' | grep -q ' parts ' && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp'"
+check "menu never passes --yes" bash -c "! grep -h '^+ ' '$tmp'/c*.log | grep -q -- '--yes'"
+
+# ---- case 6: guarded misc write via the menu helper ----
+# spdhost asks "type yes" on a TTY; the test runner has none, so this test's
+# runner adds --yes ONLY here (YES_FOR_TEST). The menu command line has no --yes.
+cat > "$tmp/runner_yes" <<R
+#!/usr/bin/env bash
+MOCK_LOG=\${MOCK_LOG:-$tmp/mock.seq} exec "$tmp/pkg/spdhost" --usb-fd 7 --yes "\$@" 7</dev/null
+R
+chmod +x "$tmp/runner_yes"; RUNNER=("$tmp/runner_yes")
+unset MOCK_SLOT
+DUMP_DIR=$tmp/g1
+MOCK_MISC_OUT=$tmp/g1.misc guarded_misc_session reboot-fastboot reboot-fastboot </dev/null >"$tmp/g1.log" 2>&1; rc=$?
+b=$(ls "$DUMP_DIR"/misc-before-*.img 2>/dev/null | head -1)
+"$tmp/gen_expected" misc 0 1048576 > "$tmp/misc0.exp"
+check "guarded reboot-fastboot: rc=$rc, backup 1 MiB == old misc, sha recorded, verified" \
+	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -q ' ${b##*/}\$' '$DUMP_DIR/SHA256SUMS' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
+check "guarded: menu command line has no --yes" bash -c "grep '^+ ' '$tmp/g1.log' | grep -v -q -- '--yes'"
+DUMP_DIR=$tmp/g2
+MOCK_FAIL_MID=misc guarded_misc_session reboot-recovery reboot-recovery </dev/null >"$tmp/g2.log" 2>&1; rc=$?
+check "guarded: failed pre-dump aborts: rc=$rc, no misc write, no reset, no backup kept" \
+	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' '$tmp/g2.log' && grep -q 'write was NOT done' '$tmp/g2.log' && ! grep -qE '^SEQ (02 len=2048|05 )' '$tmp/mock.seq' && ! ls '$DUMP_DIR'/misc-before-*.img >/dev/null 2>&1"
+DUMP_DIR=$tmp/g3; mkdir -p "$DUMP_DIR"
+MOCK_MISC_OUT=$tmp/g3.misc guarded_misc_session "restore misc" write-part misc "$b" reset </dev/null >"$tmp/g3.log" 2>&1; rc=$?
+check "guarded restore from backup: rc=$rc, misc == backup" bash -c "[ $rc = 0 ] && cmp -s '$tmp/g3.misc' '$b'"
+RUNNER=("$tmp/runner")
 
 echo "menu-dump: $pass passed, $fail failed"
 (( fail == 0 ))
