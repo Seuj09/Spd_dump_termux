@@ -160,6 +160,7 @@ rm -f "$pkg/scripts/cross-arm32.sh"   # build-machine tool, not needed on the ph
 cp "$sd/scripts/spd_dump-usb" "$pkg/spd_dump/scripts/"
 cp "$sd/TERMUX.md" "$sd/PIN.txt" "$pkg/spd_dump/" 2>/dev/null || true
 cp -r "$root/fdl" "$pkg/fdl"
+cp -r "$root/misc" "$pkg/misc"   # BCB images for menu [5] wipe (package-relative lookup)
 cp "$root/README.md" "$root/LICENSE" "$pkg/"
 chmod +x "$pkg/spdhost" "$pkg/spd_dump/spd_dump" "$pkg/scripts/"* "$pkg/spd_dump/scripts/"*
 short=$(printf '%s' "$sha" | cut -c1-7)
