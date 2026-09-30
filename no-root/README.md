@@ -269,6 +269,10 @@ Read that line as five steps:
 `parts` prints one line per partition: `index name units`. `units` is
 whatever that loader reports. It is often a sector count, not a size in
 bytes.
+On eMMC (ums9230) the units are KiB. spd_dump converts them with
+`bytes = units << (20 - divisor)`: divisor starts at 10 and drops while any
+non-zero entry is smaller than `1 << divisor`. `scripts/menu.sh` does the same
+conversion before it dumps anything (see `backup/partition_bytes.txt`).
 
 To dump a partition, add `read-part` on that same line. `NAME` is the name
 from `parts`. `OFFSET` is where to start inside the partition (`0` is the
@@ -294,13 +298,22 @@ spdhost-usb --yes fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
 ```
 
 The loader download is sent in 528-byte chunks. `--step` changes partition
-reads and writes only, not the loader chunks. It is also an option, so it
+reads and writes only, not the loader chunks. It takes decimal or `0x` hex.
+Without `--step`, spdhost uses 4096, or 0xf800 (63488) once an `fdl` goes to
+0x5500 or 0x65000800 (spd_dump's highspeed `blk_size`). It is an option, so it
 goes before `fdl`:
 
 ```sh
 spdhost-usb --step 1024 fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
   read-part boot 0 64M boot.img
 ```
+
+`--keep-going` lets a batch of `read-part` commands carry on after one fails
+(READ_START refused, or an error reply mid-read, like spd_dump's
+`dump_partition`). The failures are listed at the end and the exit status is 1.
+USB timeouts and a device reset still stop the run. The menu's `all` and
+`all_lite` use it, check that every file has the expected byte size, rename
+short files to `NAME.img.partial`, and add the good ones to `backup/SHA256SUMS`.
 
 If more than one USB device is plugged in, `spdhost-usb` stops and lists
 them. Copy one path from `termux-usb -l` and put it first. The `--` is

@@ -20,11 +20,16 @@ EXEC_ADDR=""
 # Always run the wrapper by absolute path so spdhost-usb can resolve ../spdhost via $0.
 script_dir=$(cd "$(dirname "$0")" && pwd)
 RUNNER=()
+# Test hook: SPDHOST_MENU_RUNNER=/path/to/runner replaces spdhost-usb (tests/menu-dump.sh).
+if [[ -n ${SPDHOST_MENU_RUNNER:-} ]]; then
+	RUNNER=("$SPDHOST_MENU_RUNNER")
+fi
 for cand in \
 	"$script_dir/spdhost-usb" \
 	"$PWD/scripts/spdhost-usb" \
 	"$PWD/spdhost-usb"
 do
+	(( ${#RUNNER[@]} )) && break
 	if [[ -x $cand && -f $cand ]]; then
 		RUNNER=("$(cd "$(dirname "$cand")" && printf '%s/%s' "$(pwd)" "$(basename "$cand")")")
 		break
@@ -245,6 +250,15 @@ run_session() {
 	if [[ ${SPDHOST_VERBOSE:-} == 1 ]]; then
 		prefix+=(--verbose)
 	fi
+	# Optional chunk size (decimal or 0x hex), e.g. SPDHOST_STEP=0xf800.
+	if [[ -n ${SPDHOST_STEP:-} ]]; then
+		prefix+=(--step "$SPDHOST_STEP")
+	fi
+	# Leading --flags from the caller (e.g. --keep-going) are spdhost options.
+	while [[ ${1:-} == --* ]]; do
+		prefix+=("$1")
+		shift
+	done
 	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it.
 	if [[ ${1:-} == fdl ]]; then
 		ea=$(exec_addr_value)
@@ -257,28 +271,102 @@ run_session() {
 	return "$rc"
 }
 
-# Cached live partition table from the last `parts` run (name + size units).
-# Same fields the rooted menu shows as LIST PARTISI, but sizes come from the
-# device table (spdhost `parts` / FILE form), not a hardcoded string.
+# Cached live partition table from the last `parts` run, exactly as spdhost
+# wrote it: "name units". Units are NOT bytes (KiB on eMMC); see
+# parts_units_to_bytes. The byte table used for dumping is parts_bytes_path.
 parts_cache_path() {
 	mkdir -p "$DUMP_DIR"
 	printf '%s\n' "$DUMP_DIR/partition_list.txt"
 }
 
+parts_bytes_path() {
+	mkdir -p "$DUMP_DIR"
+	printf '%s\n' "$DUMP_DIR/partition_bytes.txt"
+}
+
+# misc as read by the parts session (1048576 bytes, like spd_dump's
+# "saving slot info" dump_partition(io, "misc", 0, 1048576, "misc.bin")).
+slot_misc_path() {
+	mkdir -p "$DUMP_DIR"
+	printf '%s\n' "$DUMP_DIR/misc-slotinfo.img"
+}
+
+SPD_MISC_READ_BYTES=1048576
+SPD_SPLLOADER_BYTES=262144 # spd_dump dumps splloader as 256 KiB (not in the table)
+ACTIVE_SLOT=""
+PARTS_SHIFT=""
+
+# spd_dump partition_list() (common.c ~1106-1116): READ_PARTITION sizes are
+# units. divisor starts at 10 and drops until every non-zero entry >> divisor
+# is non-zero; bytes = units << (20 - divisor). eMMC tables are KiB (shift 10).
+# RAW (units) -> OUT (bytes). Always derived from RAW, so it is idempotent.
+parts_units_to_bytes() {
+	local raw=$1 out=$2 name size div=10 tmp
+	while read -r name size _; do
+		[[ $size =~ ^[0-9]+$ ]] && (( size > 0 )) || continue
+		while (( div > 0 && (size >> div) == 0 )); do ((div--)); done
+	done < "$raw"
+	tmp=$(mktemp "$out.XXXXXX") || return 1
+	while read -r name size _; do
+		[[ -n ${name:-} && $size =~ ^[0-9]+$ ]] || continue
+		printf '%s %s\n' "$name" $(( size << (20 - div) ))
+	done < "$raw" > "$tmp" && mv "$tmp" "$out" || { rm -f "$tmp"; return 1; }
+	PARTS_SHIFT=$((20 - div))
+}
+
+# Active slot from misc bootloader_control at 0x800, as spd_dump select_ab():
+# nb_slot (byte 0x809 & 7) must be 2; slot_info[i] is byte 0x80c+2i
+# (priority:4 tries_remaining:3 successful_boot:1); ab_compare_slots(b, a) < 0
+# -> b, else a. No uboot_a in the table -> not A/B (selected_ab = 0).
+# Prints a, b, or nothing (unknown / not A/B).
+slot_from_misc() {
+	local misc=$1 table=$2 sz b nb s0 s1 p0 p1 t0 t1 ok0 ok1
+	[[ -f $misc ]] || return 0
+	sz=$(stat -c %s "$misc" 2>/dev/null) || return 0
+	(( sz >= 0x820 )) || return 0
+	if [[ -f $table ]] && ! grep -qE '^uboot_a[[:space:]]' "$table"; then
+		return 0
+	fi
+	read -r nb _ _ s0 _ s1 _ < <(od -An -v -tu1 -j $((0x809)) -N 7 "$misc")
+	[[ -n ${s1:-} ]] || return 0
+	(( (nb & 7) == 2 )) || return 0
+	p0=$((s0 & 15)); t0=$(((s0 >> 4) & 7)); ok0=$((s0 >> 7))
+	p1=$((s1 & 15)); t1=$(((s1 >> 4) & 7)); ok1=$((s1 >> 7))
+	if (( p0 != p1 )); then b=$((p0 - p1))
+	elif (( ok0 != ok1 )); then b=$((ok0 - ok1))
+	else b=$((t0 - t1)); fi
+	if (( b < 0 )); then printf 'b'; else printf 'a'; fi
+}
+
+# Rebuild the byte table + active slot from the cached raw table and misc.
+load_parts_state() {
+	local raw bytes
+	raw=$(parts_cache_path)
+	bytes=$(parts_bytes_path)
+	[[ -s $raw ]] || return 1
+	parts_units_to_bytes "$raw" "$bytes" || return 1
+	ACTIVE_SLOT=$(slot_from_misc "$(slot_misc_path)" "$bytes")
+	return 0
+}
+
 fmt_size() {
-	local n=$1
+	local n=$1 i=0 d=1 t
+	local -a u=(B K M G T)
 	if [[ ! $n =~ ^[0-9]+$ ]]; then
 		printf '%s' "$n"
 		return
 	fi
-	if (( n >= 1073741824 && n % 1073741824 == 0 )); then
-		printf '%uG' $((n / 1073741824))
-	elif (( n >= 1048576 && n % 1048576 == 0 )); then
-		printf '%uM' $((n / 1048576))
-	elif (( n >= 1024 && n % 1024 == 0 )); then
-		printf '%uK' $((n / 1024))
+	while (( i < 4 && n >= d * 1024 )); do
+		d=$((d * 1024))
+		((i++))
+	done
+	if (( i == 0 )); then
+		printf '%dB' "$n"
+	elif (( n % d == 0 )); then
+		printf '%d%s' $((n / d)) "${u[i]}"
 	else
-		printf '%u' "$n"
+		t=$(( (n * 10 + d / 2) / d ))
+		printf '%d.%d%s' $((t / 10)) $((t % 10)) "${u[i]}"
 	fi
 }
 
@@ -306,11 +394,12 @@ score_part_match() {
 		printf '1000'
 		return
 	fi
-	if [[ $nlow == "${query}_a" ]]; then
+	# Active slot (from misc, like spd_dump) outranks the other one; a if unknown.
+	if [[ $nlow == "${query}_${ACTIVE_SLOT:-a}" ]]; then
 		printf '950'
 		return
 	fi
-	if [[ $nlow == "${query}_b" ]]; then
+	if [[ $nlow == "${query}_a" || $nlow == "${query}_b" ]]; then
 		printf '900'
 		return
 	fi
@@ -335,11 +424,12 @@ score_part_match() {
 	printf '0'
 }
 
-# Print "name size" for the best match against PARTS_FILE, or fail.
-# Prefer _a over _b when scores tie (active-slot guess without reading misc).
+# Print "name bytes" for the best match against PARTS_FILE (byte table), or fail.
+# Ties prefer the active slot (ACTIVE_SLOT from misc), else _a.
+# "splloader" is not in the table; spd_dump reads it as 256 KiB.
 resolve_part_query() {
 	local query_raw=$1 parts_file=$2
-	local query name size best_name="" best_size="" best_score=0 score
+	local query name size best_name="" best_size="" best_score=0 score pref=${ACTIVE_SLOT:-a}
 	query=$(normalize_part_query "$query_raw")
 	if [[ -z $query || $query == */* || $query == *' '* ]]; then
 		echo "Name must be one word, like boot, boot.img, or boot_a." >&2
@@ -348,6 +438,10 @@ resolve_part_query() {
 	if [[ ! -f $parts_file ]]; then
 		echo "No partition list at $parts_file" >&2
 		return 1
+	fi
+	if [[ $query == splloader ]] && ! grep -qE '^splloader[[:space:]]' "$parts_file"; then
+		printf '%s %s\n' splloader "$SPD_SPLLOADER_BYTES"
+		return 0
 	fi
 	while read -r name size _; do
 		[[ -z ${name:-} || -z ${size:-} ]] && continue
@@ -360,8 +454,7 @@ resolve_part_query() {
 			best_name=$name
 			best_size=$size
 		elif (( score == best_score && best_score > 0 )); then
-			# Tie-break: prefer *_a over *_b over bare
-			if [[ ${name,,} == *_a && ${best_name,,} != *_a ]]; then
+			if [[ ${name,,} == *_$pref && ${best_name,,} != *_$pref ]]; then
 				best_name=$name
 				best_size=$size
 			fi
@@ -376,60 +469,139 @@ resolve_part_query() {
 
 show_parts_list() {
 	local parts_file=$1 name size
-	echo "PARTITION LIST (from device parts table):"
+	echo "PARTITION LIST (from device parts table; units << ${PARTS_SHIFT:-?} = bytes):"
 	printf '%-28s %12s %14s\n' "NAME" "SIZE" "BYTES"
 	echo "------------------------------------------------------------"
+	if ! grep -qE '^splloader[[:space:]]' "$parts_file"; then
+		printf '%-28s %12s %14s\n' "splloader (fixed)" "$(fmt_size "$SPD_SPLLOADER_BYTES")" "$SPD_SPLLOADER_BYTES"
+	fi
 	while read -r name size _; do
 		[[ -z ${name:-} || -z ${size:-} ]] && continue
 		printf '%-28s %12s %14s\n' "$name" "$(fmt_size "$size")" "$size"
 	done < "$parts_file"
 	echo
-	echo "Type a name (boot, boot.img, boot_a), or:"
-	echo "  all       — every partition except userdata, cache, blackbox"
-	echo "  all_lite  — same, and skip inactive slot (_b when _a exists)"
+	if [[ -n $ACTIVE_SLOT ]]; then
+		echo "Active slot (from misc): $ACTIVE_SLOT"
+	else
+		echo "Active slot: unknown / not A/B (all_lite keeps both slots, like spd_dump)"
+	fi
+	echo "Type a name (boot, boot.img, boot_a, splloader), or:"
+	echo "  all       — splloader + every partition except userdata, cache, blackbox"
+	echo "  all_lite  — same, and skip the inactive slot"
 }
 
+# One session: parts table (units) + misc 1048576 bytes for the slot.
 fetch_parts_table() {
-	local parts_file
-	parts_file=$(parts_cache_path)
-	echo "Fetching live partition table into $parts_file"
+	local raw misc rc sz
+	raw=$(parts_cache_path)
+	misc=$(slot_misc_path)
+	echo "Fetching live partition table into $raw (+ misc slot info)"
 	ready
-	local rc
+	rm -f "$raw" "$misc"
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$parts_file"
+		parts "$raw" read-part misc 0 "$SPD_MISC_READ_BYTES" "$misc"
 	rc=$?
-	if (( rc != 0 )); then
+	if [[ ! -s $raw ]]; then
 		echo "parts failed (exit $rc)." >&2
 		return 1
 	fi
-	if [[ ! -s $parts_file ]]; then
-		echo "parts wrote an empty list." >&2
-		return 1
+	sz=$(stat -c %s "$misc" 2>/dev/null || echo 0)
+	if (( sz != SPD_MISC_READ_BYTES )); then
+		echo "note: misc read gave $sz of $SPD_MISC_READ_BYTES bytes; active slot unknown." >&2
+		rm -f "$misc"
 	fi
+	load_parts_state || { echo "could not convert $raw to bytes" >&2; return 1; }
+	echo "parts: units -> bytes (shift $PARTS_SHIFT, like spd_dump); slot: ${ACTIVE_SLOT:-unknown}"
 	return 0
 }
 
 should_skip_bulk() {
 	local name=$1 mode=$2
 	local nlow=${name,,}
+	# spd_dump r all/all_lite: memcmp prefix blackbox / cache / userdata.
 	case $nlow in
-		userdata|cache|blackbox) return 0 ;;
+		blackbox*|cache*|userdata*) return 0 ;;
 	esac
-	if [[ $mode == all_lite && $nlow == *_b ]]; then
-		# Skip _b when a matching _a exists in the same list.
-		local base=${name%_b}
-		base=${base%_B}
-		if grep -qiE "^${base}_a[[:space:]]" "$(parts_cache_path)" 2>/dev/null; then
-			return 0
-		fi
+	if [[ $mode == all_lite ]]; then
+		[[ $ACTIVE_SLOT == a && $nlow == *_b ]] && return 0
+		[[ $ACTIVE_SLOT == b && $nlow == *_a ]] && return 0
 	fi
 	return 1
 }
 
+# SHA256SUMS entry name: path relative to DUMP_DIR when inside it.
+record_sha256() {
+	local f=$1 sums="$DUMP_DIR/SHA256SUMS" key digest tmp
+	key=$f
+	[[ $key == "$DUMP_DIR"/* ]] && key=${key#"$DUMP_DIR"/}
+	digest=$(sha256sum "$f" | awk '{print $1}') || return 1
+	if [[ -f $sums ]]; then
+		tmp=$(mktemp "$sums.XXXXXX") || return 1
+		awk -v k="$key" '{ n = $0; sub(/^[0-9a-f]+  /, "", n); if (n != k) print }' "$sums" > "$tmp" && mv "$tmp" "$sums"
+	fi
+	printf '%s  %s\n' "$digest" "$key" >> "$sums"
+	echo "ok   $key $(fmt_size "$(stat -c %s "$f")") sha256 $digest"
+}
+
+# Run one session reading every queued (name, bytes, out) with --keep-going,
+# then verify each file is exactly the expected size. Good files get a
+# SHA256SUMS line; short ones become OUT.partial. Returns nonzero on any failure.
+DQ_NAMES=()
+DQ_SIZES=()
+DQ_OUTS=()
+run_dump_queue() {
+	local i n=${#DQ_NAMES[@]} rc sz out args=() failed=()
+	for (( i = 0; i < n; i++ )); do
+		out=${DQ_OUTS[i]}
+		rm -f "$out.partial" "$out.prev"
+		[[ -e $out ]] && mv -f "$out" "$out.prev"
+		args+=(read-part "${DQ_NAMES[i]}" 0 "${DQ_SIZES[i]}" "$out")
+	done
+	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" "${args[@]}"
+	rc=$?
+	echo
+	echo "Verifying $n file(s) (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
+	for (( i = 0; i < n; i++ )); do
+		out=${DQ_OUTS[i]}
+		sz=$(stat -c %s "$out" 2>/dev/null || echo -1)
+		if (( sz == DQ_SIZES[i] )); then
+			record_sha256 "$out" && rm -f "$out.prev" && continue
+		fi
+		failed+=("${DQ_NAMES[i]}")
+		if (( sz >= 0 )); then
+			mv -f "$out" "$out.partial"
+			echo "FAIL ${DQ_NAMES[i]}: got $sz of ${DQ_SIZES[i]} bytes -> $out.partial"
+		else
+			echo "FAIL ${DQ_NAMES[i]}: no file (expected ${DQ_SIZES[i]} bytes)"
+		fi
+		[[ -e $out.prev ]] && mv -f "$out.prev" "$out" && echo "     previous $out kept"
+	done
+	if (( ${#failed[@]} )); then
+		echo "FAILED (${#failed[@]} of $n): ${failed[*]}"
+		(( rc != 0 )) || rc=1
+		return "$rc"
+	fi
+	if (( rc != 0 )); then
+		echo "all $n file(s) complete, but spdhost exited $rc"
+		return "$rc"
+	fi
+	echo "all $n file(s) complete"
+	return 0
+}
+
 dump_matched_parts() {
 	local mode=$1 parts_file=$2
-	local name size out args=() n=0
+	local name size out
 	mkdir -p "$DUMP_DIR"
+	DQ_NAMES=() DQ_SIZES=() DQ_OUTS=()
+	if [[ $mode == all_lite && -z $ACTIVE_SLOT ]]; then
+		echo "note: active slot unknown; all_lite keeps both slots (spd_dump selected_ab=0)"
+	fi
+	# spd_dump r all / all_lite: splloader (256 KiB) first.
+	if ! grep -qE '^splloader[[:space:]]' "$parts_file"; then
+		DQ_NAMES+=(splloader) DQ_SIZES+=("$SPD_SPLLOADER_BYTES") DQ_OUTS+=("$DUMP_DIR/splloader.img")
+		echo "queue splloader size=$(fmt_size "$SPD_SPLLOADER_BYTES") ($SPD_SPLLOADER_BYTES) -> $DUMP_DIR/splloader.img"
+	fi
 	while read -r name size _; do
 		[[ -z ${name:-} || -z ${size:-} ]] && continue
 		[[ $size =~ ^[0-9]+$ ]] || continue
@@ -440,40 +612,39 @@ dump_matched_parts() {
 		fi
 		out="$DUMP_DIR/${name}.img"
 		echo "queue $name size=$(fmt_size "$size") ($size) -> $out"
-		args+=(read-part "$name" 0 "$size" "$out")
-		((n++)) || true
+		DQ_NAMES+=("$name") DQ_SIZES+=("$size") DQ_OUTS+=("$out")
 	done < "$parts_file"
-	if (( n == 0 )); then
+	if (( ${#DQ_NAMES[@]} == 0 )); then
 		echo "Nothing to dump."
 		return 1
 	fi
-	echo "Will dump $n partition(s) in one session."
+	echo "Will dump ${#DQ_NAMES[@]} partition(s) in one session (keeps going on errors)."
 	ready
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		"${args[@]}" || true
+	run_dump_queue
 }
 
 dump_partition() {
-	local parts_file reply query matched name size out
+	local parts_file raw reply query matched name size out
 	need_loaders || return
 	cls
 	echo "Dump partition(s)"
 	echo "Lists the live device table (like rooted menu LIST PARTISI),"
-	echo "then matches what you type (boot.img -> boot_a) and uses that size."
-	parts_file=$(parts_cache_path)
-	if [[ -s $parts_file ]]; then
-		echo "Cached list: $parts_file"
+	echo "then matches what you type (boot.img -> boot_<active slot>) and uses that size."
+	raw=$(parts_cache_path)
+	parts_file=$(parts_bytes_path)
+	if [[ -s $raw ]]; then
+		echo "Cached list: $raw"
 		read -r -p "Refresh from device? [y/N]: " reply
 		if [[ ${reply,,} == y || ${reply,,} == yes ]]; then
-			fetch_parts_table || { pause; return; }
+			fetch_parts_table || { pause; return 1; }
 		fi
 	else
-		fetch_parts_table || { pause; return; }
+		fetch_parts_table || { pause; return 1; }
 	fi
-	if [[ ! -s $parts_file ]]; then
+	if ! load_parts_state || [[ ! -s $parts_file ]]; then
 		echo "No partition list."
 		pause
-		return
+		return 1
 	fi
 	cls
 	show_parts_list "$parts_file"
@@ -483,28 +654,32 @@ dump_partition() {
 		pause
 		return
 	fi
+	local rc
 	case ${query,,} in
 		all|all_lite)
 			dump_matched_parts "${query,,}" "$parts_file"
+			rc=$?
 			pause
-			return
+			return "$rc"
 			;;
 	esac
 	matched=$(resolve_part_query "$query" "$parts_file") || {
 		pause
-		return
+		return 1
 	}
 	read -r name size <<<"$matched"
 	out="$DUMP_DIR/${name}.img"
 	echo
-	echo "Matched '$query' -> $name  size=$(fmt_size "$size") ($size bytes/units)"
+	echo "Matched '$query' -> $name  size=$(fmt_size "$size") ($size bytes)"
 	read -r -e -p "Output file [$out]: " reply
 	[[ -n ${reply:-} ]] && out=$reply
-	echo "Will read $name at offset 0, size $size, into $out"
+	echo "Will read $name at offset 0, size $size bytes, into $out"
 	ready
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		read-part "$name" 0 "$size" "$out" || true
+	DQ_NAMES=("$name") DQ_SIZES=("$size") DQ_OUTS=("$out")
+	run_dump_queue
+	rc=$?
 	pause
+	return "$rc"
 }
 
 list_partitions_menu() {
@@ -513,7 +688,7 @@ list_partitions_menu() {
 	echo "List partitions (live parts table)"
 	fetch_parts_table || { pause; return; }
 	cls
-	show_parts_list "$(parts_cache_path)"
+	show_parts_list "$(parts_bytes_path)"
 	pause
 }
 
@@ -796,6 +971,11 @@ reboot_mode() {
 	esac
 	pause
 }
+
+# Test hook: SPDHOST_MENU_LIB=1 + `source menu.sh` loads functions only.
+if [[ ${SPDHOST_MENU_LIB:-} == 1 ]]; then
+	return 0 2>/dev/null || exit 0
+fi
 
 load_config
 apply_ums9230_infinix_defaults

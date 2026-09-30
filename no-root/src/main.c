@@ -50,7 +50,11 @@ static void usage(void)
 "  env TERMUX_USB_FD / SPD_USB_FD  same as --usb-fd when unset\n"
 		"  --vid/--pid         desktop enumeration (default 1782:4d00)\n"
 		"  --timeout MS        bulk timeout (default 1000)\n"
-		"  --step N            partition chunk size (default 4096, max 65024)\n"
+		"  --step N            partition chunk size, decimal or 0x hex\n"
+		"                      (default 4096; 0xf800 after an fdl at 0x5500 or\n"
+		"                      0x65000800, like spd_dump's highspeed blk_size)\n"
+		"  --keep-going        a failed read-part is logged and the next command\n"
+		"                      runs; exit status is 1 and failures are listed\n"
 		"  --no-line-state     skip the smartphone line-state control transfer\n"
 		"  --yes               do not prompt before write-part / erase-part / reboot-*\n"
 		"  --verbose\n"
@@ -318,6 +322,7 @@ int main(int argc, char **argv)
 		{"pid", required_argument, NULL, 'P'},
 		{"timeout", required_argument, NULL, 't'},
 		{"step", required_argument, NULL, 's'},
+		{"keep-going", no_argument, NULL, 'k'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"yes", no_argument, NULL, 'y'},
 		{"no-line-state", no_argument, NULL, 'L'},
@@ -326,7 +331,10 @@ int main(int argc, char **argv)
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
-	int fd = -1, verbose = 0, yes = 0, line = 1, selftest = 0, dry = 0;
+	int fd = -1, verbose = 0, yes = 0, line = 1, selftest = 0, dry = 0, keep_going = 0;
+	char failed[1024] = "";
+	int step_set = 0;
+	int nfailed = 0;
 	char self_path[512];
 	int timeout = 1000, step = 4096;
 	unsigned vid = 0x1782, pid = 0x4d00;
@@ -373,8 +381,21 @@ int main(int argc, char **argv)
 			timeout = (int)v;
 			break;
 		}
-		case 's':
-			step = atoi(optarg);
+		case 's': {
+			char *end = NULL;
+			unsigned long v;
+			errno = 0;
+			v = strtoul(optarg, &end, 0);
+			if (end == optarg || *end || errno || v < 64 || v > 65024) {
+				fprintf(stderr, "bad --step: %s (need 64..65024, e.g. 4096 or 0xf800)\n", optarg);
+				return 2;
+			}
+			step = (int)v;
+			step_set = 1;
+			break;
+		}
+		case 'k':
+			keep_going = 1;
 			break;
 		case 'v':
 			verbose = 1;
@@ -502,6 +523,15 @@ int main(int argc, char **argv)
 					return 1;
 				}
 				do_fdl(io, line, argv[i + 1], (uint32_t)addr);
+				/* spd_dump: FDL1 at 0x5500 / 0x65000800 sets highspeed, and
+				 * after FDL2 blk_size = 0xf800 for partition reads/writes.
+				 * Loader sends stay at 528 (spd_send_fdl caps the step). */
+				if (!step_set && (addr == 0x5500 || addr == 0x65000800) && io->step != 0xf800) {
+					io->step = 0xf800;
+					if (verbose)
+						fprintf(stderr, "step: 0xf800 (FDL1 at 0x%llx, like spd_dump highspeed; --step overrides)\n",
+							(unsigned long long)addr);
+				}
 			}
 			line = 0;
 			i += 3;
@@ -519,8 +549,16 @@ int main(int argc, char **argv)
 			need(argc, i, 4, "read-part");
 			need_fdl2(io, "read-part");
 			if (spd_read_part(io, argv[i + 1], parse_size(argv[i + 2]),
-				parse_size(argv[i + 3]), argv[i + 4]))
-				return 1;
+				parse_size(argv[i + 3]), argv[i + 4])) {
+				if (!keep_going)
+					return 1;
+				fprintf(stderr, "read-part %s FAILED; continuing (--keep-going)\n", argv[i + 1]);
+				nfailed++;
+				if (strlen(failed) + strlen(argv[i + 1]) + 2 < sizeof(failed)) {
+					strcat(failed, " ");
+					strcat(failed, argv[i + 1]);
+				}
+			}
 			i += 5;
 		} else if (strcmp(cmd, "write-part") == 0) {
 			need(argc, i, 2, "write-part");
@@ -567,5 +605,9 @@ int main(int argc, char **argv)
 	if (!dry)
 		spd_usb_close(&io->usb);
 	spd_free(io);
+	if (nfailed) {
+		fprintf(stderr, "read-part failed (%d):%s\n", nfailed, failed);
+		return 1;
+	}
 	return 0;
 }

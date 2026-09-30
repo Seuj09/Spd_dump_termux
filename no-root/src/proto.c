@@ -1003,19 +1003,28 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 	uint64_t done = 0;
 	int mode64 = (offset + size) > 0xffffffffu;
 	int step = io->step;
+	int bad = 0;
 
 	if (offset > UINT64_MAX - size) {
 		fprintf(stderr, "read range wraps\n");
 		return -1;
 	}
+	/* Like spd_dump dump_partition(): a NACKed READ_START is closed with
+	 * READ_END and reported, so a batch can go on with the next partition. */
+	select_part(io, name, offset + size, BSL_CMD_READ_START);
+	if (spd_check_ok(io)) {
+		fprintf(stderr, "read %s: READ_START refused (no such partition or size too big)\n", name);
+		spd_encode(io, BSL_CMD_READ_END, NULL, 0);
+		spd_check_ok(io);
+		return -1;
+	}
 	fo = fopen(out_path, "wb");
 	if (!fo) {
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
+		spd_encode(io, BSL_CMD_READ_END, NULL, 0);
+		spd_check_ok(io);
 		return -1;
 	}
-	select_part(io, name, offset + size, BSL_CMD_READ_START);
-	if (spd_check_ok(io))
-		exit(1);
 
 	while (done < size) {
 		uint8_t req[12];
@@ -1046,8 +1055,11 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		}
 		t = spd_type(io);
 		if (t != BSL_REP_READ_FLASH) {
-			fprintf(stderr, "read response 0x%04x\n", t);
-			exit(1);
+			/* spd_dump: "unexpected response", break, then READ_END. */
+			fprintf(stderr, "read %s: response 0x%04x at offset %llu\n", name, t,
+				(unsigned long long)pos);
+			bad = 1;
+			break;
 		}
 		p = spd_payload(io, &plen);
 		if (plen > n)
@@ -1058,12 +1070,18 @@ int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t si
 		if (plen != n)
 			break;
 	}
-	fclose(fo);
+	if (fclose(fo) != 0) {
+		fprintf(stderr, "close %s: %s\n", out_path, strerror(errno));
+		bad = 1;
+	}
 	spd_encode(io, BSL_CMD_READ_END, NULL, 0);
-	if (spd_check_ok(io))
-		exit(1);
-	fprintf(stderr, "read %s: %llu bytes -> %s\n", name, (unsigned long long)done, out_path);
-	return done == size ? 0 : -1;
+	if (spd_check_ok(io)) {
+		fprintf(stderr, "read %s: READ_END not acked\n", name);
+		bad = 1;
+	}
+	fprintf(stderr, "read %s: %llu of %llu bytes -> %s%s\n", name, (unsigned long long)done,
+		(unsigned long long)size, out_path, (bad || done != size) ? " (INCOMPLETE)" : "");
+	return (!bad && done == size) ? 0 : -1;
 }
 
 int spd_write_part(struct spd *io, const char *name, const char *path)

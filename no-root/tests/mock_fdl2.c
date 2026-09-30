@@ -1,0 +1,198 @@
+/* tests/mock_fdl2.c — from the dump-verify audit (cmp/mock_fdl2.c), extended for
+ * tests/menu-dump.sh:
+ *   MOCK_PTABLE=FILE  partition table "name KiB" lines (READ_PARTITION reply
+ *                     in KiB units like eMMC FDL2, and the sizes READ_START
+ *                     checks); MOCK_PTABLE=1 keeps the built-in table.
+ *   MOCK_SLOT=a|b     misc 0x800 holds an AOSP bootloader_control (2 slots)
+ *                     with that slot preferred (spd_dump select_ab()).
+ *   MOCK_FAIL_MID=P   2nd READ_MIDST of partition P gets 0x82 instead of data.
+ *   MOCK_FAIL_START=P READ_START of P is NACKed.
+ *   MOCK_ZERO=P       partition P reads as zeros (fast >4 GiB test).
+ * Data bytes are pattern_byte(offset) ^ name_seed(name) (see mock_pattern.h).
+ *
+ * Stateful fake libusb: BootROM -> FDL1 -> FDL2 with partition reads.
+ * Logs every OUT frame as: SEQ <TYPE> <payload-len> <payload-hex(<=96B)> fnv=<fnv of framed bytes>
+ * Replies: CHECK_BAUD->VER SPRD3; READ_START(0x10)->ACK if name known and size<=partsize else NACK(0x8b? use 0x82);
+ * READ_MIDST(0x11)->READ_FLASH(0x93) with deterministic bytes, clipped at partition end; else ACK.
+ * Checksum of reply: CRC16 if incoming frame's CRC16 is valid, else additive (CHK_ORIG). */
+#include <libusb-1.0/libusb.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAXR (0x10000 + 16)
+static uint8_t reply[2 * MAXR + 4];
+static int reply_len, reply_pos;
+static FILE *logf;
+static char cur_part[40];
+static uint64_t cur_size;
+static int connects;
+static int midst_count;
+
+static unsigned crc16(const uint8_t *s, unsigned len)
+{ unsigned crc = 0; while (len--) { int i; crc ^= (unsigned)(*s++) << 8;
+  for (i = 0; i < 8; i++) crc = (crc << 1) ^ ((0 - (crc >> 15)) & 0x11021); } return crc & 0xffff; }
+static unsigned sum16_orig(const uint8_t *s, int len)
+{ unsigned crc = 0; while (len > 1) { crc += (unsigned)s[1] << 8 | s[0]; s += 2; len -= 2; }
+  if (len) crc += *s; crc = (crc >> 16) + (crc & 0xffff); crc += crc >> 16; crc = ~crc & 0xffff;
+  return (crc >> 8) | ((crc & 0xff) << 8); }
+static uint32_t fnv1a(const uint8_t *p, int n) { uint32_t h = 2166136261u; while (n-- > 0) { h ^= *p++; h *= 16777619u; } return h; }
+static unsigned be16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+#include "mock_pattern.h"
+
+static struct { char n[37]; uint64_t kb; } tab[128];
+static int ntab = -1;
+static void load_tab(void)
+{
+	const char *p = getenv("MOCK_PTABLE"); FILE *f; char nm[64]; unsigned long long kb;
+	if (ntab >= 0) return;
+	ntab = 0;
+	if (!p || !strcmp(p, "1") || !(f = fopen(p, "r"))) return;
+	while (ntab < 128 && fscanf(f, "%36s %llu", nm, &kb) == 2) { strcpy(tab[ntab].n, nm); tab[ntab].kb = kb; ntab++; }
+	fclose(f);
+}
+static int streq_env(const char *e, const char *n) { const char *v = getenv(e); return v && !strcmp(v, n); }
+
+static uint64_t part_size(const char *n)
+{
+	int i;
+	load_tab();
+	if (!strcmp(n, "splloader")) return 256 << 10;
+	if (ntab > 0) { for (i = 0; i < ntab; i++) if (!strcmp(tab[i].n, n)) return tab[i].kb << 10; return 0; }
+	if (!strcmp(n, "misc")) return 1 << 20;
+	if (!strcmp(n, "miscdata")) return 1 << 20;
+	if (!strcmp(n, "userdata")) return 6ull << 30; /* 6 GiB */
+	if (!strcmp(n, "super")) return 5ull << 30;
+	if (!strcmp(n, "bigpart")) return 6ull << 30;
+	if (!strcmp(n, "boot_a") || !strcmp(n, "boot_b")) return 64 << 20;
+	return 0;
+}
+
+static void make_reply(unsigned type, const uint8_t *data, int n, int crc)
+{
+	static uint8_t raw[MAXR]; int i, o = 0; unsigned c;
+	raw[0] = type >> 8; raw[1] = type; raw[2] = n >> 8; raw[3] = n;
+	if (n) memcpy(raw + 4, data, n);
+	c = crc ? crc16(raw, 4 + n) : sum16_orig(raw, 4 + n);
+	raw[4 + n] = c >> 8; raw[5 + n] = c;
+	reply[o++] = 0x7e;
+	for (i = 0; i < 6 + n; i++) {
+		if (raw[i] == 0x7e || raw[i] == 0x7d) { reply[o++] = 0x7d; reply[o++] = raw[i] ^ 0x20; }
+		else reply[o++] = raw[i];
+	}
+	reply[o++] = 0x7e; reply_len = o; reply_pos = 0;
+}
+
+static void log_out(const uint8_t *buf, int len)
+{
+	static uint8_t raw[MAXR * 2]; static uint8_t data[MAXR];
+	int i, n = 0, allmark = 1, crc, plen;
+	uint32_t h = fnv1a(buf, len); unsigned type;
+	if (!logf) { const char *p = getenv("MOCK_LOG"); logf = fopen(p ? p : "mock.seq", "w"); }
+	for (i = 0; i < len; i++) if (buf[i] != 0x7e) allmark = 0;
+	if (allmark) {
+		fprintf(logf, "SEQ CHECK_BAUD n=%d\n", len); fflush(logf);
+		make_reply(0x81, (const uint8_t *)"SPRD3", 5, connects == 0); /* BootROM: CRC16; FDL1/2: additive */
+		return;
+	}
+	for (i = 1; i < len - 1; i++) { if (buf[i] == 0x7d) raw[n++] = buf[++i] ^ 0x20; else raw[n++] = buf[i]; }
+	type = be16(raw); plen = be16(raw + 2);
+	/* additive wins when both match (1/65536 per frame on long reads) */
+	crc = crc16(raw, n - 2) == be16(raw + n - 2) && sum16_orig(raw, n - 2) != be16(raw + n - 2);
+	fprintf(logf, "SEQ %02x len=%d ", type, plen);
+	if (type != 0x02) for (i = 0; i < plen && i < 96; i++) fprintf(logf, "%02x", raw[4 + i]);
+	fprintf(logf, " %s fnv=%08x\n", crc ? "crc" : "sum", h); fflush(logf);
+	if (type == 0x00) connects++;
+	switch (type) {
+	case 0x10: { /* READ_START name[36]wchar + size lo (+hi) */
+		char nm[40]; uint64_t sz; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;
+		sz = le32(raw + 4 + 72); if (plen >= 80) sz |= (uint64_t)le32(raw + 4 + 76) << 32;
+		strcpy(cur_part, nm); cur_size = part_size(nm); midst_count = 0;
+		if (streq_env("MOCK_FAIL_START", nm)) { make_reply(0x82, NULL, 0, crc); return; }
+		if (!cur_size || (sz > cur_size && !getenv("MOCK_LOOSE"))) make_reply(0x82, NULL, 0, crc); /* not ACK */
+		else make_reply(0x80, NULL, 0, crc);
+		return; }
+	case 0x11: { uint32_t want = le32(raw + 4); uint64_t off = le32(raw + 8); uint32_t k;
+		if (plen >= 12) off |= (uint64_t)le32(raw + 12) << 32;
+		if (off >= cur_size) { make_reply(0x82, NULL, 0, crc); return; }
+		if (++midst_count == 2 && streq_env("MOCK_FAIL_MID", cur_part)) { make_reply(0x82, NULL, 0, crc); return; }
+		if (off + want > cur_size) want = (uint32_t)(cur_size - off);
+		if (want > 0xffff) want = 0xffff;
+		if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
+		else for (k = 0; k < want; k++) data[k] = part_byte(cur_part, off + k);
+		make_reply(0x93, data, (int)want, crc); return; }
+	case 0x2d: load_tab(); if (ntab > 0) {
+		int k, j; memset(data, 0, ntab * 0x4c);
+		for (k = 0; k < ntab; k++) { uint8_t *r = data + k * 0x4c; uint32_t kb = (uint32_t)tab[k].kb;
+			for (j = 0; tab[k].n[j]; j++) r[2 * j] = tab[k].n[j];
+			r[0x48] = kb; r[0x49] = kb >> 8; r[0x4a] = kb >> 16; r[0x4b] = kb >> 24; }
+		make_reply(0xba, data, k * 0x4c, crc); return; }
+		if (getenv("MOCK_PTABLE")) { /* KB units, like eMMC FDL2 (spd_dump divisor=10) */
+		static const struct { const char *n; uint32_t kb; } t[] = { {"misc", 1024}, {"boot_a", 65536}, {"boot_b", 65536}, {"bigpart", 6291456} };
+		int k, j; memset(data, 0, sizeof(t) / sizeof(t[0]) * 0x4c);
+		for (k = 0; k < (int)(sizeof(t) / sizeof(t[0])); k++) { uint8_t *r = data + k * 0x4c;
+			for (j = 0; t[k].n[j]; j++) r[2 * j] = t[k].n[j];
+			r[0x48] = t[k].kb; r[0x49] = t[k].kb >> 8; r[0x4a] = t[k].kb >> 16; r[0x4b] = t[k].kb >> 24; }
+		make_reply(0xba, data, k * 0x4c, crc); return; }
+		make_reply(0x80, NULL, 0, crc); return;
+	default: make_reply(0x80, NULL, 0, crc); return;
+	}
+}
+
+static struct libusb_endpoint_descriptor eps[2];
+static struct libusb_interface_descriptor ifd;
+static struct libusb_interface itf;
+static struct libusb_config_descriptor cfg;
+static int dummy_dev, dummy_handle;
+
+int libusb_init(libusb_context **c) { if (c) *c = NULL; return 0; }
+int libusb_init_context(libusb_context **c, const struct libusb_init_option *o, int n) { (void)o; (void)n; if (c) *c = NULL; return 0; }
+void libusb_exit(libusb_context *c) { (void)c; }
+int libusb_set_option(libusb_context *c, enum libusb_option o, ...) { (void)c; (void)o; return 0; }
+int libusb_has_capability(uint32_t c) { (void)c; return 1; }
+const char *libusb_error_name(int e) { static char b[32]; snprintf(b, sizeof b, "MOCK_ERR_%d", e); return b; }
+int libusb_wrap_sys_device(libusb_context *c, intptr_t fd, libusb_device_handle **h) { (void)c; (void)fd; *h = (libusb_device_handle *)&dummy_handle; return 0; }
+libusb_device *libusb_get_device(libusb_device_handle *h) { (void)h; return (libusb_device *)&dummy_dev; }
+libusb_device *libusb_ref_device(libusb_device *d) { return d; }
+int libusb_get_device_descriptor(libusb_device *d, struct libusb_device_descriptor *desc)
+{ (void)d; memset(desc, 0, sizeof *desc); desc->idVendor = 0x1782; desc->idProduct = 0x4d00; desc->bNumConfigurations = 1; return 0; }
+int libusb_get_config_descriptor(libusb_device *d, uint8_t i, struct libusb_config_descriptor **c)
+{ (void)d; (void)i;
+  eps[0].bEndpointAddress = 0x81; eps[0].bmAttributes = 2; eps[0].wMaxPacketSize = 512;
+  eps[1].bEndpointAddress = 0x01; eps[1].bmAttributes = 2; eps[1].wMaxPacketSize = 512;
+  ifd.bNumEndpoints = 2; ifd.endpoint = eps; itf.num_altsetting = 1; itf.altsetting = &ifd;
+  cfg.bNumInterfaces = 1; cfg.interface = &itf; *c = &cfg; return 0; }
+int libusb_get_active_config_descriptor(libusb_device *d, struct libusb_config_descriptor **c) { return libusb_get_config_descriptor(d, 0, c); }
+void libusb_free_config_descriptor(struct libusb_config_descriptor *c) { (void)c; }
+int libusb_kernel_driver_active(libusb_device_handle *h, int i) { (void)h; (void)i; return 0; }
+int libusb_detach_kernel_driver(libusb_device_handle *h, int i) { (void)h; (void)i; return 0; }
+int libusb_claim_interface(libusb_device_handle *h, int i) { (void)h; (void)i; return 0; }
+int libusb_release_interface(libusb_device_handle *h, int i) { (void)h; (void)i; return 0; }
+int libusb_clear_halt(libusb_device_handle *h, unsigned char e) { (void)h; (void)e; return 0; }
+int libusb_get_configuration(libusb_device_handle *h, int *c) { (void)h; *c = 1; return 0; }
+int libusb_set_configuration(libusb_device_handle *h, int c) { (void)h; (void)c; return 0; }
+int libusb_get_device_speed(libusb_device *d) { (void)d; return LIBUSB_SPEED_HIGH; }
+void libusb_close(libusb_device_handle *h) { (void)h; }
+int libusb_open(libusb_device *d, libusb_device_handle **h) { (void)d; *h = (libusb_device_handle *)&dummy_handle; return 0; }
+libusb_device_handle *libusb_open_device_with_vid_pid(libusb_context *c, uint16_t v, uint16_t p) { (void)c; (void)v; (void)p; return (libusb_device_handle *)&dummy_handle; }
+ssize_t libusb_get_device_list(libusb_context *c, libusb_device ***l) { (void)c; *l = NULL; return 0; }
+void libusb_free_device_list(libusb_device **l, int u) { (void)l; (void)u; }
+int libusb_hotplug_register_callback(libusb_context *c, int e, int f, int v, int p, int cl,
+	libusb_hotplug_callback_fn cb, void *u, libusb_hotplug_callback_handle *hh)
+{ (void)c; (void)e; (void)f; (void)v; (void)p; (void)cl; (void)cb; (void)u; (void)hh; return 0; }
+void libusb_hotplug_deregister_callback(libusb_context *c, libusb_hotplug_callback_handle h) { (void)c; (void)h; }
+int libusb_handle_events(libusb_context *c) { (void)c; return 0; }
+int libusb_control_transfer(libusb_device_handle *h, uint8_t rt, uint8_t r, uint16_t v, uint16_t i,
+	unsigned char *d, uint16_t l, unsigned int t) { (void)h; (void)rt; (void)r; (void)v; (void)i; (void)d; (void)t; return l; }
+int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned char *d, int len, int *got, unsigned int t)
+{
+	(void)h; (void)t;
+	if (!(ep & 0x80)) { log_out(d, len); *got = len; return 0; }
+	if (reply_pos >= reply_len) { *got = 0; return LIBUSB_ERROR_TIMEOUT; }
+	if (len > reply_len - reply_pos) len = reply_len - reply_pos;
+	memcpy(d, reply + reply_pos, len); *got = len; reply_pos += len; return 0;
+}
