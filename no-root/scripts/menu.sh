@@ -550,6 +550,147 @@ confirm_reboot_cmd() {
 	return 0
 }
 
+# Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
+# resolver, so --self-test runs the same build the wrapper would actually
+# launch (not a stale PATH copy from an older install).
+resolve_spdhost_bin() {
+	local script_dir cand
+	script_dir=$(cd "$(dirname "$0")" && pwd)
+	for cand in \
+		"$script_dir/../spdhost" \
+		"$PWD/spdhost" \
+		"$PWD/../spdhost" \
+		"$(type -P spdhost 2>/dev/null || true)"
+	do
+		[[ -n $cand && -x $cand && -f $cand ]] || continue
+		(cd "$(dirname "$cand")" && printf '%s/%s\n' "$(pwd)" "$(basename "$cand")")
+		return 0
+	done
+	return 1
+}
+
+# Safe, read-only self-check: build sanity, environment, this release's
+# BootROM-hello behaviour, and — only if a device already answers
+# `termux-usb -l` — a short, bounded, non-destructive check-baud probe.
+# Never sends fdl/write-part/reboot-*/erase-part. Pass/fail summary at the end.
+smoke_test() {
+	local ok=1 spdhost_bin arch out rc
+
+	cls
+	echo "spdhost smoke test"
+	echo "Read-only: no fdl, no partition writes, no reboot. Safe to run any time."
+	echo
+
+	echo "== Build =="
+	spdhost_bin=$(resolve_spdhost_bin) || spdhost_bin=""
+	if [[ -z $spdhost_bin ]]; then
+		echo "FAIL  spdhost binary not found next to this tree or on PATH"
+		echo "      From no-root/: make"
+		ok=0
+	else
+		echo "spdhost binary: $spdhost_bin"
+		arch=$(uname -m)
+		echo "device arch: $arch"
+		if command -v file >/dev/null 2>&1; then
+			echo "binary reports: $(file -b "$spdhost_bin" 2>/dev/null)"
+		fi
+		if out=$("$spdhost_bin" --self-test 2>&1); then
+			echo "PASS  $out"
+		else
+			echo "FAIL  self-test: $out"
+			ok=0
+		fi
+	fi
+	echo
+
+	echo "== This release's BootROM-hello behaviour =="
+	echo "  Per-try timeout ramps 250ms -> 3000ms over 6 tries, then holds at 3000ms"
+	echo "  (SPDHOST_BROM_NO_RAMP=1 for the old flat-3000ms-every-try behaviour)."
+	echo "  Wall is auto-computed to fit all SPDHOST_BROM_TRIES (default 15) unless"
+	echo "  SPDHOST_BROM_WALL_MS is set explicitly."
+	echo "  clear_halt on bulk IN+OUT now runs after line-state, on the BootROM-hello"
+	echo "  path only (SPDHOST_NO_CLEAR_HALT=1 to disable)."
+	echo "  Ctrl-C during a hello, read-part, write-part or erase-part now stops"
+	echo "  cleanly and releases the USB interface for the next run, instead of"
+	echo "  leaving it claimed until a replug."
+	echo
+
+	echo "== Environment =="
+	if command -v termux-usb >/dev/null 2>&1; then
+		echo "PASS  termux-usb found"
+	else
+		echo "FAIL  termux-usb not found — install Termux:API (F-Droid, same source"
+		echo "      as Termux) then: pkg install termux-api"
+		ok=0
+	fi
+	if command -v termux-toast >/dev/null 2>&1 && command -v termux-vibrate >/dev/null 2>&1; then
+		echo "PASS  termux-toast + termux-vibrate found (device-found/done/error"
+		echo "      notifications on by default; SPD_USB_NOTIFY=0 to disable)"
+	else
+		echo "note  termux-toast/termux-vibrate not found — notifications silently"
+		echo "      skipped, everything else still works"
+	fi
+	echo
+
+	echo "== Live device probe (read-only) =="
+	local devs=""
+	if command -v termux-usb >/dev/null 2>&1; then
+		devs=$( (command -v timeout >/dev/null 2>&1 && timeout 5 termux-usb -l || termux-usb -l) 2>/dev/null | tr -d '[]",' | awk '/\/dev\/bus\/usb\// {print $1}')
+	fi
+	if [[ -z $devs ]]; then
+		echo "No USB device currently listed by termux-usb -l."
+		echo "Connect one in BootROM mode and run this smoke test again to also"
+		echo "check live detection — and, if you like, try pressing Ctrl-C partway"
+		echo "through: this build stops cleanly instead of needing a replug."
+	else
+		echo "termux-usb -l lists:"
+		printf '  %s\n' $devs
+		echo "This will run 'ping' only (no fdl, no writes) with a short, bounded"
+		echo "probe: 4 tries, 6s wall, trace on. You can press Ctrl-C at any point"
+		echo "to test the clean-stop behaviour; the probe after it will confirm the"
+		echo "interface wasn't left busy either way."
+		local reply
+		read -r -p "Run the probe now? [y/N] " reply
+		if [[ ${reply,,} == y ]]; then
+			echo "+ SPDHOST_BROM_TRIES=4 SPDHOST_BROM_WALL_MS=6000 SPDHOST_BROM_TRACE=1 ${RUNNER[*]} ping"
+			# set -m: run this one foreground job under job control so it
+			# gets its own process group and, on a real terminal, temporary
+			# terminal ownership — the same thing interactive bash always
+			# does for a foreground command. Otherwise a Ctrl-C meant for
+			# the probe would also hit menu.sh's own process (they'd share
+			# a process group), killing the whole script before the
+			# follow-up busy-check below ever got to run.
+			set -m
+			SPDHOST_BROM_TRIES=4 SPDHOST_BROM_WALL_MS=6000 SPDHOST_BROM_TRACE=1 run_session ping
+			rc=$?
+			set +m
+			echo
+			echo "Second short probe, to confirm the interface isn't stuck busy"
+			echo "(same outcome expected whether or not you interrupted the first one):"
+			SPDHOST_BROM_TRIES=2 SPDHOST_BROM_WALL_MS=3000 run_session ping >/tmp/spdhost-smoke-probe2.$$ 2>&1
+			if grep -qi "LIBUSB_ERROR_BUSY\|interface .* is busy" /tmp/spdhost-smoke-probe2.$$; then
+				echo "FAIL  interface is busy on the follow-up probe"
+				ok=0
+			else
+				echo "PASS  no busy interface on the follow-up probe"
+			fi
+			cat /tmp/spdhost-smoke-probe2.$$
+			rm -f /tmp/spdhost-smoke-probe2.$$
+			(( rc == 0 )) || echo "note  first probe exited $rc — normal if the phone never answered hello"
+		else
+			echo "Skipped."
+		fi
+	fi
+	echo
+
+	if (( ok )); then
+		echo "Smoke test: PASS"
+	else
+		echo "Smoke test: FAIL — see above"
+	fi
+	pause
+}
+
 reboot_mode() {
 	local choice misc
 	need_loaders || return
@@ -632,6 +773,7 @@ while true; do
 	echo "[2] Reboot into a mode"
 	echo "[3] Change loader files"
 	echo "[4] List partitions only"
+	echo "[5] Smoke test (safe checks, no writes)"
 	echo "[0] Quit"
 	read -r -p "Choice: " choice
 	case ${choice:-} in
@@ -639,6 +781,7 @@ while true; do
 		2) reboot_mode ;;
 		3) configure_loaders; pause ;;
 		4) list_partitions_menu ;;
+		5) smoke_test ;;
 		0) exit 0 ;;
 		*) echo "Not a choice."; pause ;;
 	esac

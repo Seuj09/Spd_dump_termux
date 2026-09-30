@@ -333,6 +333,18 @@ system (`reset`), recovery (`reboot-recovery`), fastbootd
 a typed confirm and never pass `--yes`. It does not unlock or flash a
 partition you did not name.
 
+Option 5, smoke test, is a safe, read-only check tuned for this release:
+`--self-test`, an environment check (`termux-usb`, `termux-toast`/
+`termux-vibrate`), a one-screen summary of the current BootROM-hello
+defaults (ramp, auto-wall, `clear_halt` placement, Ctrl-C handling), and —
+only if `termux-usb -l` already lists a device — an optional short,
+bounded `ping` probe (4 tries, 6s wall, trace on) followed by a second
+probe to confirm the USB interface wasn't left claimed. It never runs
+`fdl`, a partition write, an erase, or a reboot. You can press Ctrl-C
+during the probe to test the clean-stop behaviour described above; the
+probe runs under `set -m` so the interrupt only reaches it, not the menu
+script, and the follow-up busy-check still runs afterward either way.
+
 ```sh
 cp scripts/menu.sh "$PREFIX/bin/"
 menu.sh
