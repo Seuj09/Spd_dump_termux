@@ -15,7 +15,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 make -C "$root/spd_dump" GITVER.h >/dev/null
 mkdir -p "$tmp/pkg/fdl/ums9230"
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/spd_dump" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen_expected" || exit 1
@@ -194,29 +194,26 @@ check "menu Refresh=n (cached path unchanged): read-part boot_b 4194304, rc=$rc"
 check "menu never passes --yes" bash -c "! grep -h '^+ ' '$tmp'/c*.log | grep -q -- '--yes'"
 
 # ---- case 6: guarded misc write via the menu helper ----
-# spdhost asks "type yes" on a TTY; the test runner has none, so this test's
-# runner adds --yes ONLY here (YES_FOR_TEST). The menu command line has no --yes.
-cat > "$tmp/runner_yes" <<R
-#!/usr/bin/env bash
-MOCK_LOG=\${MOCK_LOG:-$tmp/mock.seq} exec "$tmp/pkg/spdhost" --usb-fd 7 --yes "\$@" 7</dev/null
-R
-chmod +x "$tmp/runner_yes"; RUNNER=("$tmp/runner_yes")
+# The menu's typed confirm sets MISC_CONFIRM_TOKEN (sha256 of the bytes to
+# write); guarded_misc_session passes it as --confirm-token. No --yes anywhere.
 unset MOCK_SLOT
 DUMP_DIR=$tmp/g1
+MISC_CONFIRM_TOKEN=$(misc_bcb_sha256 reboot-fastboot)
 MOCK_MISC_OUT=$tmp/g1.misc guarded_misc_session reboot-fastboot reboot-fastboot </dev/null >"$tmp/g1.log" 2>&1; rc=$?
 b=$(ls "$DUMP_DIR"/misc-before-*.img 2>/dev/null | head -1)
 "$tmp/gen_expected" misc 0 1048576 > "$tmp/misc0.exp"
 check "guarded reboot-fastboot: rc=$rc, backup 1 MiB == old misc, sha recorded, verified" \
 	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -q ' ${b##*/}\$' '$DUMP_DIR/SHA256SUMS' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
-check "guarded: menu command line has no --yes" bash -c "grep '^+ ' '$tmp/g1.log' | grep -v -q -- '--yes'"
+check "guarded: menu command line has --confirm-token=<BCB sha>, no --yes" bash -c "grep '^+ ' '$tmp/g1.log' | grep -q -- '--confirm-token=$(misc_bcb_sha256 reboot-fastboot)' && ! grep '^+ ' '$tmp/g1.log' | grep -q -- '--yes'"
 DUMP_DIR=$tmp/g2
+MISC_CONFIRM_TOKEN=$(misc_bcb_sha256 reboot-recovery)
 MOCK_FAIL_MID=misc guarded_misc_session reboot-recovery reboot-recovery </dev/null >"$tmp/g2.log" 2>&1; rc=$?
 check "guarded: failed pre-dump aborts: rc=$rc, no misc write, no reset, no backup kept" \
 	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' '$tmp/g2.log' && grep -q 'write was NOT done' '$tmp/g2.log' && ! grep -qE '^SEQ (02 len=2048|05 )' '$tmp/mock.seq' && ! ls '$DUMP_DIR'/misc-before-*.img >/dev/null 2>&1"
 DUMP_DIR=$tmp/g3; mkdir -p "$DUMP_DIR"
+MISC_CONFIRM_TOKEN=$(sha256sum "$b" | awk '{print $1}')
 MOCK_MISC_OUT=$tmp/g3.misc guarded_misc_session "restore misc" write-part misc "$b" reset </dev/null >"$tmp/g3.log" 2>&1; rc=$?
 check "guarded restore from backup: rc=$rc, misc == backup" bash -c "[ $rc = 0 ] && cmp -s '$tmp/g3.misc' '$b'"
-RUNNER=("$tmp/runner")
 
 echo "menu-dump: $pass passed, $fail failed"
 (( fail == 0 ))

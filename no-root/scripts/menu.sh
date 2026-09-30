@@ -825,9 +825,46 @@ write_misc_command() {
 	printf '%s\n' "$dest"
 }
 
-# Brick-adjacent: never pass --yes for misc/reboot/wipe. Require a TTY + typed confirm.
+# Brick-adjacent: never pass --yes for misc/reboot/wipe. The menu's typed
+# confirm on its own TTY is THE gate. On "yes" it sets MISC_CONFIRM_TOKEN to
+# the sha256 of the exact bytes spdhost will write to misc; guarded_misc_session
+# passes it as --confirm-token (spdhost hashes what it is about to write and
+# refuses on any mismatch). spdhost never prompts again: under termux-usb -e
+# its prompt would be invisible (stderr is buffered until exit).
+MISC_CONFIRM_TOKEN=
+
+# sha256 of the 2048-byte BCB spdhost builds for reboot-recovery (kind 0) /
+# reboot-fastboot (kind 1): "boot-recovery" at 0, "recovery\n--fastboot\n"
+# at 0x40 for fastboot, zero elsewhere (same bytes as misc/misc-*.bin).
+misc_bcb_sha256() {
+	if [[ $1 == reboot-fastboot ]]; then
+		{ printf 'boot-recovery'; head -c $((0x40 - 13)) /dev/zero
+		  printf 'recovery\n--fastboot\n'; head -c $((0x800 - 0x40 - 20)) /dev/zero; }
+	else
+		{ printf 'boot-recovery'; head -c $((0x800 - 13)) /dev/zero; }
+	fi | sha256sum | awk '{print $1}'
+}
+
+# Read one typed answer; "yes" with trailing CR/LF/space/tab accepted.
+# Sets MISC_CONFIRM_TOKEN=$2 on yes; prints "menu: not confirmed" otherwise.
+menu_typed_yes() {
+	local prompt=$1 token=$2 reply
+	MISC_CONFIRM_TOKEN=
+	if ! read -r -p "$prompt" reply; then
+		reply=
+	fi
+	while [[ $reply == *[$' \t\r\n'] ]]; do reply=${reply%?}; done
+	if [[ $reply != yes ]]; then
+		echo "menu: not confirmed"
+		return 1
+	fi
+	MISC_CONFIRM_TOKEN=$token
+	return 0
+}
+
 confirm_misc_write() {
-	local kind=$1 misc=$2 digest reply
+	local kind=$1 misc=$2 digest
+	MISC_CONFIRM_TOKEN=
 	if [[ ! -t 0 ]]; then
 		echo "refusing to write misc without a TTY (no silent --yes)" >&2
 		return 1
@@ -836,49 +873,38 @@ confirm_misc_write() {
 	echo "About to write $(stat -c %s "$misc") bytes to partition 'misc' ($kind), then reset."
 	echo "misc image sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
-	read -r -p "type yes to write misc: " reply
-	if [[ $reply != yes ]]; then
-		echo "not confirmed"
-		return 1
-	fi
-	return 0
+	menu_typed_yes "type yes to write misc: " "$digest"
 }
 
 # Louder prompt for wipe BCB (recovery --wipe_data). Does NOT erase persist/userdata partitions.
 confirm_wipe_userdata() {
-	local misc=$1 digest reply
+	local misc=$1 digest
+	MISC_CONFIRM_TOKEN=
 	if [[ ! -t 0 ]]; then
 		echo "refusing wipe-userdata without a TTY (no silent --yes)" >&2
 		return 1
 	fi
 	digest=$(sha256sum "$misc" | awk '{print $1}')
-	echo "WARNING: This writes a recovery --wipe_data BCB to misc (2048 bytes), then reset."
+	echo "WARNING: This writes a recovery --wipe_data BCB to misc ($(stat -c %s "$misc") bytes), then reset."
 	echo "Recovery will ERASE USERDATA on the next boot. It does not erase persist here."
 	echo "misc-wipe.bin sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path and destroy user data."
-	read -r -p "type yes to erase userdata via recovery: " reply
-	if [[ $reply != yes ]]; then
-		echo "not confirmed"
-		return 1
-	fi
-	return 0
+	menu_typed_yes "type yes to erase userdata via recovery: " "$digest"
 }
 
-# Typed confirm for in-process reboot-* (spdhost will also prompt; never --yes).
+# Typed confirm for in-process reboot-recovery / reboot-fastboot.
 confirm_reboot_cmd() {
-	local kind=$1 reply
+	local kind=$1 digest
+	MISC_CONFIRM_TOKEN=
 	if [[ ! -t 0 ]]; then
 		echo "refusing $kind without a TTY (no silent --yes)" >&2
 		return 1
 	fi
+	digest=$(misc_bcb_sha256 "$kind")
 	echo "About to run $kind: write exactly 2048 bytes to misc, then reset."
+	echo "BCB sha256: $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
-	read -r -p "type yes to continue: " reply
-	if [[ $reply != yes ]]; then
-		echo "not confirmed"
-		return 1
-	fi
-	return 0
+	menu_typed_yes "type yes to continue: " "$digest"
 }
 
 # Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
@@ -1028,17 +1054,24 @@ smoke_test() {
 # write command (spdhost reads misc back and compares: written bytes equal,
 # rest unchanged; mismatch -> no reset) + reset. Then the menu re-checks the
 # backup size against the table and records its sha256 in SHA256SUMS.
-# No --yes: the caller already took a typed "yes" and spdhost asks again.
+# No --yes: the caller already took a typed "yes" (MISC_CONFIRM_TOKEN =
+# sha256 of the bytes to write); it is passed once as --confirm-token and
+# cleared, so it authorizes exactly this one misc write.
 guarded_misc_session() {
-	local kind=$1 ts backup raw rc want sz
+	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN
 	shift
+	MISC_CONFIRM_TOKEN=
+	if [[ ! $tok =~ ^[0-9a-f]{64}$ ]]; then
+		echo "menu: not confirmed ($kind: no confirm token); nothing written" >&2
+		return 1
+	fi
 	ts=$(date +%Y%m%d-%H%M%S)
 	mkdir -p "$DUMP_DIR"
 	backup="$DUMP_DIR/misc-before-$ts.img"
 	raw=$(parts_cache_path)
 	echo "misc will be backed up to $backup first; the write is skipped if that fails."
 	ready
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+	run_session "--confirm-token=$tok" fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" misc-backup "$backup" "$@"
 	rc=$?
 	load_parts_state >/dev/null 2>&1
@@ -1115,7 +1148,7 @@ reboot_mode() {
 				pause
 				return
 			fi
-			# No --yes: spdhost prompts again on its TTY confirm path.
+			# No --yes: the typed confirm above sets the scoped --confirm-token.
 			guarded_misc_session reboot-recovery reboot-recovery
 			;;
 		3)
@@ -1144,7 +1177,7 @@ reboot_mode() {
 				pause
 				return
 			fi
-			# No --yes. spdhost write-part will also require typed yes.
+			# No --yes: token = sha256 of misc-wipe.bin, checked by spdhost.
 			guarded_misc_session wipe-userdata write-part misc "$misc" reset
 			;;
 		6)

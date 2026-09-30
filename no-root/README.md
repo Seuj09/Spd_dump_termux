@@ -70,6 +70,10 @@ spdhost-usb fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR reboot-fastboot
 
 They ask you to type `yes` unless you pass `--yes` (CLI automation only).
 `scripts/menu.sh` never passes `--yes` for reboot or misc writes.
+The menu's own typed `yes` (it shows the sha256 of the bytes) is the gate: it then
+passes `--confirm-token <sha256>`, and spdhost writes misc only if the bytes it is
+about to send hash to exactly that value (one misc write per session). Without a
+token, spdhost prompts on `/dev/tty` and accepts `yes` with trailing CR/LF/spaces.
 The frames match vendored spd_dump (`tests/reboot-seq.sh`): START_DATA misc
 2048, one 2048-byte MIDST, END_DATA, NORMAL_RESET. Like spd_dump, spdhost
 stops the command list after `reset`, `power-off` or `reboot-*` succeeds.

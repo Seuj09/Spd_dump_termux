@@ -3,8 +3,10 @@
 
 #include "proto.h"
 #include "dumpcmd.h"
+#include "sha256.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +60,10 @@ static void usage(void)
 		"                      runs; exit status is 1 and failures are listed\n"
 		"  --no-line-state     skip the smartphone line-state control transfer\n"
 		"  --yes               do not prompt before write-part / erase-part / reboot-*\n"
+		"  --confirm-token SHA256  authorize ONE misc write (reboot-*, write-part\n"
+		"                      misc) whose exact bytes have this sha256; any\n"
+		"                      other bytes are refused before sending. For a\n"
+		"                      caller that already took a typed confirm.\n"
 		"  --verbose\n"
 		"  --self-test         framing check, no device\n"
 		"  --dry-run           no USB: fake ACK/VER replies, print each packet\n"
@@ -140,23 +146,142 @@ bad:
 	exit(1);
 }
 
+/* Scoped authorization from a caller that already took a typed confirm on
+ * its own terminal (scripts/menu.sh): --confirm-token SHA256 authorizes ONE
+ * write to partition "misc" whose exact bytes hash to SHA256. Nothing else. */
+static const char *confirm_token;
+static int confirm_token_used;
+
+/* Read one line from FD (raw read(2), no stdio buffering). Returns bytes read
+ * (0 = EOF), -1 on error. */
+static int read_line_fd(int fd, char *buf, int cap)
+{
+	int n = 0;
+	while (n < cap - 1) {
+		char c;
+		ssize_t r = read(fd, &c, 1);
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			return n ? n : (int)r;
+		buf[n++] = c;
+		if (c == '\n')
+			break;
+	}
+	buf[n] = 0;
+	return n;
+}
+
+static void put_fd(int fd, const char *s)
+{
+	size_t l = strlen(s);
+	while (l) {
+		ssize_t w = write(fd, s, l);
+		if (w <= 0)
+			return;
+		s += w;
+		l -= (size_t)w;
+	}
+}
+
+/* Typed confirm when there is no --yes and no matching token. termux-usb -e
+ * buffers the child's stdout/stderr until exit, so the prompt also goes
+ * straight to the terminal: /dev/tty if it opens, else fd 0 when fd 0 is a
+ * tty. The answer is read from stdin when it is a tty, else from /dev/tty.
+ * Trailing CR/LF/space/tab are ignored ("yes\r\n" is yes). */
 static void confirm(int yes, const char *verb, const char *name)
 {
-	char buf[16];
+	char buf[64], prompt[256], hex[3 * 64 + 1];
+	int in_fd = -1, out_fd = -1, tty = -1, n, k;
 	if (yes) {
 		fprintf(stderr, "confirmed via --yes: %s '%s'\n", verb, name);
 		return;
 	}
-	if (!isatty(STDIN_FILENO)) {
-		fprintf(stderr, "refusing to %s %s without --yes (stdin is not a terminal)\n", verb, name);
+	tty = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+	if (isatty(STDIN_FILENO))
+		in_fd = STDIN_FILENO;
+	else if (tty >= 0)
+		in_fd = tty;
+	if (in_fd < 0) {
+		fprintf(stderr, "spdhost: refusing %s '%s' without --yes/--confirm-token"
+			" (no terminal: stdin is not a tty and /dev/tty did not open)\n", verb, name);
 		exit(1);
 	}
-	fprintf(stderr, "type yes to %s '%s': ", verb, name);
-	fflush(stderr);
-	if (!fgets(buf, sizeof(buf), stdin) || strcmp(buf, "yes\n") != 0) {
-		fprintf(stderr, "not confirmed\n");
+	out_fd = tty >= 0 ? tty : STDIN_FILENO;
+	snprintf(prompt, sizeof(prompt), "spdhost: type yes to %s '%s': ", verb, name);
+	put_fd(out_fd, prompt);
+	fprintf(stderr, "%s(waiting for input on the terminal)\n", prompt);
+	n = read_line_fd(in_fd, buf, sizeof(buf));
+	if (tty >= 0)
+		close(tty);
+	hex[0] = 0;
+	for (k = 0; k < n && k < 64; k++)
+		snprintf(hex + 3 * k, 4, "%02x ", (unsigned char)buf[k]);
+	if (n > 0) {
+		int l = n;
+		while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r' || buf[l - 1] == ' ' || buf[l - 1] == '\t'))
+			l--;
+		buf[l] = 0;
+		if (strcmp(buf, "yes") == 0) {
+			fprintf(stderr, "spdhost: confirmed: %s '%s'\n", verb, name);
+			return;
+		}
+	}
+	if (n > 0 && hex[0])
+		hex[strlen(hex) - 1] = 0;
+	fprintf(stderr, "spdhost: not confirmed (read: %s)\n", n > 0 ? hex : n == 0 ? "EOF" : strerror(errno));
+	exit(1);
+}
+
+/* Gate for a write of LEN bytes BUF to partition NAME. With --confirm-token:
+ * only misc, only once, only these exact bytes; a mismatch refuses before
+ * anything is sent. Without a token: --yes or the typed confirm. */
+static void authorize_write(int yes, const char *verb, const char *name, const uint8_t *buf, size_t len)
+{
+	char got[65];
+	if (!confirm_token) {
+		confirm(yes, verb, name);
+		return;
+	}
+	if (strcmp(name, "misc") != 0) {
+		fprintf(stderr, "spdhost: --confirm-token only authorizes a misc write, not '%s'\n", name);
+		confirm(yes, verb, name);
+		return;
+	}
+	if (confirm_token_used) {
+		fprintf(stderr, "spdhost: refusing a second misc write: --confirm-token authorizes one write per session\n");
 		exit(1);
 	}
+	sha256_hex(buf, len, got);
+	if (strcmp(got, confirm_token) != 0) {
+		fprintf(stderr, "spdhost: confirm-token mismatch (expected %s, got %s); nothing written\n",
+			confirm_token, got);
+		exit(1);
+	}
+	confirm_token_used = 1;
+	fprintf(stderr, "spdhost: confirm-token matches sha256 %s (%zu bytes to misc); authorized\n", got, len);
+}
+
+/* Whole file into memory (misc images are at most a few MiB). */
+static uint8_t *load_small_file(const char *path, size_t *len, size_t cap)
+{
+	FILE *f = fopen(path, "rb");
+	uint8_t *b;
+	size_t n;
+	if (!f) {
+		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
+		return NULL;
+	}
+	b = malloc(cap + 1);
+	n = b ? fread(b, 1, cap + 1, f) : 0;
+	fclose(f);
+	if (!b || n == 0 || n > cap) {
+		fprintf(stderr, "%s: %s\n", path, !b ? "out of memory" : n ? "too large for misc" : "empty");
+		free(b);
+		return NULL;
+	}
+	*len = n;
+	return b;
 }
 
 static void need_fdl2(struct spd *io, const char *cmd)
@@ -277,7 +402,8 @@ static int do_reboot_bcb(struct spd *io, int yes, int kind)
 	if (kind)
 		memcpy(buf + 0x40, "recovery\n--fastboot\n", 20);
 
-	confirm(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", label);
+	authorize_write(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", "misc", buf, sizeof(buf));
+	fprintf(stderr, "%s: writing %zu-byte BCB\n", label, sizeof(buf));
 	if (sizeof(buf) != (size_t)SPD_MISC_BCB_LEN) {
 		fprintf(stderr, "internal error: misc BCB length %zu != 2048\n", sizeof(buf));
 		return -1;
@@ -349,6 +475,7 @@ int main(int argc, char **argv)
 		{"keep-going", no_argument, NULL, 'k'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"yes", no_argument, NULL, 'y'},
+		{"confirm-token", required_argument, NULL, 'C'},
 		{"no-line-state", no_argument, NULL, 'L'},
 		{"self-test", no_argument, NULL, 'T'},
 		{"dry-run", no_argument, NULL, 'D'},
@@ -427,6 +554,18 @@ int main(int argc, char **argv)
 		case 'y':
 			yes = 1;
 			break;
+		case 'C': {
+			size_t k;
+			for (k = 0; optarg[k]; k++)
+				if (!((optarg[k] >= '0' && optarg[k] <= '9') || (optarg[k] >= 'a' && optarg[k] <= 'f')))
+					break;
+			if (k != 64 || optarg[k]) {
+				fprintf(stderr, "bad --confirm-token: need 64 lowercase hex (sha256 of the misc bytes)\n");
+				return 2;
+			}
+			confirm_token = optarg;
+			break;
+		}
 		case 'L':
 			line = 0;
 			break;
@@ -441,8 +580,21 @@ int main(int argc, char **argv)
 			return c == 'h' ? 0 : 2;
 		}
 	}
-	if (selftest)
+	if (selftest) {
+		/* FIPS 180-4 vectors for the --confirm-token hash. */
+		char h[65];
+		sha256_hex((const uint8_t *)"abc", 3, h);
+		if (strcmp(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")) {
+			fprintf(stderr, "self-test: sha256(abc) wrong: %s\n", h);
+			return 1;
+		}
+		sha256_hex((const uint8_t *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, h);
+		if (strcmp(h, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")) {
+			fprintf(stderr, "self-test: sha256(448-bit) wrong: %s\n", h);
+			return 1;
+		}
 		return spd_selftest();
+	}
 	if (optind >= argc) {
 		usage();
 		return 2;
@@ -606,22 +758,28 @@ int main(int argc, char **argv)
 		} else if (strcmp(cmd, "write-part") == 0) {
 			need(argc, i, 2, "write-part");
 			need_fdl2(io, "write-part");
-			confirm(yes, "write", argv[i + 1]);
-			if (spd_write_part(io, argv[i + 1], argv[i + 2]))
-				return 1;
-			if (strcmp(argv[i + 1], "misc") == 0 && spd_misc_guard_armed()) {
-				FILE *f = fopen(argv[i + 2], "rb");
-				uint64_t cap = spd_misc_size(io);
-				uint8_t *w = malloc(cap + 1);
-				size_t n = (f && w) ? fread(w, 1, cap + 1, f) : 0;
-				int vr = (n && n <= cap) ? spd_misc_verify(io, w, n) : -1;
-				if (f)
-					fclose(f);
-				free(w);
-				if (vr) {
+			if (strcmp(argv[i + 1], "misc") == 0) {
+				/* misc: hash, write and verify the SAME in-memory bytes. */
+				size_t n = 0;
+				uint8_t *w = load_small_file(argv[i + 2], &n, (size_t)spd_misc_size(io));
+				if (!w)
+					return 1;
+				authorize_write(yes, "write", "misc", w, n);
+				fprintf(stderr, "write misc: %zu bytes from %s\n", n, argv[i + 2]);
+				if (spd_write_part_buf(io, "misc", w, n)) {
+					free(w);
+					return 1;
+				}
+				if (spd_misc_guard_armed() && spd_misc_verify(io, w, n)) {
+					free(w);
 					fprintf(stderr, "misc read-back mismatch: stopping (no reset). Restore misc from the backup.\n");
 					return 1;
 				}
+				free(w);
+			} else {
+				authorize_write(yes, "write", argv[i + 1], NULL, 0);
+				if (spd_write_part(io, argv[i + 1], argv[i + 2]))
+					return 1;
 			}
 			i += 3;
 		} else if (strcmp(cmd, "erase-part") == 0) {
