@@ -3,7 +3,12 @@
  * `parts` read and the reads). Name/size/slot handling matches the vendored
  * spd_dump: see spd_dump/spd_dump.c ~955-998 (r all/all_lite, splloader),
  * spd_dump/common.c ~1046-1072 (select_ab) and ~1106-1124 (unit divisor).
+ *
+ * fseeko/ftello must be declared. On arm32 an implicit declaration passes
+ * the 64-bit off_t in the wrong registers, and clang rejects it.
  */
+#define _POSIX_C_SOURCE 200809L
+#define _FILE_OFFSET_BITS 64
 #include "proto.h"
 #include "dumpcmd.h"
 #include <stdio.h>
@@ -85,7 +90,7 @@ int spd_pack_slot_file(char which, const char *in_path, const char *out_path)
 {
 	FILE *fi, *fo;
 	uint8_t *buf, abc[32];
-	long sz;
+	off_t sz;
 	fi = fopen(in_path, "rb");
 	if (!fi) {
 		fprintf(stderr, "pack-slot: open %s: %s\n", in_path, strerror(errno));
@@ -119,7 +124,8 @@ int spd_pack_slot_file(char which, const char *in_path, const char *out_path)
 	}
 	fclose(fo);
 	free(buf);
-	fprintf(stderr, "pack-slot: %c -> %s (%ld bytes, slot block at 0x800)\n", which, out_path, sz);
+	fprintf(stderr, "pack-slot: %c -> %s (%lld bytes, slot block at 0x800)\n",
+		which, out_path, (long long)sz);
 	return 0;
 }
 
@@ -186,7 +192,7 @@ int spd_lookup_part(struct spd *io, const char *name, int slot,
 		return *size ? 0 : -1;
 	}
 	/* spd_dump get_partition_info: splloader* is 256 KiB even with no table row. */
-	if (!memcmp(name, "splloader", 9)) {
+	if (!strncmp(name, "splloader", 9)) {
 		snprintf(out, cap, "%s", name);
 		*size = SPLLOADER_BYTES;
 		return 0;
@@ -244,7 +250,7 @@ int spd_active_slot(struct spd *io)
 static int skip_bulk(const char *n, int mode, int slot)
 {
 	/* spd_dump r all/all_lite: memcmp prefixes blackbox/cache/userdata. */
-	if (!memcmp(n, "blackbox", 8) || !memcmp(n, "cache", 5) || !memcmp(n, "userdata", 8))
+	if (!strncmp(n, "blackbox", 8) || !strncmp(n, "cache", 5) || !strncmp(n, "userdata", 8))
 		return 1;
 	if (mode == DUMP_ALL_LITE) {
 		size_t l = strlen(n);

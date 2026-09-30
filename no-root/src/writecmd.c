@@ -3,7 +3,12 @@
  * no temporary repartition (w_force), no vbmeta flag wipe, and runtimenv is
  * written rather than erased. The directory scan visits every regular file;
  * spd_dump's readdir loop skips one entry.
+ *
+ * fseeko/ftello must be declared. On arm32 an implicit declaration passes
+ * the 64-bit off_t in the wrong registers, and clang rejects it.
  */
+#define _POSIX_C_SOURCE 200809L
+#define _FILE_OFFSET_BITS 64
 #include "writecmd.h"
 #include "dumpcmd.h"
 
@@ -43,8 +48,9 @@ static int junk_file(const char *raw, const char *name)
 		return 1;
 	if (n >= 4 && !strcmp(raw + n - 4, ".tmp"))
 		return 1;
-	if (!memcmp(raw, "pgpt", 4) || !memcmp(raw, "sprdpart", 8) || !memcmp(raw, "fdl", 3) ||
-		!memcmp(raw, "lk", 2) || !memcmp(raw, "0x", 2) || !memcmp(raw, "custom_exec", 11))
+	/* strncmp, not memcmp: a short name must not be read past its terminator. */
+	if (!strncmp(raw, "pgpt", 4) || !strncmp(raw, "sprdpart", 8) || !strncmp(raw, "fdl", 3) ||
+		!strncmp(raw, "lk", 2) || !strncmp(raw, "0x", 2) || !strncmp(raw, "custom_exec", 11))
 		return 1;
 	if (!strcmp(name, "SHA256SUMS") || !strcmp(name, "misc-slotinfo") ||
 		!strncmp(name, "misc-before-", 12))
@@ -110,7 +116,7 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 		return -1;
 	/* Same-size *_bak, and only when the device is not A/B. No repartition
 	 * rename and no vbmeta flag change (spd_dump's w_force / byte 0x7B). */
-	if (slot > 0 || !memcmp(resolved, "splloader", 9) || io->nparts <= 0)
+	if (slot > 0 || !strncmp(resolved, "splloader", 9) || io->nparts <= 0)
 		return 0;
 	if (strlen(resolved) + 4 >= sizeof(bak))
 		return 0;

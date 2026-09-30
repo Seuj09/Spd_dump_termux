@@ -107,8 +107,11 @@ LIB=(-L"$sysroot/lib" -lusb-1.0)
 
 # --- spdhost ----------------------------------------------------------------
 echo "building spdhost"
-cc -static -s -O2 -Wall -Wextra -Wno-sign-compare -std=c11 -D_FILE_OFFSET_BITS=64 "${INC[@]}" \
-	-o "$OUT/spdhost" "$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/sha256.c" \
+cc -static -s -O2 -Wall -Wextra -Wno-sign-compare -Werror=implicit-function-declaration \
+	-std=c11 -D_FILE_OFFSET_BITS=64 "${INC[@]}" \
+	-o "$OUT/spdhost" \
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" \
+	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
 	"${LIB[@]}" -lpthread
 
 # --- spd_dump (vendored TomKing tree) ---------------------------------------
@@ -118,7 +121,7 @@ sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
 branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 gv=$WORK/gitver; mkdir -p "$gv"
 printf '#define GIT_VER "%s"\n#define GIT_SHA1 "%s"\n' "$branch" "$sha" >"$gv/GITVER.h"
-cc -static -s -O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused \
+cc -static -s -O2 -Wall -Wextra -Werror=implicit-function-declaration -std=c99 -pedantic -Wno-unused \
 	-Wno-unused-parameter -D_GNU_SOURCE -D__ANDROID__ -DUSE_LIBUSB=1 -I"$gv" -I"$sd" "${INC[@]}" \
 	-o "$OUT/spd_dump" "$sd/spd_dump.c" "$sd/common.c" "${LIB[@]}" -lm -lpthread
 

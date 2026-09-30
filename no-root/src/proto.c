@@ -1114,7 +1114,13 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	}
 	if (fseeko(fi, 0, SEEK_END) != 0)
 		die("fseek");
-	len = (uint64_t)ftello(fi);
+	{
+		off_t nsz = ftello(fi);
+		/* A failed ftello is -1. Casting that to uint64_t would start a huge write. */
+		if (nsz < 0)
+			die("ftell");
+		len = (uint64_t)nsz;
+	}
 	if (fseeko(fi, 0, SEEK_SET) != 0)
 		die("fseek");
 	fprintf(stderr, "write %s: %llu bytes from %s\n", name, (unsigned long long)len, path);
@@ -1275,14 +1281,16 @@ int spd_write_nv(struct spd *io, const char *name, const char *path)
 	uint16_t crc;
 	uint32_t cs;
 	int step = 4096; /* spd_dump load_nv_partition ignores blk_size and uses 4096 */
-	long sz;
+	off_t sz;
 
 	fi = fopen(path, "rb");
 	if (!fi) {
 		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
 		return -1;
 	}
-	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) < 4 || fseeko(fi, 0, SEEK_SET) != 0) {
+	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) < 4 ||
+		(unsigned long long)sz > (unsigned long long)SIZE_MAX ||
+		fseeko(fi, 0, SEEK_SET) != 0) {
 		fprintf(stderr, "write nv %s: %s is not an NV image\n", name, path);
 		fclose(fi);
 		return -1;
@@ -1389,7 +1397,7 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	FILE *fi;
 	char *src, *p, *end;
 	uint8_t *buf, *w;
-	long sz;
+	off_t sz;
 	int n = 0, cap = 128;
 
 	fi = fopen(path, "rb");

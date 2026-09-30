@@ -224,6 +224,12 @@ need_loaders() {
 }
 
 ready() {
+	local ea
+	# Fail before the plug-in wait. run_session checks again.
+	ea=$(exec_addr_value) || ea=
+	if [[ -n $ea ]]; then
+		exec_stub_present "$ea" || return 1
+	fi
 	echo
 	echo "Power the target off. Leave it unplugged. This phone is the USB host (OTG)."
 	echo "Press Enter. The next step waits 90 seconds."
@@ -544,7 +550,7 @@ fetch_parts_table() {
 	raw=$(parts_cache_path)
 	misc=$(slot_misc_path)
 	echo "Fetching live partition table into $raw (+ 32-byte slot record)"
-	ready
+	ready || return 1
 	rm -f "$raw" "$misc"
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" read-part misc "$SPD_SLOT_OFF" "$SPD_SLOT_BYTES" "$misc"
@@ -710,7 +716,7 @@ dump_live_session() {
 	mkdir -p "$DUMP_DIR"
 	rm -f "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)"
 	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
-	ready
+	ready || return 1
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" dump "$target" "$DUMP_DIR"
 	rc=$?
@@ -749,7 +755,7 @@ dump_imei_session() {
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	echo "One session: refresh the table, then dump miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2."
-	ready
+	ready || return 1
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" \
 		dump miscdata "$DUMP_DIR" \
@@ -1148,7 +1154,7 @@ guarded_misc_session() {
 	backup="$DUMP_DIR/misc-before-$ts.img"
 	raw=$(parts_cache_path)
 	echo "misc will be backed up to $backup first; the write is skipped if that fails."
-	ready
+	ready || return 1
 	run_session "--confirm-token=$tok" fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" misc-backup "$backup" "$@"
 	rc=$?
@@ -1223,7 +1229,7 @@ reboot_mode() {
 				pause
 				return
 			fi
-			ready
+			ready || { pause; return; }
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset
 			;;
 		2)
@@ -1249,7 +1255,7 @@ reboot_mode() {
 				pause
 				return
 			fi
-			ready
+			ready || { pause; return; }
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			;;
 		5)
@@ -1278,9 +1284,26 @@ reboot_mode() {
 	pause
 }
 
+# Same skips as writecmd junk_file / *_bak, so the menu does not list a file
+# the tool will ignore. Prefixes are on the filename, not the stripped name.
+part_image_candidate() {
+	local base=$1 name
+	[[ $base == .* || -z $base ]] && return 1
+	case $base in
+		*.xml|*.exe|*.txt|*.partial|*.tmp|SHA256SUMS) return 1 ;;
+		pgpt*|sprdpart*|fdl*|lk*|0x*|custom_exec*) return 1 ;;
+	esac
+	name=${base%.*}
+	[[ $base == "$name" ]] && name=$base
+	case $name in
+		*_bak|misc-slotinfo|misc-before-*) return 1 ;;
+	esac
+	return 0
+}
+
 # Release menu option 2: every input/<partition>.img, then BOOT_AFTER.
 flash_input_menu() {
-	local -a files=() names=()
+	local -a names=() skipped=()
 	local f base
 	need_loaders || return
 	mkdir -p "$INPUT_DIR"
@@ -1289,13 +1312,16 @@ flash_input_menu() {
 		mv -n "$f" "${f%.bin}.img"
 	done
 	for f in "$INPUT_DIR"/*.img; do
-		files+=("$f")
 		base=$(basename "$f")
-		names+=("${base%.img}")
+		if part_image_candidate "$base"; then
+			names+=("${base%.img}")
+		else
+			skipped+=("$base")
+		fi
 	done
 	shopt -u nullglob
-	if (( ${#files[@]} == 0 )); then
-		echo "No .img files in $INPUT_DIR."
+	if (( ${#names[@]} == 0 )); then
+		echo "No partition images in $INPUT_DIR."
 		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
 		return 1
 	fi
@@ -1303,16 +1329,20 @@ flash_input_menu() {
 	for f in "${names[@]}"; do
 		echo "  $f"
 	done
-	echo "misc.img, if present, is backed up and verified. splloader.img is written if you put it here."
+	if (( ${#skipped[@]} )); then
+		echo "Not flashed: ${skipped[*]}"
+	fi
+	echo "A name that is not on the phone aborts the whole flash before anything is sent."
+	echo "misc.img, if present, is backed up and verified. splloader.img must be 256 KiB or smaller."
 	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
 	echo "super.img without metadata.img also erases metadata (same as spd_dump write_parts)."
 	if ! confirm_action "type yes to flash these partitions: "; then
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
-	ready
+	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-parts "$INPUT_DIR" $BOOT_AFTER
+		parts "$(parts_cache_path)" write-parts "$INPUT_DIR" "$BOOT_AFTER"
 }
 
 # Release menu option 4: write_parts of the backup folder.
@@ -1324,15 +1354,17 @@ restore_backup_menu() {
 	fi
 	echo "Restore images in $DUMP_DIR (partition-name.img), then $BOOT_AFTER."
 	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, *_bak.img."
-	echo "The active slot is written back after the files. Inactive _a/_b images are skipped."
+	echo "A name that is not on the phone aborts the restore before anything is sent."
+	echo "userdata.img in this folder is written back. Inactive _a/_b images are skipped."
+	echo "The active slot is written back after the files."
 	echo "super.img without metadata.img erases metadata."
 	if ! confirm_action "type yes to restore this backup: "; then
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
-	ready
+	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-parts "$DUMP_DIR" $BOOT_AFTER
+		parts "$(parts_cache_path)" write-parts "$DUMP_DIR" "$BOOT_AFTER"
 }
 
 repartition_menu() {
@@ -1350,9 +1382,9 @@ repartition_menu() {
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends the table."
-	ready
+	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		repartition "$xml" $BOOT_AFTER
+		repartition "$xml" "$BOOT_AFTER"
 }
 
 set_slot_menu() {
@@ -1372,9 +1404,9 @@ set_slot_menu() {
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal after it has read misc."
-	ready
+	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" set-active "$which" $BOOT_AFTER
+		parts "$(parts_cache_path)" set-active "$which" "$BOOT_AFTER"
 }
 
 boot_after_menu() {
@@ -1408,8 +1440,13 @@ hex_mode_menu() {
 		save_config
 		echo "exec_addr is now $(exec_addr_value)."
 	else
-		echo "Second stub is not on disk. Staying on ${cur:-$EXEC_ADDR_DEFAULT}."
-		EXEC_ADDR=${cur:-$EXEC_ADDR_DEFAULT}
+		echo "Second stub is not on disk. Staying on $EXEC_ADDR_DEFAULT."
+		# A saved alt address with no stub would fail every later session.
+		if [[ ${cur,,} == "${EXEC_ADDR_ALT,,}" ]]; then
+			EXEC_ADDR=$EXEC_ADDR_DEFAULT
+			save_config
+			echo "Saved exec_addr $EXEC_ADDR_DEFAULT."
+		fi
 	fi
 }
 
@@ -1444,7 +1481,7 @@ extra_menu() {
 		2) set_slot_menu ;;
 		3)
 			if confirm_action "type yes to power off: "; then
-				ready
+				ready || return
 				run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			fi
 			;;

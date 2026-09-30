@@ -2,6 +2,7 @@
 # same sources. Do not copy the binary from one architecture to the other.
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -std=c11 -D_FILE_OFFSET_BITS=64
+CFLAGS += -Werror=implicit-function-declaration
 CPPFLAGS += $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0)
 
