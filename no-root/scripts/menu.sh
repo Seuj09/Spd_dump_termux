@@ -7,6 +7,13 @@ CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
 DUMP_DIR="${SPDHOST_DUMP_DIR:-$PWD/backup}"
 FDL1_ADDR_DEFAULT=0x65000800
 FDL2_ADDR_DEFAULT=0x9efffe00
+# BootROM exec_addr (spd_dump's no-verify stub path; see TERMUX.md). With it,
+# FDL1 is started by fdl/ums9230/custom_exec_no_verify_65015f08.bin instead of
+# BSL_CMD_EXEC_DATA, which the Infinix BootROM signature-checks and hangs on.
+# SPDHOST_EXEC_ADDR=0 (or off) disables; any 0x... overrides. Also EXEC_ADDR=
+# in the menu config. Environment wins over config.
+EXEC_ADDR_DEFAULT=0x65015f08
+EXEC_ADDR=""
 
 # Prefer this package's own scripts/ over PATH, so an unzipped release never
 # picks up an older spdhost-usb installed in $PREFIX/bin. PATH is last resort.
@@ -53,6 +60,7 @@ FDL1=$FDL1
 FDL1_ADDR=$FDL1_ADDR
 FDL2=$FDL2
 FDL2_ADDR=$FDL2_ADDR
+EXEC_ADDR=$EXEC_ADDR
 EOF
 }
 
@@ -66,6 +74,9 @@ load_config() {
 				;;
 			FDL1_ADDR|FDL2_ADDR)
 				[[ $val =~ ^0[xX][0-9a-fA-F]+$ ]] && printf -v "$key" '%s' "$val"
+				;;
+			EXEC_ADDR)
+				[[ $val =~ ^(0[xX][0-9a-fA-F]+|0|off)$ ]] && EXEC_ADDR=$val
 				;;
 		esac
 	done < "$CONFIG"
@@ -211,10 +222,33 @@ ready() {
 	pause
 }
 
+# Effective exec_addr: env SPDHOST_EXEC_ADDR, else config EXEC_ADDR, else
+# default. Prints nothing when disabled (0/off/empty).
+exec_addr_value() {
+	local v
+	if [[ -n ${SPDHOST_EXEC_ADDR+set} ]]; then
+		v=$SPDHOST_EXEC_ADDR
+	elif [[ -n $EXEC_ADDR ]]; then
+		v=$EXEC_ADDR
+	else
+		v=$EXEC_ADDR_DEFAULT
+	fi
+	case $v in
+		''|0|off|OFF|0x0|0X0) return 0 ;;
+	esac
+	printf '%s\n' "$v"
+}
+
 run_session() {
 	local -a prefix=(--timeout "${SPDHOST_TIMEOUT:-3000}")
+	local ea
 	if [[ ${SPDHOST_VERBOSE:-} == 1 ]]; then
 		prefix+=(--verbose)
+	fi
+	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it.
+	if [[ ${1:-} == fdl ]]; then
+		ea=$(exec_addr_value)
+		[[ -n $ea ]] && set -- exec_addr "$ea" "$@"
 	fi
 	echo "+ ${RUNNER[*]} ${prefix[*]} $*"
 	"${RUNNER[@]}" "${prefix[@]}" "$@"
@@ -360,9 +394,12 @@ fetch_parts_table() {
 	parts_file=$(parts_cache_path)
 	echo "Fetching live partition table into $parts_file"
 	ready
-	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$parts_file"; then
-		echo "parts failed (exit $?)." >&2
+	local rc
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$parts_file"
+	rc=$?
+	if (( rc != 0 )); then
+		echo "parts failed (exit $rc)." >&2
 		return 1
 	fi
 	if [[ ! -s $parts_file ]]; then

@@ -106,6 +106,12 @@ static void wr32le(uint8_t *p, uint32_t v)
 	p[3] = (uint8_t)(v >> 24);
 }
 
+static uint32_t rd32be(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+		((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
 static unsigned rd16be(const uint8_t *p)
 {
 	return ((unsigned)p[0] << 8) | p[1];
@@ -201,6 +207,52 @@ void spd_free(struct spd *io)
 	free(io);
 }
 
+static const char *cmd_name(unsigned type)
+{
+	switch (type) {
+	case BSL_CMD_CONNECT: return "CONNECT";
+	case BSL_CMD_START_DATA: return "START";
+	case BSL_CMD_MIDST_DATA: return "MIDST";
+	case BSL_CMD_END_DATA: return "END";
+	case BSL_CMD_EXEC_DATA: return "EXEC";
+	case BSL_CMD_CHECK_BAUD: return "CHECK_BAUD";
+	default: return "CMD";
+	}
+}
+
+/* FNV-1a over the encoded (HDLC-framed, escaped) bytes. The dry-run test
+ * computes the same hash over what spd_dump's send_msg() hands to
+ * libusb_bulk_transfer(), so a matching line means byte-identical frames. */
+static uint32_t fnv1a(const uint8_t *p, int n)
+{
+	uint32_t h = 2166136261u;
+	while (n-- > 0) {
+		h ^= *p++;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+/* Dry-run trace: one line per packet that would go on the wire (cmd, addr,
+ * len, frame hash), so a test can diff spdhost's sequence against spd_dump's
+ * without USB hardware. Enabled by io->dry (--dry-run in main.c). */
+static void dry_log(struct spd *io)
+{
+	unsigned type = (unsigned)io->last_type;
+	uint32_t h = fnv1a(io->enc, io->enc_len);
+	if (type == BSL_CMD_CHECK_BAUD) {
+		printf("DRY CHECK_BAUD nbytes=%d fnv=%08x\n", io->enc_len, h);
+	} else if (type == BSL_CMD_START_DATA && io->raw_len >= 4 + 8 + 2) {
+		printf("DRY START addr=0x%08x len=%u fnv=%08x\n",
+			rd32be(io->raw + 4), rd32be(io->raw + 8), h);
+	} else if (type == BSL_CMD_MIDST_DATA) {
+		printf("DRY MIDST len=%u fnv=%08x\n", rd16be(io->raw + 2), h);
+	} else {
+		printf("DRY %s fnv=%08x\n", cmd_name(type), h);
+	}
+	fflush(stdout);
+}
+
 void spd_encode(struct spd *io, unsigned type, const void *data, size_t len)
 {
 	uint8_t *p, *body;
@@ -210,6 +262,7 @@ void spd_encode(struct spd *io, unsigned type, const void *data, size_t len)
 	if (len > 0xffff)
 		die("message too long");
 
+	io->last_type = (int)type;
 	if (type == BSL_CMD_CHECK_BAUD) {
 		memset(io->enc, HDLC_MARK, len);
 		io->enc_len = (int)len;
@@ -247,6 +300,10 @@ int spd_send(struct spd *io)
 
 	if (io->enc_len <= 0)
 		die("empty message");
+	if (io->dry) {
+		dry_log(io);
+		return io->enc_len; /* dry-run: nothing goes on the wire */
+	}
 	if (io->verbose)
 		fprintf(stderr, "send %d bytes\n", io->enc_len);
 	rc = spd_usb_bulk_send(&io->usb, io->enc, io->enc_len);
@@ -258,6 +315,31 @@ int spd_send(struct spd *io)
 int spd_recv(struct spd *io, int timeout_ms)
 {
 	int esc, n, head, need, pos, len;
+
+	if (io->dry && io->dry_drop_ack) {
+		io->dry_drop_ack = 0;
+		io->raw_len = 0;
+		printf("DRY (no ack)\n");
+		fflush(stdout);
+		return 0; /* simulated timeout */
+	}
+	if (io->dry) {
+		/* Synthesize the reply the real BootROM/FDL would send, so the
+		 * dry-run walks the same control flow: CHECK_BAUD -> VER, else ACK. */
+		unsigned t = (io->last_type == BSL_CMD_CHECK_BAUD)
+			? BSL_REP_VER : BSL_REP_ACK;
+		(void)timeout_ms;
+		wr16be(io->raw, t);
+		if (t == BSL_REP_VER) {
+			wr16be(io->raw + 2, 5);
+			memcpy(io->raw + 4, "SPRDX", 5);
+			io->raw_len = 4 + 5 + 2;
+		} else {
+			wr16be(io->raw + 2, 0);
+			io->raw_len = 4 + 2;
+		}
+		return io->raw_len;
+	}
 
 restart:
 	esc = 0;
@@ -772,6 +854,83 @@ int spd_send_loader(struct spd *io, const char *path, uint32_t addr)
 		exit(1);
 	free(mem);
 	fprintf(stderr, "sent %s (%zu bytes) at 0x%08x\n", path, size, addr);
+	return 0;
+}
+
+/* exec_addr path (BootROM only). Mirrors spd_dump.c's non-v2 branch:
+ *   send_file(io, execfile, exec_addr, end_data=0, step=528, 0, 0)
+ * i.e. BSL_CMD_START_DATA(addr,size) then BSL_CMD_MIDST_DATA chunks, with
+ * NO BSL_CMD_END_DATA and NO BSL_CMD_EXEC_DATA. The caller then goes straight
+ * to spd_check_baud_loader(). spd_dump uses a fixed 528-byte step here, so we
+ * do too, to keep the on-wire chunking byte-identical.
+ *
+ * Ack handling: spd_dump's send_buf() calls send_and_check() on every packet,
+ * including the last MIDST, and would ERR_EXIT on a timeout. In practice the
+ * no-verify stub can seize execution the instant its last byte lands, so the
+ * final MIDST's ack may never arrive. We read acks for START and every MIDST
+ * but the last exactly like spd_dump; on the final MIDST we send and TOLERATE
+ * a missing/timeout ack (and a non-ACK type), because that is the stub taking
+ * over — not an error. The bytes put on the wire are identical either way. */
+int spd_send_exec_file(struct spd *io, const char *path, uint32_t addr)
+{
+	size_t size = 0;
+	uint8_t *mem = load_file(path, &size);
+	uint8_t hdr[8];
+	size_t off;
+	int step = 528; /* match spd_dump send_file(...528...) */
+
+	if (size > 0xffffffffu)
+		die("exec file too big");
+	if (size == 0)
+		die("exec file is empty");
+	wr32be(hdr, addr);
+	wr32be(hdr + 4, (uint32_t)size);
+	spd_encode(io, BSL_CMD_START_DATA, hdr, 8);
+	if (spd_check_ok(io))
+		exit(1);
+	for (off = 0; off < size; ) {
+		size_t n = size - off;
+		int last;
+		if (n > (size_t)step)
+			n = (size_t)step;
+		last = (off + n >= size);
+		spd_encode(io, BSL_CMD_MIDST_DATA, mem + off, n);
+		if (last) {
+			/* Final chunk: tolerate a missing ack (stub took over). */
+			int got;
+			if (io->dry) {
+				/* Test hook: SPDHOST_DRY_EXEC_NOACK=1 simulates the stub
+				 * seizing execution before it acks the last chunk. */
+				const char *e = getenv("SPDHOST_DRY_EXEC_NOACK");
+				io->dry_drop_ack = e && e[0] == '1';
+			}
+			if (spd_send(io) < 0) {
+				/* A USB reset as the stub starts is expected; anything
+				 * else is a real send failure (spd_dump exits here too). */
+				if (reopen_if_gone(io) != 0) {
+					fprintf(stderr, "exec_addr: send of final chunk failed\n");
+					exit(1);
+				}
+			} else if ((got = spd_recv(io, io->usb.timeout_ms)) == 0) {
+				fprintf(stderr, "exec_addr: no ack on final chunk "
+					"(stub likely running) - continuing\n");
+			} else if (got < 0) {
+				if (reopen_if_gone(io) != 0)
+					fprintf(stderr, "exec_addr: recv error after final chunk - continuing\n");
+			} else if (spd_type(io) != BSL_REP_ACK) {
+				fprintf(stderr, "exec_addr: final chunk response 0x%04x "
+					"(stub likely running) - continuing\n", spd_type(io));
+			}
+		} else {
+			if (spd_check_ok(io))
+				exit(1);
+		}
+		off += n;
+	}
+	/* No END_DATA, no EXEC_DATA — exactly like spd_dump's exec_addr path. */
+	free(mem);
+	fprintf(stderr, "exec_addr: sent %s (%zu bytes) at 0x%08x (no END/EXEC)\n",
+		path, size, addr);
 	return 0;
 }
 

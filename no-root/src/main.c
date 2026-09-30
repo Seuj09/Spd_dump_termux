@@ -55,9 +55,18 @@ static void usage(void)
 		"  --yes               do not prompt before write-part / erase-part / reboot-*\n"
 		"  --verbose\n"
 		"  --self-test         framing check, no device\n"
+		"  --dry-run           no USB: fake ACK/VER replies, print each packet\n"
+		"                      (DRY <cmd> addr/len) to stdout; for sequence tests\n"
 		"\n"
 		"Commands, run in order on the same connection:\n"
 		"  ping [--fdl]                 BootROM hello, or FDL hello with --fdl\n"
+		"  exec_addr ADDR [FILE]        BootROM stage only, before the first fdl:\n"
+		"                               send FDL1 (START/MIDST/END), then FILE at\n"
+		"                               ADDR (START/MIDST, no END, no EXEC) so the\n"
+		"                               no-verify stub starts FDL1 (spd_dump's\n"
+		"                               exec_addr). FILE defaults to\n"
+		"                               fdl/ums9230/custom_exec_no_verify_<hex>.bin\n"
+		"                               next to spdhost. ADDR 0 disables.\n"
 		"  fdl FILE ADDR                send one loader and execute it\n"
 		"  parts [FILE]                 list partitions (FILE or '-' optional)\n"
 		"  read-part NAME OFF SIZE OUT\n"
@@ -148,6 +157,7 @@ static void need_fdl2(struct spd *io, const char *cmd)
 static int is_command(const char *s)
 {
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
+		strcmp(s, "exec_addr") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "chip-uid") == 0 ||
@@ -182,8 +192,12 @@ static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 			io->linked = 1;
 		}
 		spd_send_loader(io, path, addr);
-		if (spd_exec(io, io->usb.timeout_ms > 3000 ? io->usb.timeout_ms : 3000, 0))
+		if (io->exec_addr) {
+			/* spd_dump non-v2 exec_addr: stub at exec_addr, no END, no EXEC. */
+			spd_send_exec_file(io, io->exec_file, io->exec_addr);
+		} else if (spd_exec(io, io->usb.timeout_ms > 3000 ? io->usb.timeout_ms : 3000, 0)) {
 			exit(1);
+		}
 		io->flags &= ~SPD_F_CRC16;
 		if (spd_check_baud_loader(io))
 			exit(1);
@@ -257,6 +271,45 @@ static int do_reboot_bcb(struct spd *io, int yes, int kind)
 	return spd_simple(io, 0x05); /* BSL_CMD_NORMAL_RESET */
 }
 
+/* Default stub for exec_addr ADDR: custom_exec_no_verify_<hex>.bin (lowercase,
+ * no 0x, same name spd_dump builds with "%x"). Look package-relative first
+ * (next to the spdhost binary), then the current directory. Returns a static
+ * buffer or NULL. */
+static const char *find_exec_file(const char *self_path, uint32_t addr)
+{
+	static char out[1024];
+	char name[64], dir[512];
+	const char *slash;
+	const char *rel[] = {
+		"%s/fdl/ums9230/%s",
+		"%s/../fdl/ums9230/%s",
+		NULL
+	};
+	int k;
+
+	snprintf(name, sizeof(name), "custom_exec_no_verify_%x.bin", (unsigned)addr);
+	slash = strrchr(self_path, '/');
+	if (slash) {
+		size_t n = (size_t)(slash - self_path);
+		if (n >= sizeof(dir))
+			n = sizeof(dir) - 1;
+		memcpy(dir, self_path, n);
+		dir[n] = 0;
+		for (k = 0; rel[k]; k++) {
+			snprintf(out, sizeof(out), rel[k], dir, name);
+			if (access(out, R_OK) == 0)
+				return out;
+		}
+	}
+	snprintf(out, sizeof(out), "fdl/ums9230/%s", name);
+	if (access(out, R_OK) == 0)
+		return out;
+	snprintf(out, sizeof(out), "%s", name);
+	if (access(out, R_OK) == 0)
+		return out;
+	return NULL;
+}
+
 int main(int argc, char **argv)
 {
 	static const struct option opts[] = {
@@ -269,10 +322,11 @@ int main(int argc, char **argv)
 		{"yes", no_argument, NULL, 'y'},
 		{"no-line-state", no_argument, NULL, 'L'},
 		{"self-test", no_argument, NULL, 'T'},
+		{"dry-run", no_argument, NULL, 'D'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
-	int fd = -1, verbose = 0, yes = 0, line = 1, selftest = 0;
+	int fd = -1, verbose = 0, yes = 0, line = 1, selftest = 0, dry = 0;
 	char self_path[512];
 	int timeout = 1000, step = 4096;
 	unsigned vid = 0x1782, pid = 0x4d00;
@@ -334,6 +388,9 @@ int main(int argc, char **argv)
 		case 'T':
 			selftest = 1;
 			break;
+		case 'D':
+			dry = 1;
+			break;
 		default:
 			usage();
 			return c == 'h' ? 0 : 2;
@@ -368,7 +425,6 @@ int main(int argc, char **argv)
 
 	io = spd_new(verbose, step);
 	io->usb.timeout_ms = timeout;
-	spd_usb_open(&io->usb, fd, vid, pid, timeout);
 	{
 		ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
 		if (n < 0)
@@ -376,7 +432,16 @@ int main(int argc, char **argv)
 		else
 			self_path[n] = 0;
 	}
-	spd_usb_enable_reacquire(&io->usb, self_path);
+	if (dry) {
+		/* No USB at all: spd_send/spd_recv short-circuit on io->dry, and
+		 * line-state / clear_halt (control transfers) are skipped. */
+		io->dry = 1;
+		line = 0;
+		fprintf(stderr, "dry-run: no USB; packet sequence on stdout\n");
+	} else {
+		spd_usb_open(&io->usb, fd, vid, pid, timeout);
+		spd_usb_enable_reacquire(&io->usb, self_path);
+	}
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];
@@ -389,6 +454,45 @@ int main(int argc, char **argv)
 			do_ping(io, line, fdl);
 			line = 0;
 			i++;
+		} else if (strcmp(cmd, "exec_addr") == 0) {
+			uint64_t ea;
+			const char *file = NULL;
+			need(argc, i, 1, "exec_addr");
+			ea = parse_size(argv[i + 1]);
+			if (ea > 0xffffffffull) {
+				fprintf(stderr, "exec_addr does not fit in 32 bits\n");
+				return 1;
+			}
+			if (i + 2 < argc && !is_command(argv[i + 2])) {
+				file = argv[i + 2];
+				i++;
+			}
+			i += 2;
+			if (io->fdl_stage != 0) {
+				/* spd_dump ignores exec_addr once FDL1 is loaded; so do we. */
+				fprintf(stderr, "exec_addr: ignored (only valid before the first fdl)\n");
+				continue;
+			}
+			if (ea == 0) {
+				io->exec_addr = 0;
+				io->exec_file = NULL;
+				fprintf(stderr, "exec_addr: disabled (0)\n");
+				continue;
+			}
+			if (!file)
+				file = find_exec_file(self_path, (uint32_t)ea);
+			if (!file || access(file, R_OK) != 0) {
+				fprintf(stderr,
+					"exec_addr 0x%x: custom_exec_no_verify_%x.bin not found%s%s\n"
+					"  expected next to spdhost in fdl/ums9230/ (or pass FILE).\n"
+					"  menu.sh: SPDHOST_EXEC_ADDR=0 disables exec_addr.\n",
+					(unsigned)ea, (unsigned)ea,
+					file ? ": " : "", file ? file : "");
+				return 1;
+			}
+			io->exec_addr = (uint32_t)ea;
+			io->exec_file = file;
+			fprintf(stderr, "exec_addr: 0x%08x using %s\n", io->exec_addr, io->exec_file);
 		} else if (strcmp(cmd, "fdl") == 0) {
 			need(argc, i, 2, "fdl");
 			{
@@ -460,7 +564,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-	spd_usb_close(&io->usb);
+	if (!dry)
+		spd_usb_close(&io->usb);
 	spd_free(io);
 	return 0;
 }

@@ -24,6 +24,11 @@ struct spd {
 	int enc_len;
 	int recv_len;
 	int recv_pos;
+	int last_type;      /* last spd_encode() type; used by dry-run recv */
+	int dry;            /* dry-run: no USB; log the packet sequence */
+	uint32_t exec_addr; /* nonzero: BootROM exec_addr path (no END/EXEC) */
+	const char *exec_file; /* stub sent at exec_addr (custom_exec_no_verify) */
+	int dry_drop_ack;   /* dry-run: next recv reports a timeout (test hook) */
 };
 
 struct spd *spd_new(int verbose, int step);
@@ -47,6 +52,10 @@ int spd_check_baud_loader(struct spd *io);
 int spd_connect(struct spd *io);
 
 int spd_send_loader(struct spd *io, const char *path, uint32_t addr);
+/* exec_addr path: send FILE at addr via START/MIDST, NO END_DATA, NO EXEC_DATA.
+ * Mirrors spd_dump.c's non-v2 exec_addr branch; tolerates a missing ack on the
+ * final MIDST because the no-verify stub may seize execution before acking. */
+int spd_send_exec_file(struct spd *io, const char *path, uint32_t addr);
 int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible);
 
 int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path);
