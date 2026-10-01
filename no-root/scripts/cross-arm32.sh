@@ -27,21 +27,49 @@
 #  phone. A stub <android/log.h> is provided because only the logging code
 #  includes it and system logging is not enabled here.
 #
-# CPU baseline: ARMv7-A, Thumb-2, VFPv3-D16, no NEON.
+# arm32 baseline: ARMv7-A with NEON (generic+v7a-neon-d32). arm64: generic aarch64.
 set -euo pipefail
 
 LIBUSB_TAG=${LIBUSB_TAG:-v1.0.27}
 LIBUSB_URL=${LIBUSB_URL:-https://github.com/libusb/libusb.git}
-TARGET=${TARGET:-arm-linux-musleabihf}
-MCPU=${MCPU:--mcpu=generic+v7a-neon-d32}
+# ARCH=arm32 (default) or ARCH=arm64. scripts/cross-arm64.sh sets arm64.
+ARCH=${ARCH:-arm32}
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)                  # no-root/
-OUT=${OUT:-$root/dist/arm32}
-WORK=${WORK:-$root/.cross-arm32}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 2)}
 
-die() { echo "cross-arm32: $*" >&2; exit 1; }
+die() { echo "cross-$ARCH: $*" >&2; exit 1; }
+
+case $ARCH in
+	arm32|armv7|arm)
+		: "${TARGET:=arm-linux-musleabihf}"
+		: "${MCPU:=-mcpu=generic+v7a-neon-d32}"
+		: "${LIBUSB_HOST:=arm-linux-gnueabihf}"
+		: "${OUT:=$root/dist/arm32}"
+		: "${WORK:=$root/.cross-arm32}"
+		file_bits="32-bit"
+		file_arch="ARM"
+		qemu_bin=qemu-arm
+		pkg_root=spdhost-arm32
+		zip_prefix=spdhost-arm32-static
+		;;
+	arm64|aarch64)
+		: "${TARGET:=aarch64-linux-musl}"
+		: "${MCPU:=-mcpu=generic}"
+		: "${LIBUSB_HOST:=aarch64-linux-gnu}"
+		: "${OUT:=$root/dist/arm64}"
+		: "${WORK:=$root/.cross-arm64}"
+		file_bits="64-bit"
+		file_arch="aarch64"
+		qemu_bin=qemu-aarch64
+		pkg_root=spdhost-arm64
+		zip_prefix=spdhost-arm64-static
+		;;
+	*)
+		die "ARCH must be arm32 or arm64 (got $ARCH)"
+		;;
+esac
 need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1 ($2)"; }
 
 need git "apt install git"
@@ -91,7 +119,7 @@ if [[ ! -f $sysroot/lib/libusb-1.0.a ]]; then
 	(
 		cd "$WORK/libusb"
 		make distclean >/dev/null 2>&1 || true
-		./autogen.sh --host=arm-linux-gnueabihf \
+		./autogen.sh --host="$LIBUSB_HOST" \
 			--disable-udev --enable-static --disable-shared \
 			--disable-examples-build --disable-tests-build \
 			--prefix="$sysroot" \
@@ -128,27 +156,27 @@ cc -static -s -O2 -Wall -Wextra -Werror=implicit-function-declaration -std=c99 -
 # --- checks -----------------------------------------------------------------
 for b in spdhost spd_dump; do
 	desc=$(file -b "$OUT/$b" 2>/dev/null || echo "")
-	if [[ -n $desc && ( $desc != *"32-bit"* || $desc != *ARM* || $desc != *"statically linked"* ) ]]; then
-		die "$b is not a static 32-bit ARM executable: $desc"
+	if [[ -n $desc && ( $desc != *"$file_bits"* || $desc != *"$file_arch"* || $desc != *"statically linked"* ) ]]; then
+		die "$b is not a static $file_bits $file_arch executable: $desc"
 	fi
 done
 
-if [[ -z ${SKIP_TESTS:-} ]] && command -v qemu-arm >/dev/null 2>&1; then
-	echo "smoke tests (qemu-arm; no USB hardware involved)"
+if [[ -z ${SKIP_TESTS:-} ]] && command -v "$qemu_bin" >/dev/null 2>&1; then
+	echo "smoke tests ($qemu_bin; no USB hardware involved)"
 	fail=0
 	t() { # name expected-substring cmd...
 		local n=$1 want=$2; shift 2
 		local o; o=$("$@" 2>&1 </dev/null || true)
 		if [[ $o == *"$want"* ]]; then echo "  ok   $n"; else echo "  FAIL $n: $o" | head -5; fail=1; fi
 	}
-	t "spd_dump no fd"        "needs a USB file descriptor"  qemu-arm "$OUT/spd_dump"
-	t "spd_dump bad fd"       "bad --usb-fd"                 qemu-arm "$OUT/spd_dump" --usb-fd abc
-	t "spd_dump closed fd"    "not open in this process"     env TERMUX_USB_FD=99 qemu-arm "$OUT/spd_dump"
-	t "spd_dump libusb init"  "not open in this process"     env TERMUX_USB_FD=98 qemu-arm "$OUT/spd_dump"
-	t "spdhost self-test"     "self-test ok"                 qemu-arm "$OUT/spdhost" --self-test
-	t "spdhost help"          "Unisoc download-mode client"  qemu-arm "$OUT/spdhost" --help
-	t "spdhost closed fd"     "is not open"                  env TERMUX_USB_FD=99 qemu-arm "$OUT/spdhost" ping
-	t "spdhost non-usb fd"    "must be a live usbfs FD"      bash -c 'exec 5</dev/null; TERMUX_USB_FD=5 exec "$@"' _ qemu-arm "$OUT/spdhost" ping
+	t "spd_dump no fd"        "needs a USB file descriptor"  "$qemu_bin" "$OUT/spd_dump"
+	t "spd_dump bad fd"       "bad --usb-fd"                 "$qemu_bin" "$OUT/spd_dump" --usb-fd abc
+	t "spd_dump closed fd"    "not open in this process"     env TERMUX_USB_FD=99 "$qemu_bin" "$OUT/spd_dump"
+	t "spd_dump libusb init"  "not open in this process"     env TERMUX_USB_FD=98 "$qemu_bin" "$OUT/spd_dump"
+	t "spdhost self-test"     "self-test ok"                 "$qemu_bin" "$OUT/spdhost" --self-test
+	t "spdhost help"          "Unisoc download-mode client"  "$qemu_bin" "$OUT/spdhost" --help
+	t "spdhost closed fd"     "is not open"                  env TERMUX_USB_FD=99 "$qemu_bin" "$OUT/spdhost" ping
+	t "spdhost non-usb fd"    "must be a live usbfs FD"      bash -c 'exec 5</dev/null; TERMUX_USB_FD=5 exec "$@"' _ "$qemu_bin" "$OUT/spdhost" ping
 	(( fail == 0 )) || die "smoke tests failed"
 fi
 
@@ -159,23 +187,25 @@ cp "$OUT/spdhost" "$pkg/spdhost"
 mkdir -p "$pkg/spd_dump/scripts"
 cp "$OUT/spd_dump" "$pkg/spd_dump/spd_dump"
 cp "$root/scripts/"*.sh "$root/scripts/spdhost-usb" "$pkg/scripts/"
-rm -f "$pkg/scripts/cross-arm32.sh"   # build-machine tool, not needed on the phone
+rm -f "$pkg/scripts/cross-arm32.sh" "$pkg/scripts/cross-arm64.sh" "$pkg/scripts/cross-both.sh"
 cp "$sd/scripts/spd_dump-usb" "$pkg/spd_dump/scripts/"
 cp "$sd/TERMUX.md" "$sd/PIN.txt" "$pkg/spd_dump/" 2>/dev/null || true
 cp -r "$root/fdl" "$pkg/fdl"
 cp -r "$root/misc" "$pkg/misc"   # BCB images for menu [5] wipe (package-relative lookup)
+mkdir -p "$pkg/input"
+cp "$root/input/"*.txt "$pkg/input/" 2>/dev/null || true
 cp "$root/README.md" "$root/LICENSE" "$pkg/"
 chmod +x "$pkg/spdhost" "$pkg/spd_dump/spd_dump" "$pkg/scripts/"* "$pkg/spd_dump/scripts/"*
 short=$(printf '%s' "$sha" | cut -c1-7)
-zipname=spdhost-arm32-static-$short.zip
-( cd "$pkg" && python3 - "$OUT/$zipname" <<'PY'
+zipname=$zip_prefix-$short.zip
+( cd "$pkg" && python3 - "$OUT/$zipname" "$pkg_root" <<'PY'
 import os, stat, sys, zipfile
-out = sys.argv[1]
+out, rootname = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for d, _, fs in os.walk("."):
         for f in sorted(fs):
             p = os.path.join(d, f)
-            info = zipfile.ZipInfo.from_file(p, arcname=os.path.join("spdhost-arm32", p[2:]))
+            info = zipfile.ZipInfo.from_file(p, arcname=os.path.join(rootname, p[2:]))
             info.compress_type = zipfile.ZIP_DEFLATED
             with open(p, "rb") as fh:
                 z.writestr(info, fh.read())

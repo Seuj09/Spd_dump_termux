@@ -97,19 +97,19 @@ source "$root/scripts/menu.sh"
 FDL1=$tmp/fdl1-dl.bin FDL1_ADDR=0x65000800 FDL2=$tmp/fdl2-dl.bin FDL2_ADDR=0x9efffe00 DUMP_DIR=$tmp/mdump MISC_DIR=$root/misc
 cls() { :; }; pause() { :; }; ready() { :; }
 M
-python3 "$drive" m1.pty --raw "Choice:" '2\n' "type yes to continue" 'yes\r\n' -- "export M=1; source $tmp/menu_env.sh; reboot_mode"; rc=$?
+python3 "$drive" m1.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to continue" 'yes\r\n' -- "export M=1; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [2]: prints BCB sha256 $REC, passes --confirm-token=<it>, never --yes (rc $rc)" \
 	bash -c "grep -q 'BCB sha256: $REC' m1.pty && grep '^+ ' m1.pty | grep -q -- '--confirm-token=$REC' && ! grep '^+ ' m1.pty | grep -q -- '--yes'"
 check "menu [2]: spdhost never prompted, BCB written, verified, reset" \
 	bash -c "! grep -q 'type yes to reboot' m1.pty m1.err && grep -q 'confirm-token matches' m1.err && grep -q 'misc-verify: OK' m1.err && cmp -s <(head -c 2048 m1.misc) '$root/misc/misc-recovery.bin' && tail -1 m1.seq | grep -q '^SEQ 05 '"
-python3 "$drive" m2.pty "Choice:" '2\n' "type yes to continue" 'no\n' -- "export M=2; source $tmp/menu_env.sh; reboot_mode"; rc=$?
+python3 "$drive" m2.pty "Choice:" '2\n' "y = continue" 'y\n' "type yes to continue" 'no\n' -- "export M=2; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [2] typed 'no': 'menu: not confirmed', spdhost not run" bash -c "grep -q 'menu: not confirmed' m2.pty && [ ! -e m2.seq ]"
-python3 "$drive" m3.pty "Choice:" '3\n' "type yes to continue" 'yes\n' -- "export M=3; source $tmp/menu_env.sh; reboot_mode"; rc=$?
+python3 "$drive" m3.pty "Choice:" '3\n' "y = continue" 'y\n' "type yes to continue" 'yes\n' -- "export M=3; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [3] fastbootd: token = fastbootd BCB sha, written" bash -c "grep -q -- '--confirm-token=$FB' m3.pty && cmp -s <(head -c 2048 m3.misc) '$root/misc/misc-fastbootd.bin'"
-python3 "$drive" m5.pty "Choice:" '5\n' "erase userdata" 'yes\n' -- "export M=5; source $tmp/menu_env.sh; reboot_mode"; rc=$?
+python3 "$drive" m5.pty "Choice:" '5\n' "y = continue" 'y\n' "erase userdata" 'yes\n' -- "export M=5; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [5] wipe: token = misc-wipe.bin sha, written" bash -c "grep -q -- '--confirm-token=$WIPE' m5.pty && grep -q 'misc-verify: OK' m5.err"
 b=$(ls -1t mdump/misc-before-*.img | head -1); BS=$(sha256sum "$b" | awk '{print $1}')
-python3 "$drive" m6.pty "Choice:" '6\n' "Restore which" '\n' "type yes to write misc" 'yes\n' -- "export M=6; source $tmp/menu_env.sh; reboot_mode"; rc=$?
+python3 "$drive" m6.pty "Choice:" '6\n' "y = continue" 'y\n' "Restore which" '\n' "type yes to write misc" 'yes\n' -- "export M=6; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [6] restore: token = backup image sha, misc == backup" bash -c "grep -q -- '--confirm-token=$BS' m6.pty && cmp -s m6.misc '$b'"
 check "menu: no command line ever has --yes" bash -c "! grep -h '^+ ' m*.pty | grep -q -- '--yes'"
 check "menu: guarded_misc_session without a token refuses, spdhost not run" \

@@ -10,7 +10,7 @@ SRCS = src/main.c src/usb.c src/proto.c src/dumpcmd.c src/writecmd.c src/sha256.
 BIN = spdhost
 ARCH := $(shell uname -m)
 
-.PHONY: all clean cross-arm32
+.PHONY: all clean cross-arm32 cross-arm64 cross
 all: $(BIN)
 
 $(BIN): $(SRCS) src/usb.h src/proto.h src/dumpcmd.h src/writecmd.h src/sha256.h
@@ -20,7 +20,12 @@ $(BIN): $(SRCS) src/usb.h src/proto.h src/dumpcmd.h src/writecmd.h src/sha256.h
 clean:
 	rm -f $(BIN)
 
-# Static 32-bit ARM build of spdhost + spd_dump from a PC (no phone, no NDK).
-# See scripts/cross-arm32.sh for requirements. Output: dist/arm32/
+# Static ARM builds of spdhost + spd_dump from a PC (no phone, no NDK).
+# See scripts/cross-arm32.sh. arm64 is the same script with ARCH=arm64.
+# Output: dist/arm32/, dist/arm64/, and dist/spdhost-arm32-arm64-static-<sha>.zip
 cross-arm32:
 	scripts/cross-arm32.sh
+cross-arm64:
+	scripts/cross-arm64.sh
+cross:
+	scripts/cross-both.sh

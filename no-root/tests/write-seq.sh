@@ -258,9 +258,11 @@ check "write-parts then reboot-recovery writes the BCB (rc $rc)" \
 ba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c "source '$root/scripts/menu.sh'
 boot_after_menu >/dev/null <<'EOF'
 2
+y
 EOF
 boot_after_menu >/dev/null <<'EOF'
 3
+y
 EOF
 printf %s \"\$BOOT_AFTER\"")
 check "menu boot-after offers recovery and fastbootd" test "$ba" = reboot-fastboot

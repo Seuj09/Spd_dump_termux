@@ -1,0 +1,5 @@
+Drop partition images in this folder, then choose menu option 6.
+
+Name each file after the partition: boot.img, vbmeta.img, super.img.
+A .bin file is renamed to .img when you choose Flash.
+.txt files in here are not flashed.

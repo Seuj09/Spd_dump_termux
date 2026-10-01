@@ -17,7 +17,9 @@ EXEC_ADDR_DEFAULT=0x65015f08
 EXEC_ADDR_ALT=0x65015f48
 EXEC_ADDR=""
 # Images named <partition>.img (release menu "Pasang Partisi" / input/).
-INPUT_DIR="${SPDHOST_INPUT_DIR:-$PWD/input}"
+# Filled in after this file's path is known: beside fdl/ when the package
+# is unzipped, otherwise the directory the menu was started from.
+INPUT_DIR=""
 # Appended after flash, restore, repartition, set-slot, and dump.
 # reset and power-off match the release menu. reboot-recovery and
 # reboot-fastboot are the same 2048-byte BCB the reboot menu already sends;
@@ -28,6 +30,20 @@ BOOT_AFTER=reset
 # picks up an older spdhost-usb installed in $PREFIX/bin. PATH is last resort.
 # Always run the wrapper by absolute path so spdhost-usb can resolve ../spdhost via $0.
 script_dir=$(cd "$(dirname "$0")" && pwd)
+# Package root is the directory that contains fdl/ (parent of scripts/).
+# A menu copied into $PREFIX/bin has no fdl next to it, so images stay in
+# $PWD/input, which is created before the first prompt.
+if [[ -z ${SPDHOST_INPUT_DIR:-} ]]; then
+	if [[ -d $script_dir/../fdl ]]; then
+		INPUT_DIR=$(cd "$script_dir/.." && pwd)/input
+	elif [[ -d $script_dir/fdl ]]; then
+		INPUT_DIR=$script_dir/input
+	else
+		INPUT_DIR=$PWD/input
+	fi
+else
+	INPUT_DIR=$SPDHOST_INPUT_DIR
+fi
 RUNNER=()
 # Test hook: SPDHOST_MENU_RUNNER=/path/to/runner replaces spdhost-usb (tests/menu-dump.sh).
 if [[ -n ${SPDHOST_MENU_RUNNER:-} ]]; then
@@ -58,6 +74,10 @@ FDL1=""
 FDL1_ADDR=""
 FDL2=""
 FDL2_ADDR=""
+# Empty until option 3 picks a shipped model. ums9230 addresses stay the
+# defaults above so an existing Infinix config keeps working.
+SOC=""
+DEVICE=""
 
 pause() {
 	# Explicit return 0: this is a UI delay, not a readiness signal. Without
@@ -86,6 +106,8 @@ FDL1_ADDR=$FDL1_ADDR
 FDL2=$FDL2
 FDL2_ADDR=$FDL2_ADDR
 EXEC_ADDR=$EXEC_ADDR
+SOC=$SOC
+DEVICE=$DEVICE
 EOF
 }
 
@@ -103,8 +125,61 @@ load_config() {
 			EXEC_ADDR)
 				[[ $val =~ ^(0[xX][0-9a-fA-F]+|0|off)$ ]] && EXEC_ADDR=$val
 				;;
+			SOC)
+				[[ $val =~ ^(ums9230|ums512|sc9863a)$ ]] && SOC=$val
+				;;
+			DEVICE)
+				[[ $val =~ ^[A-Za-z0-9._/+-]+$ ]] && DEVICE=$val
+				;;
 		esac
 	done < "$CONFIG"
+	# Hex mode's second address depends on the chip. File paths stay as saved.
+	if [[ -n $SOC ]]; then
+		soc_profile "$SOC" || true
+	fi
+}
+
+# Release menu addresses. Primary exec stub, then the hex-mode alternate.
+# These are the normal download loaders, not the unlock files.
+soc_profile() {
+	local soc=$1
+	case $soc in
+		ums9230)
+			SOC_FDL1_ADDR=0x65000800
+			SOC_FDL2_ADDR=0x9efffe00
+			EXEC_ADDR_DEFAULT=0x65015f08
+			EXEC_ADDR_ALT=0x65015f48
+			;;
+		ums512)
+			SOC_FDL1_ADDR=0x5500
+			SOC_FDL2_ADDR=0x9efffe00
+			EXEC_ADDR_DEFAULT=0x3ee8
+			EXEC_ADDR_ALT=0x3f48
+			;;
+		sc9863a)
+			SOC_FDL1_ADDR=0x5000
+			SOC_FDL2_ADDR=0x9efffe00
+			EXEC_ADDR_DEFAULT=0x4ee8
+			EXEC_ADDR_ALT=0x4f48
+			;;
+		*) return 1 ;;
+	esac
+}
+
+soc_brands() {
+	case $1 in
+		ums9230) printf '%s\n' infinix itel realme tecno ;;
+		sc9863a) printf '%s\n' itel realme ;;
+		ums512) printf '%s\n' infinix realme ;;
+		*) return 1 ;;
+	esac
+}
+
+pkg_fdl_root() {
+	local d
+	d=$(cd "$(dirname "${BASH_SOURCE[0]}")/../fdl" 2>/dev/null && pwd) || return 1
+	[[ -d $d ]] || return 1
+	printf '%s\n' "$d"
 }
 
 # Release layout is ums9230/infinix/{fdl1-dl.bin,fdl2-dl.bin}.
@@ -217,7 +292,7 @@ ask_file() {
 	done
 }
 
-configure_loaders() {
+configure_loaders_manual() {
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
 	FDL1=$(ask_file "FDL1 file:")
@@ -226,6 +301,151 @@ configure_loaders() {
 	FDL2_ADDR=$(ask_addr "FDL2 address:")
 	save_config
 	echo "Saved $CONFIG"
+}
+
+# Shipped fdl1-dl.bin + fdl2-dl.bin for one release-menu model.
+# Prints two lines: fdl1 path, fdl2 path. Model is empty for the brand pair,
+# or a subdirectory name under alternatif/ (the release spelling "alternativ"
+# is accepted too).
+shipped_fdl_pair() {
+	local root=$1 soc=$2 brand=$3 model=$4 dir
+	if [[ -n $model ]]; then
+		for dir in "$root/$soc/$brand/alternatif/$model" "$root/$soc/$brand/alternativ/$model"; do
+			if [[ -f $dir/fdl1-dl.bin && -f $dir/fdl2-dl.bin ]]; then
+				printf '%s\n%s\n' "$dir/fdl1-dl.bin" "$dir/fdl2-dl.bin"
+				return 0
+			fi
+		done
+		return 1
+	fi
+	dir=$root/$soc/$brand
+	[[ -f $dir/fdl1-dl.bin && -f $dir/fdl2-dl.bin ]] || return 1
+	printf '%s\n%s\n' "$dir/fdl1-dl.bin" "$dir/fdl2-dl.bin"
+}
+
+# Names of alternatif/ model folders that contain both loaders.
+shipped_alt_models() {
+	local root=$1 soc=$2 brand=$3 d base
+	local -a found=()
+	shopt -s nullglob
+	for d in "$root/$soc/$brand/alternatif"/*/ "$root/$soc/$brand/alternativ"/*/; do
+		[[ -f ${d}fdl1-dl.bin && -f ${d}fdl2-dl.bin ]] || continue
+		base=$(basename "$d")
+		found+=("$base")
+	done
+	shopt -u nullglob
+	((${#found[@]})) || return 1
+	printf '%s\n' "${found[@]}"
+}
+
+select_shipped_model() {
+	local root soc brand model choice n i label
+	local -a brands=() alts=() pair=()
+	root=$(pkg_fdl_root) || { echo "No fdl/ directory next to this menu."; return 1; }
+	echo "Pick the chip. Addresses match the release menu."
+	echo "[1] ums9230   FDL1 0x65000800"
+	echo "[2] sc9863a   FDL1 0x5000"
+	echo "[3] ums512    FDL1 0x5500"
+	echo "[0] Back"
+	read -r -p "Choice: " choice
+	case $choice in
+		0) echo "Back to the menu."; return 0 ;;
+		1) soc=ums9230 ;;
+		2) soc=sc9863a ;;
+		3) soc=ums512 ;;
+		*) echo "Unchanged."; return 1 ;;
+	esac
+	continue_choice "$soc loaders" || return
+	mapfile -t brands < <(soc_brands "$soc")
+	echo "Pick the brand. Uses that brand's fdl1-dl.bin and fdl2-dl.bin."
+	n=1
+	for brand in "${brands[@]}"; do
+		echo "[$n] $brand"
+		n=$((n + 1))
+	done
+	echo "[0] Back"
+	read -r -p "Choice: " choice
+	case $choice in
+		0) echo "Back to the menu."; return 0 ;;
+		''|*[!0-9]*) echo "Unchanged."; return 1 ;;
+	esac
+	i=$((choice - 1))
+	if (( i < 0 || i >= ${#brands[@]} )); then
+		echo "Unchanged."
+		return 1
+	fi
+	brand=${brands[$i]}
+	continue_choice "$soc $brand" || return
+	model=""
+	mapfile -t alts < <(shipped_alt_models "$root" "$soc" "$brand" || true)
+	if ((${#alts[@]})); then
+		echo "Pick the loader pair."
+		echo "[1] $brand (main pair)"
+		n=2
+		for label in "${alts[@]}"; do
+			echo "[$n] $label"
+			n=$((n + 1))
+		done
+		echo "[0] Back"
+		read -r -p "Choice: " choice
+		case $choice in
+			0) echo "Back to the menu."; return 0 ;;
+			1) model="" ;;
+			''|*[!0-9]*) echo "Unchanged."; return 1 ;;
+			*)
+				i=$((choice - 2))
+				if (( i < 0 || i >= ${#alts[@]} )); then
+					echo "Unchanged."
+					return 1
+				fi
+				model=${alts[$i]}
+				;;
+		esac
+		continue_choice "$soc $brand ${model:-main}" || return
+	fi
+	mapfile -t pair < <(shipped_fdl_pair "$root" "$soc" "$brand" "$model") || {
+		echo "That pair is not in fdl/."
+		return 1
+	}
+	soc_profile "$soc" || return 1
+	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
+	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
+	echo "  exec stub $EXEC_ADDR_DEFAULT"
+	echo "A wrong chip or address can brick the phone."
+	if ! confirm_action "type yes to use these loaders: "; then
+		return 1
+	fi
+	SOC=$soc
+	if [[ -n $model ]]; then
+		DEVICE=$brand/$model
+	else
+		DEVICE=$brand
+	fi
+	FDL1=${pair[0]}
+	FDL2=${pair[1]}
+	FDL1_ADDR=$SOC_FDL1_ADDR
+	FDL2_ADDR=$SOC_FDL2_ADDR
+	EXEC_ADDR=$EXEC_ADDR_DEFAULT
+	save_config
+	echo "Saved $SOC $DEVICE to $CONFIG"
+}
+
+configure_loaders() {
+	local choice
+	echo "Loader files for this chip. The shipped set is the release menu's"
+	echo "fdl1-dl.bin and fdl2-dl.bin for each model. A wrong address can brick the phone."
+	echo "[1] Pick a shipped model"
+	echo "[2] Type your own loader paths"
+	echo "[0] Back"
+	read -r -p "Choice: " choice
+	case $choice in
+		0) echo "Back to the menu."; return 0 ;;
+		1) continue_choice "a shipped model" || return
+			select_shipped_model ;;
+		2) continue_choice "typed loader paths" || return
+			configure_loaders_manual ;;
+		*) echo "Unchanged." ;;
+	esac
 }
 
 need_loaders() {
@@ -278,7 +498,11 @@ exec_stub_present() {
 	hex=$(printf '%x' "$((ea))" 2>/dev/null) || return 1
 	name="custom_exec_no_verify_${hex}.bin"
 	places+=(
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/${SOC:-ums9230}/$name"
 		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/ums9230/$name"
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/ums512/$name"
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/sc9863a/$name"
+		"$PWD/fdl/${SOC:-ums9230}/$name"
 		"$PWD/fdl/ums9230/$name"
 		"$PWD/$name"
 		"$HOME/spdhost/fdl/ums9230/$name"
@@ -989,6 +1213,24 @@ confirm_reboot_cmd() {
 	menu_typed_yes "type yes to continue: " "$digest"
 }
 
+# Navigation only. y/yes runs the option that was just picked. Enter, n, or
+# anything else returns to the menu. This does not replace confirm_action
+# or confirm_dangerous: those still require the full word before any write.
+continue_choice() {
+	local what=$1 reply
+	echo "Picked: $what"
+	if ! read -r -p "y = continue, n = back to the menu [n]: " reply; then
+		echo "Back to the menu."
+		return 1
+	fi
+	while [[ $reply == *[$' \t\r\n'] ]]; do reply=${reply%?}; done
+	case ${reply,,} in
+		y|yes) return 0 ;;
+	esac
+	echo "Back to the menu."
+	return 1
+}
+
 # Typed yes for actions that do not write misc (system reboot, power off).
 confirm_action() {
 	local prompt=$1 reply
@@ -1297,7 +1539,21 @@ reboot_mode() {
 	echo "[5] wipe userdata (via recovery BCB; destructive)"
 	echo "[6] restore misc from a backup (backup/misc-before-*.img)"
 	echo "misc writes ([2],[3],[5],[6]) back up misc first and verify it after."
+	echo "[0] Back"
 	read -r -p "Choice: " choice
+	case $choice in
+		0) echo "Back to the menu."; pause; return ;;
+		1|2|3|4|5|6) ;;
+		*) echo "Unchanged."; pause; return ;;
+	esac
+	case $choice in
+		1) continue_choice "reboot to system" || { pause; return; } ;;
+		2) continue_choice "reboot to recovery" || { pause; return; } ;;
+		3) continue_choice "reboot to fastbootd" || { pause; return; } ;;
+		4) continue_choice "power off" || { pause; return; } ;;
+		5) continue_choice "wipe userdata" || { pause; return; } ;;
+		6) continue_choice "restore misc from a backup" || { pause; return; } ;;
+	esac
 	case $choice in
 		1)
 			echo "Normal reset after the loaders."
@@ -1353,9 +1609,6 @@ reboot_mode() {
 		6)
 			restore_misc_menu
 			;;
-		*)
-			echo "Unchanged."
-			;;
 	esac
 	pause
 }
@@ -1398,6 +1651,7 @@ flash_input_menu() {
 	shopt -u nullglob
 	if (( ${#names[@]} == 0 )); then
 		echo "No partition images in $INPUT_DIR."
+		echo "That folder is there now. Copy images into it, then choose this again."
 		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
 		return 1
 	fi
@@ -1478,12 +1732,15 @@ set_slot_menu() {
 	echo "and then rewrites the whole misc partition (backup + read-back)."
 	echo "[1] slot a"
 	echo "[2] slot b"
+	echo "[0] Back"
 	read -r -p "Choice: " which
 	case $which in
+		0) echo "Back to the menu."; return 0 ;;
 		1) which=a ;;
 		2) which=b ;;
 		*) echo "Unchanged."; return 1 ;;
 	esac
+	continue_choice "set the active slot to $which" || return
 	if ! confirm_action "type yes to set the active slot to $which: "; then
 		return 1
 	fi
@@ -1504,14 +1761,19 @@ boot_after_menu() {
 	echo "[2] recovery"
 	echo "[3] fastbootd"
 	echo "[4] power off"
+	echo "[0] Back"
 	read -r -p "Choice: " choice
+	local next
 	case $choice in
-		1) BOOT_AFTER=reset ;;
-		2) BOOT_AFTER=reboot-recovery ;;
-		3) BOOT_AFTER=reboot-fastboot ;;
-		4) BOOT_AFTER=power-off ;;
+		0) echo "Back to the menu."; return ;;
+		1) next=reset ;;
+		2) next=reboot-recovery ;;
+		3) next=reboot-fastboot ;;
+		4) next=power-off ;;
 		*) echo "Unchanged ($BOOT_AFTER)."; return ;;
 	esac
+	continue_choice "after flash/restore: $next" || return
+	BOOT_AFTER=$next
 	echo "After flash/restore/dump: $BOOT_AFTER."
 }
 
@@ -1519,9 +1781,8 @@ hex_mode_menu() {
 	local cur alt
 	cur=$(exec_addr_value || true)
 	echo "exec_addr now: ${cur:-disabled}."
-	echo "ums9230 primary stub is 0x65015f08 (shipped)."
-	echo "The release menu's second address is $EXEC_ADDR_ALT."
-	echo "This package does not include custom_exec_no_verify_65015f48.bin."
+	echo "Chip ${SOC:-ums9230}: primary stub $EXEC_ADDR_DEFAULT, second $EXEC_ADDR_ALT."
+	echo "The second file is custom_exec_no_verify_$(printf '%x' "$((EXEC_ADDR_ALT))").bin."
 	if exec_stub_present "$EXEC_ADDR_ALT"; then
 		alt=$EXEC_ADDR_ALT
 		if [[ ${cur,,} == "${alt,,}" ]]; then
@@ -1720,12 +1981,15 @@ verity_menu() {
 	echo "A partition over 64MB is refused and nothing is written."
 	echo "[1] disable (verity 0)"
 	echo "[2] enable (verity 1)"
+	echo "[0] Back"
 	read -r -p "Choice: " which
 	case $which in
+		0) echo "Back to the menu."; return 0 ;;
 		1) which=0 ;;
 		2) which=1 ;;
 		*) echo "Unchanged. Nothing sent."; return 1 ;;
 	esac
+	continue_choice "verity $which" || return
 	if ! confirm_dangerous "type dangerous to run verity $which: "; then
 		return 1
 	fi
@@ -1771,7 +2035,22 @@ extra_menu() {
 	echo "[8] DANGEROUS: unlock bootloader (erases splloader until the last step)"
 	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
 	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
+	echo "[0] Back"
 	read -r -p "Choice: " choice
+	case $choice in
+		0) echo "Back to the menu."; return ;;
+		1) continue_choice "factory reset" || return ;;
+		2) continue_choice "set the active slot" || return ;;
+		3) continue_choice "power off" || return ;;
+		4) continue_choice "verity" || return ;;
+		5) continue_choice "FRP reset" || return ;;
+		6) continue_choice "reboot to recovery" || return ;;
+		7) continue_choice "reboot to fastbootd" || return ;;
+		8) continue_choice "unlock the bootloader" || return ;;
+		9) continue_choice "hex mode" || return ;;
+		10) continue_choice "boot mode after flash / restore" || return ;;
+		*) echo "Unchanged."; return ;;
+	esac
 	case $choice in
 		1)
 			echo "Factory reset is reboot menu [5]: shipped misc-wipe.bin, no persist erase."
@@ -1799,7 +2078,6 @@ extra_menu() {
 		8) unlock_bootloader_menu ;;
 		9) hex_mode_menu ;;
 		10) boot_after_menu ;;
-		*) echo "Unchanged." ;;
 	esac
 }
 
@@ -1810,6 +2088,7 @@ fi
 
 load_config
 apply_ums9230_infinix_defaults
+mkdir -p "$INPUT_DIR" || echo "Could not create $INPUT_DIR" >&2
 
 while true; do
 	cls
@@ -1823,26 +2102,37 @@ while true; do
 	echo
 	echo "[1] Dump a partition (list + closest match + size, or imei)"
 	echo "[2] Reboot into a mode"
-	echo "[3] Change loader files (ums9230 Infinix is the shipped pair)"
+	echo "[3] Change loader files (shipped models, or your own paths)"
 	echo "[4] List partitions only"
 	echo "[5] Smoke test (safe checks, no writes)"
-	echo "[6] Flash images from input/"
+	echo "[6] Flash images from $INPUT_DIR"
 	echo "[7] Restore a backup folder"
 	echo "[8] Repartition from XML"
 	echo "[9] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)"
 	echo "[0] Quit"
+	echo "After a number: y continues, n goes back."
 	read -r -p "Choice: " choice
 	case ${choice:-} in
-		1) dump_partition ;;
-		2) reboot_mode ;;
-		3) configure_loaders; pause ;;
-		4) list_partitions_menu ;;
-		5) smoke_test ;;
-		6) flash_input_menu; pause ;;
-		7) restore_backup_menu; pause ;;
-		8) repartition_menu; pause ;;
-		9) extra_menu; pause ;;
-		0) exit 0 ;;
+		1) continue_choice "dump a partition" || { pause; continue; }
+			dump_partition ;;
+		2) continue_choice "reboot into a mode" || { pause; continue; }
+			reboot_mode ;;
+		3) continue_choice "change loader files" || { pause; continue; }
+			configure_loaders; pause ;;
+		4) continue_choice "list partitions" || { pause; continue; }
+			list_partitions_menu ;;
+		5) continue_choice "smoke test" || { pause; continue; }
+			smoke_test ;;
+		6) continue_choice "flash images" || { pause; continue; }
+			flash_input_menu; pause ;;
+		7) continue_choice "restore a backup" || { pause; continue; }
+			restore_backup_menu; pause ;;
+		8) continue_choice "repartition" || { pause; continue; }
+			repartition_menu; pause ;;
+		9) continue_choice "extra menu" || { pause; continue; }
+			extra_menu; pause ;;
+		0) continue_choice "quit" && exit 0
+			pause ;;
 		*) echo "Not a choice."; pause ;;
 	esac
 done

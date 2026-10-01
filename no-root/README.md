@@ -161,24 +161,33 @@ built on a 64-bit phone, or on a PC, will not start on a 32-bit phone.
 Build it again on the host phone. The release zip's `spd_dump` is arm64
 only. This tree replaces that for a 32-bit host.
 
-### Cross-compiling for a 32-bit phone (optional)
+### Cross-compiling for a phone (optional)
 
-To build 32-bit ARM binaries on a PC instead of on the phone:
+To build static ARM binaries on a PC instead of on the phone:
 
 ```sh
 pip install ziglang            # C compiler with bundled musl, no Android NDK
 sudo apt install git make autoconf automake libtool qemu-user
-make cross-arm32               # or scripts/cross-arm32.sh
+make cross-arm32               # armv7l / armv8l Termux
+make cross-arm64               # aarch64 Termux
+make cross                     # both, plus one zip with both trees
 ```
 
-Output goes to `dist/arm32/`: static `spdhost` and `spd_dump` (ARMv7-A,
-Thumb-2, VFPv3-D16, no NEON, no libc or libusb needed on the phone), a
-ready-to-unzip `spdhost-arm32-static-<sha>.zip` with scripts and FDLs, and
-`SHA256SUMS`. The script builds libusb 1.0.27 statically with `-D__ANDROID__`;
-that define is required, otherwise `libusb_init` cannot find usbfs on a phone
+`make cross-arm32` writes `dist/arm32/`: static `spdhost` and `spd_dump`
+(ARMv7-A, Thumb-2, VFPv3-D16 with NEON, no libc or libusb needed on the
+phone) and `spdhost-arm32-static-<sha>.zip`. `make cross-arm64` writes the
+same layout under `dist/arm64/` as `spdhost-arm64-static-<sha>.zip`
+(aarch64 musl). `make cross` also writes
+`dist/spdhost-arm32-arm64-static-<sha>.zip`, with `spdhost-arm32/` and
+`spdhost-arm64/` inside it. Unzip the tree that matches `uname -m`. An
+arm64 file will not start on an arm32 phone.
+
+The script builds libusb 1.0.27 statically with `-D__ANDROID__`; that
+define is required, otherwise `libusb_init` cannot find usbfs on a phone
 and fails with `LIBUSB_ERROR_OTHER`. The build machine only runs emulated
-smoke tests (`--self-test`, argument and descriptor error paths); nothing here
-opens a USB device. Test the result on the phone before publishing it.
+smoke tests (`--self-test`, argument and descriptor error paths) when
+`qemu-arm` or `qemu-aarch64` is installed; nothing here opens a USB
+device. Test the result on the phone before publishing it.
 
 `./spdhost --self-test` prints `self-test ok` when the compile and the
 framing check worked. That check does not open USB and does not need a phone.
@@ -384,7 +393,10 @@ reset (see misc section). Writes, erases, repartition, and reboot ask you to
 type `yes`. `--yes` skips that prompt. Do not put `--yes` in front of the
 device path. Options go before the commands:
 
-The menu (`scripts/menu.sh`) can flash `input/*.img`, restore a backup
+The menu (`scripts/menu.sh`) flashes images from `input/` beside `fdl/`
+in the unzipped package (or `$PWD/input` if the menu was copied somewhere
+that has no `fdl/` next to it). The folder is created when the menu starts.
+Name each file after the partition (`boot.img`, `vbmeta.img`). It can also restore a backup
 folder, repartition, set the slot, and dump the imei set (`miscdata`,
 `prodnv`, `l_fixnv1`, `l_fixnv2`, `l_runtimenv1`, `l_runtimenv2`). Extra menu items
 for verity, FRP reset, and bootloader unlock are labeled DANGEROUS and ask
@@ -393,11 +405,13 @@ nothing until it can see `fdl2-cboot.bin` and either `spl-unlock.bin` or
 `gen_spl-unlock`. It looks in the current directory, in
 `ums9230/infinix/` (where the release package keeps `fdl2-cboot.bin` next
 to `fdl1-dl.bin`), and beside that package's `menu.sh` (where
-`gen_spl-unlock` lives). Those files are not in this tree. Only the
-ums9230 Infinix loader pair is
-shipped. The release
-menu's second exec address `0x65015f48` is used only when
-`custom_exec_no_verify_65015f48.bin` is actually on disk.
+`gen_spl-unlock` lives). Those unlock files are not in this tree. The
+normal `fdl1-dl.bin` and `fdl2-dl.bin` pairs from the release menu are
+shipped for ums9230 (Infinix, Itel, Realme, Tecno, plus the alternatif
+models), ums512 (Infinix, Realme), and sc9863a (Itel, Realme). Menu option
+3 selects one and sets that chip's FDL and exec addresses. Each chip's
+primary exec stub and the hex-mode alternate are shipped with it, including
+ums9230 `custom_exec_no_verify_65015f48.bin`.
 
 ```sh
 spdhost-usb --yes fdl fdl1.bin FDL1_ADDR fdl fdl2.bin FDL2_ADDR \
