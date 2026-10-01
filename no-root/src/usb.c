@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "usb.h"
+#include "usb_list.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -538,19 +539,8 @@ static int list_one_device(char *out, size_t cap, const char *prefer)
 	p = popen("termux-usb -l 2>/dev/null", "r");
 	if (!p)
 		return -1;
-	while (fgets(line, sizeof(line), p)) {
-		char *path = strstr(line, "/dev/bus/usb/");
-		char *end;
-		if (!path)
-			continue;
-		end = path;
-		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
-			end++;
-		*end = 0;
-		if (count < 8)
-			snprintf(paths[count], sizeof(paths[count]), "%s", path);
-		count++;
-	}
+	while (fgets(line, sizeof(line), p))
+		count = spd_usb_collect_bus_paths(line, paths, 8, count);
 	pclose(p);
 	if (count == 1) {
 		snprintf(out, cap, "%s", paths[0]);
@@ -576,16 +566,15 @@ static void print_bus_paths(void)
 	if (!p)
 		return;
 	while (fgets(line, sizeof(line), p)) {
-		char *path = strstr(line, "/dev/bus/usb/");
-		char *end;
-		if (!path)
-			continue;
-		end = path;
-		while (*end && *end != '"' && *end != ' ' && *end != '\n' && *end != '\r')
-			end++;
-		*end = 0;
-		fprintf(stderr, "  %s\n", path);
-		n++;
+		char found[8][SPD_USB_PATH_CAP];
+		int c = spd_usb_collect_bus_paths(line, found, 8, 0);
+		int i;
+		for (i = 0; i < c && i < 8; i++) {
+			fprintf(stderr, "  %s\n", found[i]);
+			n++;
+		}
+		if (c > 8)
+			n += c - 8;
 	}
 	pclose(p);
 	if (!n)

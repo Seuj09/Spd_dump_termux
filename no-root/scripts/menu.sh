@@ -4,7 +4,9 @@
 set -u
 
 CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
-DUMP_DIR="${SPDHOST_DUMP_DIR:-$PWD/backup}"
+# Filled in once this file's path is known. SPDHOST_DUMP_DIR wins, then a
+# DUMP_DIR already set by the caller (tests), then backup/ beside fdl/.
+DUMP_DIR="${SPDHOST_DUMP_DIR:-${DUMP_DIR:-}}"
 FDL1_ADDR_DEFAULT=0x65000800
 FDL2_ADDR_DEFAULT=0x9efffe00
 # BootROM exec_addr (spd_dump's no-verify stub path; see TERMUX.md). With it,
@@ -43,6 +45,15 @@ if [[ -z ${SPDHOST_INPUT_DIR:-} ]]; then
 	fi
 else
 	INPUT_DIR=$SPDHOST_INPUT_DIR
+fi
+if [[ -z $DUMP_DIR ]]; then
+	if [[ -d $script_dir/../fdl ]]; then
+		DUMP_DIR=$(cd "$script_dir/.." && pwd)/backup
+	elif [[ -d $script_dir/fdl ]]; then
+		DUMP_DIR=$script_dir/backup
+	else
+		DUMP_DIR=$PWD/backup
+	fi
 fi
 RUNNER=()
 # Test hook: SPDHOST_MENU_RUNNER=/path/to/runner replaces spdhost-usb (tests/menu-dump.sh).
@@ -293,14 +304,27 @@ ask_file() {
 }
 
 configure_loaders_manual() {
+	local choice ea
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
 	FDL1=$(ask_file "FDL1 file:")
 	FDL1_ADDR=$(ask_addr "FDL1 address:")
 	FDL2=$(ask_file "FDL2 file:")
 	FDL2_ADDR=$(ask_addr "FDL2 address:")
+	echo "Which chip are these loaders for? This picks the exec stub."
+	echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
+	echo "[1] ums9230   [2] sc9863a   [3] ums512   [Enter] keep ${EXEC_ADDR:-$EXEC_ADDR_DEFAULT}"
+	read -r -p "Choice: " choice
+	case $choice in
+		1) soc_profile ums9230 && SOC=ums9230 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		2) soc_profile sc9863a && SOC=sc9863a && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		3) soc_profile ums512 && SOC=ums512 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		'') ;;
+		*) echo "Unchanged exec stub." ;;
+	esac
 	save_config
-	echo "Saved $CONFIG"
+	ea=$(exec_addr_value || true)
+	echo "Saved $CONFIG (exec ${ea:-disabled})"
 }
 
 # Shipped fdl1-dl.bin + fdl2-dl.bin for one release-menu model.
@@ -403,10 +427,11 @@ select_shipped_model() {
 		esac
 		continue_choice "$soc $brand ${model:-main}" || return
 	fi
-	mapfile -t pair < <(shipped_fdl_pair "$root" "$soc" "$brand" "$model") || {
+	mapfile -t pair < <(shipped_fdl_pair "$root" "$soc" "$brand" "$model" || true)
+	if ((${#pair[@]} != 2)); then
 		echo "That pair is not in fdl/."
 		return 1
-	}
+	fi
 	soc_profile "$soc" || return 1
 	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
 	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
@@ -779,6 +804,8 @@ show_parts_list() {
 	echo "Type a name (boot, boot.img, boot_a, splloader), or:"
 	echo "  all       — splloader + every partition except userdata, cache, blackbox"
 	echo "  all_lite  — same, and skip the inactive slot"
+	echo "  imei      — miscdata, prodnv, both fixnv, both runtimenv"
+	echo "Several names (boot vbmeta) are dumped in one session. all, all_lite, and imei are typed alone."
 }
 
 # One session: parts table (units) + 32 bytes at misc+0x800 for the slot.
@@ -988,24 +1015,65 @@ live_dump_target() {
 # Release menu "imei": miscdata, prodnv, both fixnv, both runtimenv.
 # nv1 names are read from the nv2 partition at offset 512 inside spdhost.
 dump_imei_session() {
-	local raw rc
+	dump_many_session miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2
+}
+
+# One session, one `dump NAME DIR` per name. The release backup line accepts
+# several names; all / all_lite / imei stay single-word and do not come here.
+dump_many_session() {
+	local raw rc name
+	local -a args=()
+	(($#)) || { echo "No partition names."; return 1; }
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
-	echo "One session: refresh the table, then dump miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2."
+	echo "One session: refresh the table, then dump $*."
 	ready || return 1
 	rm -f "$DUMP_DIR/dump-manifest.txt"
+	for name in "$@"; do
+		args+=(dump "$name" "$DUMP_DIR")
+	done
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$raw" \
-		dump miscdata "$DUMP_DIR" \
-		dump prodnv "$DUMP_DIR" \
-		dump l_fixnv1 "$DUMP_DIR" \
-		dump l_fixnv2 "$DUMP_DIR" \
-		dump l_runtimenv1 "$DUMP_DIR" \
-		dump l_runtimenv2 "$DUMP_DIR" \
-		"$BOOT_AFTER"
+		parts "$raw" "${args[@]}" "$BOOT_AFTER"
 	rc=$?
 	[[ -s $raw ]] && load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
 	verify_dump_manifest "$rc"
+}
+
+# One typed line: "boot", "boot vbmeta", "all", "all_lite", or "imei".
+dispatch_dump_query() {
+	local query=$1 parts_file=$2 w t
+	local -a words=() targets=()
+	read -ra words <<<"$query"
+	if ((${#words[@]} == 0)); then
+		echo "Cancelled."
+		return 1
+	fi
+	if ((${#words[@]} == 1)); then
+		case ${words[0],,} in
+			imei) dump_imei_session; return ;;
+			all|all_lite)
+				echo "Reading the live table, then dumping ${words[0],,}."
+				dump_live_session "${words[0],,}"
+				return
+				;;
+		esac
+		t=$(live_dump_target "${words[0]}" "$parts_file") || return 1
+		echo "Will dump '$t' using the live table."
+		dump_live_session "$t"
+		return
+	fi
+	for w in "${words[@]}"; do
+		case ${w,,} in
+			all|all_lite|imei)
+				echo "all, all_lite, and imei must be typed alone." >&2
+				return 1
+				;;
+		esac
+		t=$(live_dump_target "$w" "$parts_file") || return 1
+		targets+=("$t")
+	done
+	echo "Will dump: ${targets[*]}"
+	dump_many_session "${targets[@]}"
 }
 
 dump_partition() {
@@ -1032,7 +1100,7 @@ dump_partition() {
 			echo "(cached list below; sizes and slot are re-read from the device)"
 			show_parts_list "$parts_file"
 		else
-			echo "Type a partition name (boot, boot.img, boot_a, splloader), or all / all_lite."
+			echo "Type a name (boot, boot.img, boot_a, splloader), several names, or all / all_lite / imei."
 		fi
 		read -r -p "Partition name (or all / all_lite / imei): " query
 		if [[ -z ${query:-} ]]; then
@@ -1040,15 +1108,7 @@ dump_partition() {
 			pause
 			return
 		fi
-		if [[ ${query,,} == imei ]]; then
-			dump_imei_session
-			rc=$?
-			pause
-			return "$rc"
-		fi
-		target=$(live_dump_target "$query" "$parts_file") || { pause; return 1; }
-		echo "Will dump '$target' using the live table."
-		dump_live_session "$target"
+		dispatch_dump_query "$query" "$parts_file"
 		rc=$?
 		pause
 		return "$rc"
@@ -1066,31 +1126,23 @@ dump_partition() {
 		pause
 		return
 	fi
+	# One real partition name still shows the cached size. all / all_lite / imei
+	# and several names go straight to dispatch_dump_query.
 	case ${query,,} in
-		imei)
-			dump_imei_session
-			rc=$?
+		all|all_lite|imei) ;;
+		*' '*) ;;
+		*)
+		matched=$(resolve_part_query "$query" "$parts_file") || {
 			pause
-			return "$rc"
-			;;
-		all|all_lite)
-			echo "Reading the live table, then dumping ${query,,}."
-			dump_live_session "${query,,}"
-			rc=$?
-			pause
-			return "$rc"
-			;;
+			return 1
+		}
+		read -r name size <<<"$matched"
+		echo
+		echo "Cached match '$query' -> $name  size=$(fmt_size "$size") ($size bytes)"
+		echo "The dump re-reads the device. A name without _a/_b follows the live slot."
+		;;
 	esac
-	matched=$(resolve_part_query "$query" "$parts_file") || {
-		pause
-		return 1
-	}
-	read -r name size <<<"$matched"
-	echo
-	echo "Cached match '$query' -> $name  size=$(fmt_size "$size") ($size bytes)"
-	echo "The dump re-reads the device. A name without _a/_b follows the live slot."
-	target=$(live_dump_target "$query" "$parts_file") || { pause; return 1; }
-	dump_live_session "$target"
+	dispatch_dump_query "$query" "$parts_file"
 	rc=$?
 	pause
 	return "$rc"
@@ -1394,7 +1446,7 @@ smoke_test() {
 	echo "== Live device probe (read-only) =="
 	local devs=""
 	if command -v termux-usb >/dev/null 2>&1; then
-		devs=$( (command -v timeout >/dev/null 2>&1 && timeout 5 termux-usb -l || termux-usb -l) 2>/dev/null | tr -d '[]",' | awk '/\/dev\/bus\/usb\// {print $1}')
+		devs=$( (command -v timeout >/dev/null 2>&1 && timeout 5 termux-usb -l || termux-usb -l) 2>/dev/null | grep -oE '/dev/bus/usb/[0-9]+/[0-9]+' || true)
 	fi
 	if [[ -z $devs ]]; then
 		echo "No USB device currently listed by termux-usb -l."
@@ -1527,8 +1579,27 @@ restore_misc_menu() {
 	guarded_misc_session "restore misc" write-part misc "$f" reset
 }
 
+# Factory reset is the recovery wipe BCB only. It does not erase persist.
+# Shared by reboot menu [5] and extra [1]. Returns 1 without pausing.
+wipe_userdata_action() {
+	local misc
+	need_loaders || return 1
+	resolve_misc_dir || return 1
+	misc="$MISC_DIR/misc-wipe.bin"
+	if [[ ! -f $misc ]]; then
+		echo "missing $misc" >&2
+		return 1
+	fi
+	echo "Wipe userdata via shipped misc-wipe.bin + reset (BCB only; no persist erase)."
+	if ! confirm_wipe_userdata "$misc"; then
+		return 1
+	fi
+	# No --yes: token = sha256 of misc-wipe.bin, checked by spdhost.
+	guarded_misc_session wipe-userdata write-part misc "$misc" reset
+}
+
 reboot_mode() {
-	local choice misc
+	local choice
 	need_loaders || return
 	cls
 	echo "Reboot mode"
@@ -1591,20 +1662,7 @@ reboot_mode() {
 			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			;;
 		5)
-			resolve_misc_dir || { pause; return; }
-			misc="$MISC_DIR/misc-wipe.bin"
-			if [[ ! -f $misc ]]; then
-				echo "missing $misc" >&2
-				pause
-				return
-			fi
-			echo "Wipe userdata via shipped misc-wipe.bin + reset (BCB only; no persist erase)."
-			if ! confirm_wipe_userdata "$misc"; then
-				pause
-				return
-			fi
-			# No --yes: token = sha256 of misc-wipe.bin, checked by spdhost.
-			guarded_misc_session wipe-userdata write-part misc "$misc" reset
+			wipe_userdata_action || { pause; return; }
 			;;
 		6)
 			restore_misc_menu
@@ -1638,7 +1696,11 @@ flash_input_menu() {
 	mkdir -p "$INPUT_DIR"
 	shopt -s nullglob
 	for f in "$INPUT_DIR"/*.bin; do
-		mv -n "$f" "${f%.bin}.img"
+		if [[ -e ${f%.bin}.img ]]; then
+			echo "Left $(basename "$f"): $(basename "${f%.bin}.img") is already there."
+			continue
+		fi
+		mv -n "$f" "${f%.bin}.img" || echo "Could not rename $(basename "$f")" >&2
 	done
 	for f in "$INPUT_DIR"/*.img; do
 		base=$(basename "$f")
@@ -1680,14 +1742,36 @@ flash_input_menu() {
 		parts "$(parts_cache_path)" write-files "$INPUT_DIR" "$BOOT_AFTER"
 }
 
+# Names write-parts will look at: regular files in this directory that
+# part_image_candidate does not reject. Prints one name per line.
+restore_image_names() {
+	local dir=$1 f base
+	shopt -s nullglob
+	for f in "$dir"/*; do
+		[[ -f $f ]] || continue
+		base=$(basename "$f")
+		part_image_candidate "$base" || continue
+		printf '%s\n' "${base%.*}"
+	done
+	shopt -u nullglob
+}
+
 # Release menu option 4: write_parts of the backup folder.
 restore_backup_menu() {
+	local -a names=()
 	need_loaders || return
 	if [[ ! -d $DUMP_DIR ]]; then
 		echo "No backup directory $DUMP_DIR."
 		return 1
 	fi
-	echo "Restore images in $DUMP_DIR (partition-name.img), then $BOOT_AFTER."
+	mapfile -t names < <(restore_image_names "$DUMP_DIR")
+	if ((${#names[@]} == 0)); then
+		echo "No partition images in $DUMP_DIR."
+		echo "Dump first (menu [1]), or put partition-name.img files in that folder."
+		return 1
+	fi
+	echo "Restore these images from $DUMP_DIR, then $BOOT_AFTER:"
+	printf '  %s\n' "${names[@]}"
 	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, *_bak.img."
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "A broken l_fixnv1 image is skipped. An empty or oversized image aborts the restore before anything is sent."
@@ -1705,17 +1789,42 @@ restore_backup_menu() {
 		parts "$(parts_cache_path)" write-parts "$DUMP_DIR" "$BOOT_AFTER"
 }
 
+# Same shape spd_repartition_xml accepts: one <Partitions> list, each entry
+# a Partition tag with id="..." and size="...", file under 1 MiB, no NUL.
+repartition_xml_preview() {
+	local xml=$1 sz n
+	[[ -f $xml ]] || { echo "No such file."; return 1; }
+	sz=$(stat -c %s "$xml" 2>/dev/null || echo 0)
+	if (( sz <= 0 || sz > 1048576 )); then
+		echo "XML is empty or over 1 MiB ($sz bytes)."
+		return 1
+	fi
+	if [[ $(tr -cd '\0' < "$xml" | wc -c) -ne 0 ]]; then
+		echo "XML contains a zero byte."
+		return 1
+	fi
+	grep -q '<Partitions>' "$xml" && grep -q '</Partitions>' "$xml" || {
+		echo "XML needs one <Partitions>...</Partitions> list."
+		return 1
+	}
+	n=$(grep -E '<Partition[[:space:]>]' "$xml" | grep 'id="' | grep -c 'size="' || true)
+	if (( n < 1 )); then
+		echo "No <Partition id=\"...\" size=\"...\"> entries."
+		return 1
+	fi
+	echo "Repartition replaces the on-device partition map ($n entries). A wrong XML can brick the phone."
+	grep -E '<Partition[[:space:]>]' "$xml" | grep 'id="' | grep 'size="' || true
+}
+
 repartition_menu() {
 	local xml
 	need_loaders || return
 	read -r -p "Partition XML path: " xml
-	if [[ -z ${xml:-} || ! -f $xml ]]; then
-		echo "No such file."
+	if [[ -z ${xml:-} ]]; then
+		echo "Cancelled."
 		return 1
 	fi
-	echo "Repartition replaces the on-device partition map. A wrong XML can brick the phone."
-	echo "Entries:"
-	grep -E 'Partition id=' "$xml" || true
+	repartition_xml_preview "$xml" || return 1
 	if ! confirm_action "type yes to repartition from this XML: "; then
 		return 1
 	fi
@@ -2025,7 +2134,7 @@ frp_reset_menu() {
 extra_menu() {
 	local choice
 	echo "Extra"
-	echo "[1] Factory reset (recovery wipe BCB; already on reboot menu)"
+	echo "[1] Factory reset (recovery wipe BCB; does not erase persist)"
 	echo "[2] Set active slot (a/b)"
 	echo "[3] Power off"
 	echo "[4] DANGEROUS: verity (vbmeta byte 0x7B; type the word dangerous)"
@@ -2052,12 +2161,10 @@ extra_menu() {
 		*) echo "Unchanged."; return ;;
 	esac
 	case $choice in
-		1)
-			echo "Factory reset is reboot menu [5]: shipped misc-wipe.bin, no persist erase."
-			reboot_mode
-			;;
+		1) wipe_userdata_action ;;
 		2) set_slot_menu ;;
 		3)
+			need_loaders || return
 			if confirm_action "type yes to power off: "; then
 				ready || return
 				run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
@@ -2066,11 +2173,13 @@ extra_menu() {
 		4) verity_menu ;;
 		5) frp_reset_menu ;;
 		6)
+			need_loaders || return
 			if confirm_reboot_cmd reboot-recovery; then
 				guarded_misc_session reboot-recovery reboot-recovery
 			fi
 			;;
 		7)
+			need_loaders || return
 			if confirm_reboot_cmd reboot-fastboot; then
 				guarded_misc_session reboot-fastboot reboot-fastboot
 			fi
@@ -2089,6 +2198,7 @@ fi
 load_config
 apply_ums9230_infinix_defaults
 mkdir -p "$INPUT_DIR" || echo "Could not create $INPUT_DIR" >&2
+mkdir -p "$DUMP_DIR" || echo "Could not create $DUMP_DIR" >&2
 
 while true; do
 	cls
@@ -2100,7 +2210,7 @@ while true; do
 	echo "Flash input: $INPUT_DIR"
 	echo "After flash/restore: $BOOT_AFTER"
 	echo
-	echo "[1] Dump a partition (list + closest match + size, or imei)"
+	echo "[1] Dump partitions (one name, several names, all, all_lite, or imei)"
 	echo "[2] Reboot into a mode"
 	echo "[3] Change loader files (shipped models, or your own paths)"
 	echo "[4] List partitions only"

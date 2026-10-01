@@ -223,9 +223,11 @@ poll_devs() {
 	list_timeouts=0
 	devs=()
 	local line
+	# grep -o keeps every path, including two devices on one JSON line.
+	# Deleting commas would glue those into a single fake path.
 	while IFS= read -r line; do
 		[[ -n $line ]] && devs+=("$line")
-	done < <(printf '%s\n' "$out" | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }')
+	done < <(printf '%s\n' "$out" | grep -oE '/dev/bus/usb/[0-9]+/[0-9]+' || true)
 	return 0
 }
 
@@ -262,9 +264,9 @@ if [[ -z $dev ]]; then
 			exit 1
 		fi
 		new=()
-		for d in ${devs[@]+"${devs[@]}"}; do
+		for d in "${devs[@]}"; do
 			seen=0
-			for b in ${base[@]+"${base[@]}"}; do [[ $b == "$d" ]] && seen=1; done
+			for b in "${base[@]}"; do [[ $b == "$d" ]] && seen=1; done
 			(( seen )) || new+=("$d")
 		done
 		if (( ${#new[@]} == 1 )); then

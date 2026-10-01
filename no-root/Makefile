@@ -6,14 +6,14 @@ CFLAGS += -Werror=implicit-function-declaration
 CPPFLAGS += $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0)
 
-SRCS = src/main.c src/usb.c src/proto.c src/dumpcmd.c src/writecmd.c src/sha256.c
+SRCS = src/main.c src/usb.c src/usb_list.c src/proto.c src/dumpcmd.c src/writecmd.c src/sha256.c
 BIN = spdhost
 ARCH := $(shell uname -m)
 
 .PHONY: all clean cross-arm32 cross-arm64 cross
 all: $(BIN)
 
-$(BIN): $(SRCS) src/usb.h src/proto.h src/dumpcmd.h src/writecmd.h src/sha256.h
+$(BIN): $(SRCS) src/usb.h src/usb_list.h src/proto.h src/dumpcmd.h src/writecmd.h src/sha256.h
 	@echo "spdhost: compiling for $(ARCH)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRCS) $(LDLIBS)
 
