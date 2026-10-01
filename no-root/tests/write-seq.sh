@@ -12,7 +12,7 @@ make -C "$root/spd_dump" GITVER.h >/dev/null
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/sd" || exit 1
 gcc -O2 -w -std=c11 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" \
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/dumpcmd.c" \
 	"$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/infinix/fdl1-dl.bin" \
 	"$root/fdl/ums9230/infinix/fdl2-dl.bin" "$tmp/"
@@ -255,7 +255,10 @@ check "menu verity and FRP refuse without a TTY" menu_danger_notty
 sh after parts pt.txt write-parts imgs reboot-recovery; rc=$?
 check "write-parts then reboot-recovery writes the BCB (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_after.seq && grep -q 'writing 2048-byte BCB' sh_after.log && grep -q 'reboot-recovery' sh_after.log"
-ba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c "source '$root/scripts/menu.sh'
+# SPDHOST_MENU_CONFIG: boot_after_menu now persists the choice, and without
+# this it would write over the developer's real ~/.spdhost-menu.conf.
+ba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_MENU_CONFIG="$tmp/none.conf" \
+	bash -c "source '$root/scripts/menu.sh'
 boot_after_menu >/dev/null <<'EOF'
 2
 y
@@ -266,6 +269,88 @@ y
 EOF
 printf %s \"\$BOOT_AFTER\"")
 check "menu boot-after offers recovery and fastbootd" test "$ba" = reboot-fastboot
+check "menu boot-after is persisted to the config" bash -c \
+	"grep -qx 'BOOT_AFTER=reboot-fastboot' '$tmp/none.conf'"
+# A config with a bogus BOOT_AFTER must not be believed: the value reaches
+# run_session as a command argument, so load_config allowlists it.
+printf 'BOOT_AFTER=rm-rf\n' > "$tmp/bad.conf"
+badba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_MENU_CONFIG="$tmp/bad.conf" \
+	bash -c "source '$root/scripts/menu.sh'; printf %s \"\$BOOT_AFTER\"")
+check "menu ignores a BOOT_AFTER outside the allowlist" test "$badba" = reset
+
+# Extra [11]: chip-uid, the read-only spd_dump chip_uid the menu used to have no
+# entry for. One session, the exec stub in front of FDL1, and no --yes.
+menu_extra_chip_uid() {
+	cat > "$tmp/cu.sh" <<EOF
+source '$root/scripts/menu.sh'
+FDL1=$tmp/fdl1-dl.bin FDL1_ADDR=0x65000800 FDL2=$tmp/fdl2-dl.bin FDL2_ADDR=0x9efffe00
+cls() { :; }; pause() { :; }; ready() { :; }
+extra_menu <<'IN'
+11
+y
+IN
+EOF
+	SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_MENU_CONFIG="$tmp/none.conf" \
+		SPDHOST_EXEC_ADDR=0x65015f08 timeout 20 bash "$tmp/cu.sh" 2>&1
+}
+cu=$(menu_extra_chip_uid)
+# $cu goes in as an argument: `bash -c` gets a fresh shell and cannot see the
+# parent's variables, so a `\$cu` inside the string would expand to nothing
+# (and an empty subject makes the `! grep` check below pass for the wrong reason).
+check "menu Extra [11] sends one chip-uid session" \
+	bash -c "[ \$(grep -c '^+ ' <<<\"\$1\") = 1 ] && grep -Eq '^\+ .* chip-uid\$' <<<\"\$1\"" _ "$cu"
+check "menu Extra [11] sends no --yes for chip-uid" \
+	bash -c "! grep -q -- '--yes' <<<\"\$1\"" _ "$cu"
+
+# EOF must end a prompt loop, not restart it: read leaves its variable empty,
+# so the old ask_* loops treated a closed stdin as endless invalid answers.
+menu_askers_stop_on_eof() {
+	local out rc
+	out=$(timeout 10 env SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c \
+		"source '$root/scripts/menu.sh'
+ask_addr 'FDL1 address:' </dev/null; echo rc=\$?
+ask_file 'FDL1 file:' </dev/null; echo rc=\$?" 2>&1); rc=$?
+	[[ $rc = 0 ]] || return 1
+	[[ $(grep -c 'rc=1' <<<"$out") = 2 ]]
+}
+check "menu ask_addr/ask_file return on EOF instead of spinning" menu_askers_stop_on_eof
+
+# Declining the loader confirm must leave the live chip globals alone, or the
+# rejected chip's exec stub stays selected (and hex mode would persist it).
+menu_shipped_decline_keeps_stub() {
+	local got
+	got=$(timeout 30 env SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true \
+		SPDHOST_MENU_CONFIG="$tmp/none3.conf" bash -c "source '$root/scripts/menu.sh'
+printf 'before=%s\n' \"\$EXEC_ADDR_DEFAULT\"
+select_shipped_model >/dev/null 2>&1 <<'EOF'
+2
+y
+1
+y
+no
+EOF
+printf 'after=%s\n' \"\$EXEC_ADDR_DEFAULT\"")
+	grep -qx 'before=0x65015f08' <<<"$got" && grep -qx 'after=0x65015f08' <<<"$got"
+}
+check "menu keeps the old exec stub when the loader confirm is declined" menu_shipped_decline_keeps_stub
+
+# The main loop used to treat EOF as "Not a choice." and re-prompt forever.
+menu_eof_quits() {
+	local out rc
+	out=$(cd "$root" && timeout 30 env SPDHOST_MENU_LIB= SPDHOST_MENU_CONFIG="$tmp/none4.conf" \
+		SPDHOST_DUMP_DIR="$tmp/eof-dump" SPDHOST_INPUT_DIR="$tmp/eof-input" \
+		bash scripts/menu.sh </dev/null 2>&1); rc=$?
+	[[ $rc = 0 ]] && grep -q 'Input closed' <<<"$out"
+}
+check "menu quits on EOF at the main prompt (no spin)" menu_eof_quits
+
+# smoke_test used a hardcoded /tmp (absent on Termux): the redirect failed, the
+# grep failed on the missing file, and it reported PASS having read nothing.
+check "menu resolves a Termux-safe temp dir for the smoke probe" bash -c \
+	"SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c \"source '$root/scripts/menu.sh'
+grep -q 'spd_tmpdir' \\\"\\\$(declare -f smoke_test)\\\"
+d=\\\$(TMPDIR='$tmp' spd_tmpdir) && [ \\\"\\\$d\\\" = '$tmp' ]
+u=\\\$(TMPDIR=/nonexistent-xyz PREFIX= spd_tmpdir) && [ \\\"\\\$u\\\" = /tmp ]\""
 check "menu flash/restore/repartition functions exist" bash -c "SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source \"$root/scripts/menu.sh\"; type flash_input_menu restore_backup_menu repartition_menu set_slot_menu extra_menu dump_imei_session verity_menu frp_reset_menu unlock_bootloader_menu'"
 # Files present, no TTY: still nothing. Files present on a pty: sessions run, erase only after the dump, and the menu does not pass --dangerous.
 check "menu unlock on a pty dumps before erase and does not pass --dangerous" python3 - "$root" "$tmp" << 'PY'

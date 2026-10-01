@@ -314,7 +314,50 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 	}
 }
 
-/* dump TARGET OUTDIR, where TARGET is all, all_lite, or a partition name.
+/* spd_dump r preset_modem: every l_* and nr_* row, plus the misc slot block
+ * when the device is A/B (selected_ab > 0). The modem/NV preset. */
+static int preset_modem_want(const char *n)
+{
+	return !strncmp(n, "l_", 2) || !strncmp(n, "nr_", 3);
+}
+
+/* spd_dump r preset_resign: the re-sign set, index 7 down to 0, missing rows
+ * skipped. splloader is not a table row on every chip: it is a fixed offset. */
+static const char *const preset_resign[] = {
+	"vbmeta", "splloader", "uboot", "sml", "trustos", "teecfg", "boot", "recovery"
+};
+#define PRESET_RESIGN_N ((int)(sizeof(preset_resign) / sizeof(preset_resign[0])))
+
+/* Resolve NAME the way spd_dump get_partition_info does: exact, then NAME_a /
+ * NAME_b for the live slot (so `boot` finds `boot_a` on a slot-a phone). OUT
+ * (>= 40 bytes) gets the canonical table name, *SIZE the byte size.
+ * 0 = found, -1 = not in the table, -2 = no table yet.
+ * The slot is read from misc once per connection and cached: a script calling
+ * this in a loop should not pay a misc read per call. */
+int spd_resolve_part(struct spd *io, const char *name, char *out, size_t cap, uint64_t *size)
+{
+	static struct spd *slot_io;
+	static int slot;
+	if (slot_io != io) {
+		slot_io = io;
+		slot = spd_active_slot(io);
+	}
+	return spd_lookup_part(io, name, slot, out, cap, size);
+}
+
+/* check-part NAME: size in bytes, 0 when the name is not in the live table.
+ * A size-0 row reads as absent, like spd_dump check_part. */
+uint64_t spd_check_part(struct spd *io, const char *name)
+{
+	char out[40];
+	uint64_t size = 0;
+	if (spd_resolve_part(io, name, out, sizeof(out), &size) != 0)
+		return 0;
+	return size;
+}
+
+/* dump TARGET OUTDIR, where TARGET is all, all_lite, preset_modem,
+ * preset_resign, or a partition name.
  * Sizes come from the live table (bytes). all/all_lite also dump splloader
  * (256 KiB) like spd_dump r all. Keeps going on a failed read; returns nonzero
  * if any read failed. Slot is read from misc for name resolution and all_lite.
@@ -359,6 +402,38 @@ int spd_dump(struct spd *io, const char *target, const char *outdir)
 				continue;
 			}
 			dump_one(io, io->ptab[i].name, io->ptab[i].size, outdir, failed, sizeof(failed), &nfail);
+		}
+	} else if (!strcmp(target, "preset_modem")) {
+		/* spd_dump r preset_modem: l_* and nr_* rows, then misc when A/B.
+		 * spd_dump reads misc at a fixed 0..1048576 here (the slot block),
+		 * not the table size. */
+		if (slot > 0)
+			dump_one(io, "misc", MISC_SLOT_BYTES, outdir, failed, sizeof(failed), &nfail);
+		for (i = 0; i < io->nparts; i++) {
+			if (!io->ptab[i].size || !preset_modem_want(io->ptab[i].name))
+				continue;
+			dump_one(io, io->ptab[i].name, io->ptab[i].size, outdir, failed, sizeof(failed), &nfail);
+		}
+	} else if (!strcmp(target, "preset_resign")) {
+		/* spd_dump r preset_resign: index 7 down to 0, missing rows skipped. */
+		for (i = PRESET_RESIGN_N - 1; i >= 0; i--) {
+			const char *n = preset_resign[i];
+			if (!strcmp(n, "splloader")) {
+				if (find_part(io, n) < 0)
+					dump_one(io, n, SPLLOADER_BYTES, outdir, failed, sizeof(failed), &nfail);
+				continue;
+			}
+			{
+				int idx = find_part(io, n);
+				if (idx < 0 && slot > 0) {
+					char nm[40];
+					snprintf(nm, sizeof(nm), "%s_%c", n, slot == 1 ? 'a' : 'b');
+					idx = find_part(io, nm);
+				}
+				if (idx < 0)
+					continue; /* spd_dump falls through to the next name */
+				dump_one(io, io->ptab[idx].name, io->ptab[idx].size, outdir, failed, sizeof(failed), &nfail);
+			}
 		}
 	} else {
 		/* single name: exact, else slot-suffixed, like spd_dump get_partition_info */

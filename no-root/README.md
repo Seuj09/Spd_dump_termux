@@ -400,7 +400,8 @@ Name each file after the partition (`boot.img`, `vbmeta.img`). It can also resto
 folder, repartition, set the slot, and dump the imei set (`miscdata`,
 `prodnv`, `l_fixnv1`, `l_fixnv2`, `l_runtimenv1`, `l_runtimenv2`). Extra menu items
 for verity, FRP reset, and bootloader unlock are labeled DANGEROUS and ask
-you to type the word `dangerous`. Yes does not start them. Unlock sends
+you to type the word `dangerous`. Yes does not start them. Extra `[11]` reads
+the chip UID (`spd_dump chip_uid`, read-only: no write, no erase, no reboot). Unlock sends
 nothing until it can see `fdl2-cboot.bin` and either `spl-unlock.bin` or
 `gen_spl-unlock`. It looks in the current directory, in
 `ums9230/infinix/` (where the release package keeps `fdl2-cboot.bin` next
@@ -445,6 +446,22 @@ read fails, plus `DIR/dump-manifest.txt`. When you answer y to "Refresh from
 device?" the menu runs the refresh and the dump in one session this way, so
 FDL2 is not lost in between.
 
+Two more targets match spd_dump's `r preset_*`:
+
+- `dump preset_modem DIR` — every `l_*` and `nr_*` partition, plus `misc` when
+  the phone is A/B. This is the full modem/NV set; the menu's `imei` is the
+  smaller fixed six-name subset.
+- `dump preset_resign DIR` — `vbmeta`, `splloader`, `uboot`, `sml`, `trustos`,
+  `teecfg`, `boot`, `recovery`, in spd_dump's index order 7 down to 0. Rows the
+  table does not have are skipped; `splloader` is 256 KiB when unlisted.
+
+`check-part NAME` prints the size in bytes from the live table (0 when the name
+is not there) and needs `parts` first. `read-part NAME OFF SIZE OUT` also takes
+`-` or `full` for `SIZE`, meaning the whole partition, the way spd_dump's
+`read_part` treats `0xffffffff`. Both resolve `NAME` through the live slot the
+way spd_dump's `get_partition_info` does, so `boot` finds `boot_a` on a slot-a
+phone. A name the table does not know still reads with an explicit size.
+
 If more than one USB device is plugged in, `spdhost-usb` stops and lists
 them. Copy one path from `termux-usb -l` and put it first. The `--` is
 required so the path is not read as an option:
@@ -473,6 +490,10 @@ sessions. It reads splloader as 256 KiB, erases only after that backup
 exists, and the last session loads `parts` before writing splloader and
 the active uboot name back. A failed erase skips the unlock loader and
 still writes that backup back.
+
+That ending is a setting, not a per-run choice: Extra `[10]` saves it to
+`~/.spdhost-menu.conf` alongside the loaders and `exec_addr`, and the next
+launch reuses it. It defaults to `reset`.
 
 Dump (option 1) fetches the live `parts` table into
 `./backup/partition_list.txt` (name + size), prints it like the rooted

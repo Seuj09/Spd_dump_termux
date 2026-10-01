@@ -119,6 +119,7 @@ FDL2_ADDR=$FDL2_ADDR
 EXEC_ADDR=$EXEC_ADDR
 SOC=$SOC
 DEVICE=$DEVICE
+BOOT_AFTER=$BOOT_AFTER
 EOF
 }
 
@@ -141,6 +142,11 @@ load_config() {
 				;;
 			DEVICE)
 				[[ $val =~ ^[A-Za-z0-9._/+-]+$ ]] && DEVICE=$val
+				;;
+			BOOT_AFTER)
+				# Allowlist, not a free-form word: this value is passed to
+				# run_session as a command argument.
+				[[ $val =~ ^(reset|reboot-recovery|reboot-fastboot|power-off)$ ]] && BOOT_AFTER=$val
 				;;
 		esac
 	done < "$CONFIG"
@@ -279,10 +285,16 @@ apply_ums9230_infinix_defaults() {
 	[[ -n $FDL2 ]] || FDL2=$dir/fdl2-dl.bin
 }
 
+# Both askers return 1 on EOF (Ctrl-D, or stdin that is not a terminal) instead
+# of re-prompting: read leaves the variable empty at EOF, so the old loop treated
+# a closed stdin as an endless run of invalid answers and spun forever.
 ask_addr() {
 	local prompt=$1 reply
 	while true; do
-		read -r -p "$prompt " reply
+		if ! read -r -p "$prompt " reply; then
+			echo "Cancelled (no input)." >&2
+			return 1
+		fi
 		if [[ $reply =~ ^0[xX][0-9a-fA-F]+$ ]]; then
 			printf '%s\n' "$reply"
 			return 0
@@ -294,7 +306,10 @@ ask_addr() {
 ask_file() {
 	local prompt=$1 reply
 	while true; do
-		read -r -e -p "$prompt " reply
+		if ! read -r -e -p "$prompt " reply; then
+			echo "Cancelled (no input)." >&2
+			return 1
+		fi
 		if [[ -f $reply ]]; then
 			printf '%s\n' "$reply"
 			return 0
@@ -304,18 +319,25 @@ ask_file() {
 }
 
 configure_loaders_manual() {
-	local choice ea
+	local choice ea nf1 na1 nf2 na2
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
-	FDL1=$(ask_file "FDL1 file:")
-	FDL1_ADDR=$(ask_addr "FDL1 address:")
-	FDL2=$(ask_file "FDL2 file:")
-	FDL2_ADDR=$(ask_addr "FDL2 address:")
+	# Collect into locals and commit only once all four answers are in: an
+	# abort part-way (Ctrl-D) used to leave FDL1/FDL2/addresses half-updated,
+	# and the save_config below then wrote that half-state over a working config.
+	nf1=$(ask_file "FDL1 file:") || return 1
+	na1=$(ask_addr "FDL1 address:") || return 1
+	nf2=$(ask_file "FDL2 file:") || return 1
+	na2=$(ask_addr "FDL2 address:") || return 1
 	echo "Which chip are these loaders for? This picks the exec stub."
 	echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
 	echo "[1] ums9230   [2] sc9863a   [3] ums512   [Enter] keep ${EXEC_ADDR:-$EXEC_ADDR_DEFAULT}"
 	read -r -p "Choice: " choice
-	case $choice in
+	FDL1=$nf1
+	FDL1_ADDR=$na1
+	FDL2=$nf2
+	FDL2_ADDR=$na2
+	case ${choice:-} in
 		1) soc_profile ums9230 && SOC=ums9230 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
 		2) soc_profile sc9863a && SOC=sc9863a && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
 		3) soc_profile ums512 && SOC=ums512 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
@@ -351,13 +373,18 @@ shipped_fdl_pair() {
 shipped_alt_models() {
 	local root=$1 soc=$2 brand=$3 d base
 	local -a found=()
+	local had_nullglob=0
+	# Save/restore: a caller (flash_input_menu, restore_image_names) may already
+	# have nullglob on, and blanket `shopt -u` here would silently change how
+	# its own globs behave for the rest of that function.
+	shopt -q nullglob && had_nullglob=1
 	shopt -s nullglob
 	for d in "$root/$soc/$brand/alternatif"/*/ "$root/$soc/$brand/alternativ"/*/; do
 		[[ -f ${d}fdl1-dl.bin && -f ${d}fdl2-dl.bin ]] || continue
 		base=$(basename "$d")
 		found+=("$base")
 	done
-	shopt -u nullglob
+	(( had_nullglob )) || shopt -u nullglob
 	((${#found[@]})) || return 1
 	printf '%s\n' "${found[@]}"
 }
@@ -432,12 +459,24 @@ select_shipped_model() {
 		echo "That pair is not in fdl/."
 		return 1
 	fi
+	# soc_profile mutates the live chip globals (SOC_FDL1_ADDR/SOC_FDL2_ADDR/
+	# EXEC_ADDR_DEFAULT/EXEC_ADDR_ALT), and it has to run before the confirm
+	# below so the addresses can be shown. Declining must put them back, or the
+	# menu would keep the rejected chip's exec stub live -- hex_mode_menu would
+	# then toggle to it and save_config would persist it. Captured BEFORE the
+	# call, and with :- because SOC_FDL*_ADDR are unset until some profile runs.
+	local old_fdl1=${SOC_FDL1_ADDR:-} old_fdl2=${SOC_FDL2_ADDR:-}
+	local old_exec=$EXEC_ADDR_DEFAULT old_alt=$EXEC_ADDR_ALT
 	soc_profile "$soc" || return 1
 	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
 	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
 	echo "  exec stub $EXEC_ADDR_DEFAULT"
 	echo "A wrong chip or address can brick the phone."
 	if ! confirm_action "type yes to use these loaders: "; then
+		SOC_FDL1_ADDR=$old_fdl1
+		SOC_FDL2_ADDR=$old_fdl2
+		EXEC_ADDR_DEFAULT=$old_exec
+		EXEC_ADDR_ALT=$old_alt
 		return 1
 	fi
 	SOC=$soc
@@ -805,7 +844,12 @@ show_parts_list() {
 	echo "  all       — splloader + every partition except userdata, cache, blackbox"
 	echo "  all_lite  — same, and skip the inactive slot"
 	echo "  imei      — miscdata, prodnv, both fixnv, both runtimenv"
-	echo "Several names (boot vbmeta) are dumped in one session. all, all_lite, and imei are typed alone."
+	echo "  preset_modem  — spd_dump r preset_modem: every l_* and nr_* partition,"
+	echo "                  plus misc when the phone is A/B"
+	echo "  preset_resign — spd_dump r preset_resign: vbmeta, splloader, uboot, sml,"
+	echo "                  trustos, teecfg, boot, recovery"
+	echo "Several names (boot vbmeta) are dumped in one session."
+	echo "all, all_lite, imei, preset_modem, and preset_resign are typed alone."
 }
 
 # One session: parts table (units) + 32 bytes at misc+0x800 for the slot.
@@ -1051,7 +1095,7 @@ dispatch_dump_query() {
 	if ((${#words[@]} == 1)); then
 		case ${words[0],,} in
 			imei) dump_imei_session; return ;;
-			all|all_lite)
+			all|all_lite|preset_modem|preset_resign)
 				echo "Reading the live table, then dumping ${words[0],,}."
 				dump_live_session "${words[0],,}"
 				return
@@ -1064,8 +1108,8 @@ dispatch_dump_query() {
 	fi
 	for w in "${words[@]}"; do
 		case ${w,,} in
-			all|all_lite|imei)
-				echo "all, all_lite, and imei must be typed alone." >&2
+			all|all_lite|imei|preset_modem|preset_resign)
+				echo "all, all_lite, imei, preset_modem, and preset_resign must be typed alone." >&2
 				return 1
 				;;
 		esac
@@ -1102,7 +1146,7 @@ dump_partition() {
 		else
 			echo "Type a name (boot, boot.img, boot_a, splloader), several names, or all / all_lite / imei."
 		fi
-		read -r -p "Partition name (or all / all_lite / imei): " query
+		read -r -p "Partition name (or all / all_lite / imei / preset_modem / preset_resign): " query
 		if [[ -z ${query:-} ]]; then
 			echo "Cancelled."
 			pause
@@ -1120,16 +1164,16 @@ dump_partition() {
 	fi
 	cls
 	show_parts_list "$parts_file"
-	read -r -p "Partition name (or all / all_lite / imei): " query
+	read -r -p "Partition name (or all / all_lite / imei / preset_modem / preset_resign): " query
 	if [[ -z ${query:-} ]]; then
 		echo "Cancelled."
 		pause
 		return
 	fi
 	# One real partition name still shows the cached size. all / all_lite / imei
-	# and several names go straight to dispatch_dump_query.
+	# / preset_modem / preset_resign and several names go straight to dispatch.
 	case ${query,,} in
-		all|all_lite|imei) ;;
+		all|all_lite|imei|preset_modem|preset_resign) ;;
 		*' '*) ;;
 		*)
 		matched=$(resolve_part_query "$query" "$parts_file") || {
@@ -1380,6 +1424,16 @@ resolve_spdhost_bin() {
 	return 1
 }
 
+# Writable temp directory, resolved the same way scripts/spdhost-usb does:
+# TMPDIR, else Termux's $PREFIX/tmp, else /tmp. A stock Termux has no /tmp.
+spd_tmpdir() {
+	local d
+	for d in "${TMPDIR:-}" "${PREFIX:+$PREFIX/tmp}" /tmp; do
+		[[ -n $d && -d $d && -w $d ]] && { printf '%s\n' "$d"; return 0; }
+	done
+	return 1
+}
+
 # Safe, read-only self-check: build sanity, environment, this release's
 # BootROM-hello behaviour, and — only if a device already answers
 # `termux-usb -l` — a short, bounded, non-destructive check-baud probe.
@@ -1478,15 +1532,28 @@ smoke_test() {
 			echo
 			echo "Second short probe, to confirm the interface isn't stuck busy"
 			echo "(same outcome expected whether or not you interrupted the first one):"
-			SPDHOST_BROM_TRIES=2 SPDHOST_BROM_WALL_MS=3000 run_session ping >/tmp/spdhost-smoke-probe2.$$ 2>&1
-			if grep -qi "LIBUSB_ERROR_BUSY\|interface .* is busy" /tmp/spdhost-smoke-probe2.$$; then
-				echo "FAIL  interface is busy on the follow-up probe"
-				ok=0
-			else
-				echo "PASS  no busy interface on the follow-up probe"
+			# Not a hardcoded /tmp: a stock Termux has no /tmp, so the redirect
+			# used to fail, grep then failed on the missing file, and the check
+			# below reported PASS having captured nothing at all. Skipping is
+			# the honest answer when there is nowhere to write the output.
+			local tdir probe2=
+			if tdir=$(spd_tmpdir); then
+				probe2=$(mktemp "$tdir/spdhost-smoke-probe2.XXXXXX") || probe2=
 			fi
-			cat /tmp/spdhost-smoke-probe2.$$
-			rm -f /tmp/spdhost-smoke-probe2.$$
+			if [[ -n $probe2 ]]; then
+				SPDHOST_BROM_TRIES=2 SPDHOST_BROM_WALL_MS=3000 run_session ping >"$probe2" 2>&1
+				if grep -qi "LIBUSB_ERROR_BUSY\|interface .* is busy" "$probe2"; then
+					echo "FAIL  interface is busy on the follow-up probe"
+					ok=0
+				else
+					echo "PASS  no busy interface on the follow-up probe"
+				fi
+				cat "$probe2"
+				rm -f "$probe2"
+			else
+				echo "note  no writable temp directory (set TMPDIR); skipped the"
+				echo "      follow-up busy check"
+			fi
 			(( rc == 0 )) || echo "note  first probe exited $rc — normal if the phone never answered hello"
 		else
 			echo "Skipped."
@@ -1883,7 +1950,10 @@ boot_after_menu() {
 	esac
 	continue_choice "after flash/restore: $next" || return
 	BOOT_AFTER=$next
-	echo "After flash/restore/dump: $BOOT_AFTER."
+	# Persisted like the loaders and exec_addr: the main header shows this as a
+	# setting, so it must not silently revert to `reset` on the next launch.
+	save_config
+	echo "After flash/restore/dump: $BOOT_AFTER (saved to $CONFIG)."
 }
 
 hex_mode_menu() {
@@ -2131,6 +2201,19 @@ frp_reset_menu() {
 		parts "$(parts_cache_path)" frp-reset "$out" reset
 }
 
+# spd_dump chip_uid, read-only: the BSL answer printed as hex. No write, no
+# erase, no reboot, so no typed confirm is needed -- but the loaders still have
+# to come up, which is the only reason this needs a phone in download mode.
+# Not in the release menu (it never calls chip_uid); spdhost has had the command
+# since the first build, so the menu surfaces it here.
+chip_uid_action() {
+	need_loaders || return 1
+	echo "Read-only: spdhost asks the BootROM/FDL for the chip UID."
+	echo "spd_dump prints it as a string; this prints the bytes as hex."
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" chip-uid
+}
+
 extra_menu() {
 	local choice
 	echo "Extra"
@@ -2144,6 +2227,7 @@ extra_menu() {
 	echo "[8] DANGEROUS: unlock bootloader (erases splloader until the last step)"
 	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
 	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
+	echo "[11] Read the chip UID (read-only; spd_dump's chip_uid)"
 	echo "[0] Back"
 	read -r -p "Choice: " choice
 	case $choice in
@@ -2158,6 +2242,7 @@ extra_menu() {
 		8) continue_choice "unlock the bootloader" || return ;;
 		9) continue_choice "hex mode" || return ;;
 		10) continue_choice "boot mode after flash / restore" || return ;;
+		11) continue_choice "read the chip UID" || return ;;
 		*) echo "Unchanged."; return ;;
 	esac
 	case $choice in
@@ -2187,6 +2272,7 @@ extra_menu() {
 		8) unlock_bootloader_menu ;;
 		9) hex_mode_menu ;;
 		10) boot_after_menu ;;
+		11) chip_uid_action ;;
 	esac
 }
 
@@ -2221,7 +2307,14 @@ while true; do
 	echo "[9] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)"
 	echo "[0] Quit"
 	echo "After a number: y continues, n goes back."
-	read -r -p "Choice: " choice
+	# EOF (Ctrl-D, or stdin that ran out) has to end the loop: read leaves
+	# choice empty, the `*` arm only prints "Not a choice." and pause() reads
+	# EOF again, so the old code spun here forever without ever accepting input.
+	if ! read -r -p "Choice: " choice; then
+		echo
+		echo "Input closed. Bye."
+		exit 0
+	fi
 	case ${choice:-} in
 		1) continue_choice "dump a partition" || { pause; continue; }
 			dump_partition ;;

@@ -3,7 +3,9 @@
 # Both spdhost and spd_dump are linked against tests/mock_fdl2.c (fake libusb
 # BootROM -> FDL1 -> FDL2 with a KiB partition table). The menu is sourced with
 # SPDHOST_MENU_LIB=1 and SPDHOST_MENU_RUNNER pointing at the mock spdhost.
-# Usage (from no-root/): tests/menu-dump.sh      TEST_BIG=0 skips the 6 GiB case.
+# Usage (from no-root/): tests/menu-dump.sh
+# The 6 GiB case needs 6 GiB of free space in TMPDIR; it skips itself when there
+# is less (TEST_BIG=0 skips, TEST_BIG=1 forces the attempt).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=${TEST_TMP:-$(mktemp -d)}; [[ -n ${TEST_TMP:-} ]] || trap 'rm -rf "$tmp"' EXIT
@@ -15,7 +17,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 make -C "$root/spd_dump" GITVER.h >/dev/null
 mkdir -p "$tmp/pkg/fdl/ums9230"
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/spd_dump" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen_expected" || exit 1
@@ -126,8 +128,24 @@ unset MOCK_SLOT
 fetch_parts_table </dev/null >"$tmp/c4.log" 2>&1
 m=$(resolve_part_query bigpart "$(parts_bytes_path)")
 check "6 GiB: 6291456 KiB -> 6442450944 bytes (got '$m')" test "$m" = "bigpart 6442450944"
-list_6g() { show_parts_list "$(parts_bytes_path)" | grep -Eq '^bigpart +6G +6442450944$'; }
+# Capture first, grep second. Piping show_parts_list straight into `grep -q`
+# races with pipefail: grep exits the moment it matches, show_parts_list takes
+# SIGPIPE on the rest of its output, and the pipeline returns 141. Whether that
+# happens depends on the writer getting ahead of the reader, so the check passed
+# or failed run to run.
+list_6g() { local out; out=$(show_parts_list "$(parts_bytes_path)") || return 1; grep -Eq '^bigpart +6G +6442450944$' <<<"$out"; }
 check "6 GiB: list shows 6G" list_6g
+# A 6 GiB image needs 6 GiB of room. Without this guard a small box (or a
+# tmpfs TMPDIR) fails the write mid-way, fills the filesystem, and takes every
+# case after this one down with it -- failures that look like regressions but
+# are only disk. TEST_BIG=1 forces the attempt anyway.
+big_free=$(df -Pk "$tmp" 2>/dev/null | awk 'NR==2 { print $4 }')
+big_why="TEST_BIG=0"
+# Only an unset TEST_BIG auto-skips: an explicit 0 or 1 is the caller's call.
+if [[ -z ${TEST_BIG:-} && ${big_free:-0} -lt 7340032 ]]; then
+	TEST_BIG=0
+	big_why="only $(( ${big_free:-0} / 1024 )) MiB free; TEST_BIG=1 forces it"
+fi
 if [[ ${TEST_BIG:-1} != 0 ]]; then
 	DQ_NAMES=(bigpart) DQ_SIZES=(6442450944) DQ_OUTS=("$DUMP_DIR/bigpart.img")
 	SPDHOST_STEP=0xf800 MOCK_ZERO=bigpart run_dump_queue </dev/null >"$tmp/c4d.log" 2>&1; rc=$?
@@ -138,7 +156,7 @@ if [[ ${TEST_BIG:-1} != 0 ]]; then
 		bash -c "grep -q '^SEQ 11 len=12 00f8000000000000' '$tmp/mock.seq' && grep -c '^SEQ 11 len=12' '$tmp/mock.seq' | awk '{exit !(\$1 > 100000)}'"
 	rm -f "$DUMP_DIR/bigpart.img"
 else
-	echo "SKIP: 6 GiB read (TEST_BIG=0)"
+	echo "SKIP: 6 GiB read ($big_why)"
 fi
 
 # ---- case 5: refresh + dump in ONE session (spdhost `parts FILE dump ...`) ----

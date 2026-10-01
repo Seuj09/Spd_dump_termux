@@ -85,13 +85,21 @@ static void usage(void)
 		"                               next to spdhost. ADDR 0 disables.\n"
 		"  fdl FILE ADDR                send one loader and execute it\n"
 		"  parts [FILE]                 list partitions (FILE or '-' optional)\n"
-		"  read-part NAME OFF SIZE OUT\n"
+		"  read-part NAME OFF SIZE OUT  SIZE may be - or full (or 0xffffffff) for\n"
+		"                               the whole partition, like spd_dump read_part\n"
+		"  check-part NAME              print the byte size from the live table\n"
+		"                               (0 and a note when absent), like spd_dump\n"
+		"                               check_part. Needs parts.\n"
 		"  dump all|all_lite|NAME DIR   after parts, same session: size from the\n"
 		"                               live table (units -> bytes like spd_dump),\n"
 		"                               slot from misc, splloader 256K in all*,\n"
 		"                               skips blackbox/cache/userdata. Writes\n"
 		"                               DIR/NAME.img (failed: NAME.img.partial),\n"
 		"                               DIR/dump-manifest.txt. Keeps going.\n"
+		"  dump preset_modem DIR        spd_dump r preset_modem: every l_* and nr_*\n"
+		"                               row, plus misc when the device is A/B\n"
+		"  dump preset_resign DIR       spd_dump r preset_resign: vbmeta, splloader,\n"
+		"                               uboot, sml, trustos, teecfg, boot, recovery\n"
 		"  misc-backup FILE             read all of misc to FILE and check it;\n"
 		"                               a later misc write in this session is\n"
 		"                               then read back and verified. Failure\n"
@@ -385,6 +393,7 @@ static int is_command(const char *s)
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
 		strcmp(s, "exec_addr") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
+		strcmp(s, "check-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
 		strcmp(s, "danger-erase") == 0 ||
@@ -1116,10 +1125,38 @@ int main(int argc, char **argv)
 				return 1;
 			i++;
 		} else if (strcmp(cmd, "read-part") == 0) {
+			uint64_t rsize, rnamesz = 0;
+			char rnamebuf[40];
+			const char *rname = argv[i + 1];
 			need(argc, i, 4, "read-part");
 			need_fdl2(io, "read-part");
-			if (spd_read_part(io, argv[i + 1], parse_size(argv[i + 2]),
-				parse_size(argv[i + 3]), argv[i + 4])) {
+			/* spd_dump read_part treats size 0xffffffff as "whole partition";
+			 * here `-` and `full` mean the same, plus a numeric 0xffffffff.
+			 * The words are matched first: parse_size() errors on them. */
+			if (!strcmp(argv[i + 3], "-") || !strcmp(argv[i + 3], "full")) {
+				rsize = 0xffffffffu;
+			} else {
+				rsize = parse_size(argv[i + 3]);
+			}
+			/* spd_dump resolves the name through get_partition_info first and
+			 * dumps the result, so `boot` reads `boot_a` on a slot-a phone.
+			 * A name the table does not know still reads with an explicit
+			 * size (spdhost's older behaviour); only a magic size needs it. */
+			if (spd_resolve_part(io, rname, rnamebuf, sizeof(rnamebuf), &rnamesz) == 0) {
+				rname = rnamebuf;
+				if (rsize == 0xffffffffu)
+					rsize = rnamesz; /* a found row always has a nonzero size */
+			} else if (rsize == 0xffffffffu) {
+				fprintf(stderr, "read-part: no size for '%s' in the live table; "
+					"run parts first or give an explicit size\n", rname);
+				if (!keep_going)
+					return 1;
+				nfailed++;
+				i += 5;
+				continue;
+			}
+			if (spd_read_part(io, rname, parse_size(argv[i + 2]),
+				rsize, argv[i + 4])) {
 				if (!keep_going)
 					return 1;
 				fprintf(stderr, "read-part %s FAILED; continuing (--keep-going)\n", argv[i + 1]);
@@ -1130,6 +1167,14 @@ int main(int argc, char **argv)
 				}
 			}
 			i += 5;
+		} else if (strcmp(cmd, "check-part") == 0) {
+			uint64_t sz;
+			need(argc, i, 1, "check-part");
+			sz = spd_check_part(io, argv[i + 1]);
+			printf("%llu\n", (unsigned long long)sz);
+			if (!sz)
+				fprintf(stderr, "check-part: '%s' is not in the live table\n", argv[i + 1]);
+			i += 2;
 		} else if (strcmp(cmd, "dump") == 0) {
 			need(argc, i, 2, "dump");
 			need_fdl2(io, "dump");

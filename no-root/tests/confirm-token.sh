@@ -10,7 +10,7 @@ pass=0 fail=0
 ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*"; fail=$((fail + 1)); }
 check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
-gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" "$root/src/main.c" "$root/src/usb.c" "$root/src/proto.c" \
+gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" "$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/infinix/fdl1-dl.bin" \
 	"$root/fdl/ums9230/infinix/fdl2-dl.bin" "$tmp/"
