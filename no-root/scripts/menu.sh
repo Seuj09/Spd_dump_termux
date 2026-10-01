@@ -18,8 +18,10 @@ EXEC_ADDR_ALT=0x65015f48
 EXEC_ADDR=""
 # Images named <partition>.img (release menu "Pasang Partisi" / input/).
 INPUT_DIR="${SPDHOST_INPUT_DIR:-$PWD/input}"
-# Appended after flash / restore. recovery and fastbootd stay on the reboot menu
-# because those write misc and need their own confirm token.
+# Appended after flash, restore, repartition, set-slot, and dump.
+# reset and power-off match the release menu. reboot-recovery and
+# reboot-fastboot are the same 2048-byte BCB the reboot menu already sends;
+# the slot block at misc+0x800 is past that write. The menu never passes --yes.
 BOOT_AFTER=reset
 
 # Prefer this package's own scripts/ over PATH, so an unzipped release never
@@ -622,7 +624,7 @@ run_dump_queue() {
 		[[ -e $out ]] && mv -f "$out" "$out.prev"
 		args+=(read-part "${DQ_NAMES[i]}" 0 "${DQ_SIZES[i]}" "$out")
 	done
-	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" "${args[@]}"
+	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" "${args[@]}" "$BOOT_AFTER"
 	rc=$?
 	echo
 	echo "Verifying $n file(s) (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
@@ -729,7 +731,7 @@ dump_live_session() {
 	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
 	ready || return 1
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$raw" dump "$target" "$DUMP_DIR"
+		parts "$raw" dump "$target" "$DUMP_DIR" "$BOOT_AFTER"
 	rc=$?
 	if [[ -s $raw ]]; then
 		load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
@@ -774,7 +776,8 @@ dump_imei_session() {
 		dump l_fixnv1 "$DUMP_DIR" \
 		dump l_fixnv2 "$DUMP_DIR" \
 		dump l_runtimenv1 "$DUMP_DIR" \
-		dump l_runtimenv2 "$DUMP_DIR"
+		dump l_runtimenv2 "$DUMP_DIR" \
+		"$BOOT_AFTER"
 	rc=$?
 	[[ -s $raw ]] && load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
 	return "$rc"
@@ -1000,6 +1003,67 @@ confirm_action() {
 		echo "menu: not confirmed"
 		return 1
 	fi
+}
+
+# Unlock, verity, and FRP. The word yes is not enough. spdhost asks again.
+confirm_dangerous() {
+	local prompt=$1 reply
+	if [[ ! -t 0 ]]; then
+		echo "DANGEROUS: refusing without a TTY. Typing yes is not accepted. Nothing sent." >&2
+		return 1
+	fi
+	echo "DANGEROUS. The next step can leave the phone unable to boot or wipe FRP."
+	echo "The word yes does nothing here."
+	if ! read -r -p "$prompt" reply; then
+		reply=
+	fi
+	while [[ $reply == *[$' \t\r\n'] ]]; do reply=${reply%?}; done
+	if [[ $reply != dangerous ]]; then
+		echo "menu: not confirmed; nothing sent"
+		return 1
+	fi
+}
+
+# Release-menu file. Not shipped in this tree. The rooted package keeps
+# fdl2-cboot.bin next to fdl1-dl.bin (ums9230/infinix/) and gen_spl-unlock
+# two directories above that, beside menu.sh. spl-unlock.bin is generated.
+find_user_file() {
+	local name=$1 d base
+	local -a places=()
+	base=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+	places+=(
+		"$PWD/$name"
+		"$PWD/ums9230/infinix/$name"
+		"$base/$name"
+		"$base/../$name"
+	)
+	if [[ -n ${FDL1:-} ]]; then
+		places+=("$(dirname "$FDL1")/$name")
+		places+=("$(dirname "$FDL1")/../../$name")
+	fi
+	for d in "${places[@]}"; do
+		if [[ -f $d ]]; then
+			(cd "$(dirname "$d")" && printf '%s/%s\n' "$(pwd)" "$(basename "$d")")
+			return 0
+		fi
+	done
+	return 1
+}
+
+# aarch64 ELF from the release zip. PATH, then the same places as the files.
+find_gen_spl_unlock() {
+	local p
+	p=$(command -v gen_spl-unlock 2>/dev/null || true)
+	if [[ -n $p && -x $p ]]; then
+		printf '%s\n' "$p"
+		return 0
+	fi
+	p=$(find_user_file gen_spl-unlock || true)
+	if [[ -n $p && -x $p ]]; then
+		printf '%s\n' "$p"
+		return 0
+	fi
+	return 1
 }
 
 # Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
@@ -1343,10 +1407,14 @@ flash_input_menu() {
 	if (( ${#skipped[@]} )); then
 		echo "Not flashed: ${skipped[*]}"
 	fi
-	echo "A name that is not on the phone aborts the whole flash before anything is sent."
-	echo "misc.img, if present, is backed up and verified. splloader.img must be 256 KiB or smaller."
+	echo "A name that is not on the phone is skipped. The other images are still written."
+	echo "An empty image, or one larger than its partition, aborts the flash before anything is sent."
+	echo "misc.img, if present, is backed up and verified."
+	echo "splloader.img is written up to the live table size. With no splloader row, the file is sent whole (a dump is still 256 KiB)."
+	echo "A broken l_fixnv1 image is skipped. A sparse image waits up to 100 seconds per chunk."
+	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
 	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
-	echo "super.img without metadata.img also erases metadata (same as spd_dump write_parts)."
+	echo "super.img without metadata.img erases metadata when that partition is on the phone."
 	if ! confirm_action "type yes to flash these partitions: "; then
 		return 1
 	fi
@@ -1365,10 +1433,13 @@ restore_backup_menu() {
 	fi
 	echo "Restore images in $DUMP_DIR (partition-name.img), then $BOOT_AFTER."
 	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, *_bak.img."
-	echo "A name that is not on the phone aborts the restore before anything is sent."
+	echo "A name that is not on the phone is skipped. The other images are still written."
+	echo "A broken l_fixnv1 image is skipped. An empty or oversized image aborts the restore before anything is sent."
+	echo "splloader.img is written up to the live table size (a dump of it is still 256 KiB)."
 	echo "userdata.img in this folder is written back. Inactive _a/_b images are skipped."
 	echo "The active slot is written back after the files."
-	echo "super.img without metadata.img erases metadata."
+	echo "super.img without metadata.img erases metadata when that partition is on the phone."
+	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
 	if ! confirm_action "type yes to restore this backup: "; then
 		return 1
 	fi
@@ -1422,16 +1493,24 @@ set_slot_menu() {
 
 boot_after_menu() {
 	local choice
-	echo "What to do after a flash, restore, or repartition."
-	echo "Recovery and fastbootd stay on menu [2]: those write misc."
-	echo "[1] system reset (current: $BOOT_AFTER)"
-	echo "[2] power off"
+	echo "What to do after a flash, restore, repartition, slot change, or dump."
+	echo "Same four endings as the release menu."
+	echo "Recovery and fastbootd write the 2048-byte BCB after the other work, then reset."
+	echo "misc+0x800 (the slot) is past that 2048-byte write, so the slot stays."
+	echo "Now: $BOOT_AFTER"
+	echo "[1] system (reset)"
+	echo "[2] recovery"
+	echo "[3] fastbootd"
+	echo "[4] power off"
 	read -r -p "Choice: " choice
 	case $choice in
-		1) BOOT_AFTER=reset; echo "After flash/restore: reset." ;;
-		2) BOOT_AFTER=power-off; echo "After flash/restore: power off." ;;
-		*) echo "Unchanged ($BOOT_AFTER)." ;;
+		1) BOOT_AFTER=reset ;;
+		2) BOOT_AFTER=reboot-recovery ;;
+		3) BOOT_AFTER=reboot-fastboot ;;
+		4) BOOT_AFTER=power-off ;;
+		*) echo "Unchanged ($BOOT_AFTER)."; return ;;
 	esac
+	echo "After flash/restore/dump: $BOOT_AFTER."
 }
 
 hex_mode_menu() {
@@ -1461,13 +1540,194 @@ hex_mode_menu() {
 	fi
 }
 
-# Shown so the entry exists. Nothing is sent.
+# Release-menu unlock. fdl2-cboot.bin and spl-unlock.bin are not shipped.
+# A missing dump does not continue into the erase. --dangerous is not passed.
 unlock_bootloader_menu() {
-	echo "Unlock BootLoader: temporary disabled."
-	echo "The release menu backs up and erases splloader, writes a modified uboot,"
-	echo "and sends spl-unlock.bin. That can leave the phone unable to boot."
-	echo "This menu does not run it."
+	local cboot unlock genbin= work spl uboot slotf rc
+	cboot=$(find_user_file fdl2-cboot.bin || true)
+	unlock=$(find_user_file spl-unlock.bin || true)
+	genbin=$(find_gen_spl_unlock || true)
+	if [[ -z $cboot || ( -z $unlock && -z $genbin ) ]]; then
+		echo "DANGEROUS unlock: nothing sent."
+		if [[ -z $cboot ]]; then
+			echo "Missing fdl2-cboot.bin."
+			echo "The release package has it next to fdl1-dl.bin (ums9230/infinix/) and in the menu directory."
+			echo "This tree does not ship that file and does not invent it."
+		fi
+		if [[ -z $unlock && -z $genbin ]]; then
+			echo "Missing spl-unlock.bin and gen_spl-unlock."
+			echo "The release package has gen_spl-unlock beside its menu.sh. It builds spl-unlock.bin from the splloader backup."
+			echo "This tree does not ship either file."
+		fi
+		return 1
+	fi
+	if [[ -z $unlock ]]; then
+		echo "spl-unlock.bin is missing. $genbin runs after the backup, before the erase."
+	else
+		genbin=
+	fi
+	echo "DANGEROUS: Unlock BootLoader."
+	echo "This follows the release menu: back up splloader and uboot, erase splloader"
+	echo "and splloader_bak, write fdl2-cboot.bin to uboot, send spl-unlock.bin as FDL1"
+	echo "(no FDL2), read 64 bytes at miscdata+8192, then write the backup back."
+	echo "After the erase the phone will not boot until that last write."
+	echo "Hold volume down and stay in download mode between the pauses."
+	if ! confirm_dangerous "type dangerous to unlock the bootloader: "; then
+		return 1
+	fi
+	need_loaders || return 1
+	work=$PWD/backup_spl
+	mkdir -p "$work"
+	spl=$work/splloader.img
+	if [[ ! -s $spl ]] || ! uboot=$(unlock_pick_uboot "$work"); then
+		echo "Backing up splloader and uboot into $work. Nothing is erased in this session."
+		ready || return 1
+		if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			parts "$(parts_cache_path)" dump splloader "$work" dump uboot "$work" reset; then
+			echo "Backup failed. splloader was not erased. Nothing further sent."
+			return 1
+		fi
+		if [[ ! -s $spl ]] || ! uboot=$(unlock_pick_uboot "$work"); then
+			echo "Backup files are missing. splloader was not erased. Nothing further sent."
+			return 1
+		fi
+	else
+		echo "Reusing $spl and $uboot. The erase still runs."
+	fi
+	if [[ -n $genbin ]]; then
+		cp -f "$spl" "$work/splloader.bin"
+		if ! ( cd "$work" && "$genbin" splloader.bin ); then
+			echo "gen_spl-unlock failed. splloader was not erased."
+			return 1
+		fi
+		unlock=$work/spl-unlock.bin
+		if [[ ! -s $unlock ]]; then
+			echo "gen_spl-unlock did not write spl-unlock.bin. splloader was not erased."
+			return 1
+		fi
+	fi
+	echo "DANGEROUS: next session erases splloader and splloader_bak, then reset."
+	echo "spdhost asks for the word dangerous again. Any other answer sends nothing."
+	echo "The backup stays in $work. Run this item again to continue."
+	pause || return 1
+	ready || return 1
+	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		danger-erase splloader danger-erase splloader_bak reset; then
+		echo "Erase session failed. If splloader was erased, re-run this item so the last step can restore $work."
+		return 1
+	fi
+	echo "Next session writes $cboot onto uboot (the active slot name)."
+	echo "spdhost asks you to type yes for that write."
+	echo "A file larger than the uboot partition is refused, and the backup is written back."
+	pause || return 1
+	ready || return 1
+	rc=0
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" write-part uboot "$cboot" reset || rc=$?
+	if [[ $rc != 0 ]]; then
+		echo "Modified uboot was not written (exit $rc). Skipping the unlock loader."
+	else
+		echo "Next session sends spl-unlock.bin as FDL1 and does not load FDL2."
+		echo "The release menu treats a disconnect ('perangkat dilepas') as success."
+		pause || return 1
+		ready || return 1
+		run_session fdl "$unlock" "$FDL1_ADDR" || \
+			echo "Unlock loader returned non-zero. Continuing to the status read."
+		echo "Next session reads 64 bytes at miscdata offset 8192."
+		echo "Release-menu note: 64 zero bytes means locked; 32 bytes of text plus two 16-byte hashes means unlocked."
+		echo "This tool prints the bytes. It does not decide the lock state beyond that note."
+		pause || return 1
+		ready || return 1
+		slotf=$work/unlock-status.bin
+		run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			read-part miscdata 8192 64 "$slotf" reset || \
+			echo "Status read failed."
+		unlock_describe_status "$slotf"
+	fi
+	echo "Last session writes the dumped splloader and uboot back, then reset."
+	echo "spdhost asks you to type yes for each of those writes."
+	pause || return 1
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		write-part splloader "$spl" write-part uboot "$uboot" reset
+}
+
+unlock_pick_uboot() {
+	local d=$1 slot
+	slot=$(awk '/^slot /{print $2; exit}' "$d/dump-manifest.txt" 2>/dev/null || true)
+	if [[ $slot == a && -s $d/uboot_a.img ]]; then printf '%s\n' "$d/uboot_a.img"; return 0; fi
+	if [[ $slot == b && -s $d/uboot_b.img ]]; then printf '%s\n' "$d/uboot_b.img"; return 0; fi
+	if [[ -s $d/uboot.img ]]; then printf '%s\n' "$d/uboot.img"; return 0; fi
+	if [[ -s $d/uboot_a.img ]]; then printf '%s\n' "$d/uboot_a.img"; return 0; fi
+	if [[ -s $d/uboot_b.img ]]; then printf '%s\n' "$d/uboot_b.img"; return 0; fi
 	return 1
+}
+
+unlock_describe_status() {
+	local f=$1 n
+	if [[ ! -f $f ]]; then
+		echo "No status file. Not calling the phone locked or unlocked."
+		return 0
+	fi
+	n=$(wc -c < "$f" | tr -d ' ')
+	echo "Status file: $f ($n bytes)."
+	if [[ $n == 64 ]] && cmp -s "$f" <(dd if=/dev/zero bs=64 count=1 status=none 2>/dev/null); then
+		echo "Release-menu note: 64 zero bytes means locked."
+	elif [[ $n == 64 ]]; then
+		echo "Release-menu note: 32 bytes of text plus two 16-byte hashes means unlocked."
+		od -An -tx1 -N 64 "$f"
+	else
+		echo "Short or unexpected read. Not calling the phone locked or unlocked."
+		od -An -tx1 -N 64 "$f" 2>/dev/null || true
+	fi
+}
+
+verity_menu() {
+	local which
+	echo "DANGEROUS: dm-verity, the same byte spd_dump writes."
+	echo "verity 0 writes 0x01 at offset 0x7B of vbmeta (the active slot name)."
+	echo "verity 1 writes 0x00 at 0x7B of vbmeta, vbmeta_system, vbmeta_vendor,"
+	echo "vbmeta_system_ext, vbmeta_product, and vbmeta_odm. A missing name is skipped."
+	echo "This is not the AVB flag byte at offset 0x78. The whole partition is rewritten."
+	echo "A partition over 64MB is refused and nothing is written."
+	echo "[1] disable (verity 0)"
+	echo "[2] enable (verity 1)"
+	read -r -p "Choice: " which
+	case $which in
+		1) which=0 ;;
+		2) which=1 ;;
+		*) echo "Unchanged. Nothing sent."; return 1 ;;
+	esac
+	if ! confirm_dangerous "type dangerous to run verity $which: "; then
+		return 1
+	fi
+	need_loaders || return 1
+	echo "spdhost asks for the word dangerous again before it patches vbmeta."
+	echo "Then: reset."
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" verity "$which" reset
+}
+
+frp_reset_menu() {
+	local out
+	echo "DANGEROUS: Reset FRP."
+	echo "Reads the whole persist partition (or persist_a / persist_b for the active slot)"
+	echo "into a backup file, checks that file's size, then erases that partition, then reset."
+	echo "A failed or short read does not erase. Factory reset still does not erase persist."
+	echo "erase-part persist stays refused."
+	echo "A persist image over 64MB is refused."
+	if ! confirm_dangerous "type dangerous to reset FRP: "; then
+		return 1
+	fi
+	need_loaders || return 1
+	mkdir -p "$DUMP_DIR"
+	out=$DUMP_DIR/persist-before-$(date +%Y%m%d-%H%M%S).img
+	echo "Backup: $out"
+	echo "spdhost asks for the word dangerous again before the read."
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" frp-reset "$out" reset
 }
 
 extra_menu() {
@@ -1476,11 +1736,11 @@ extra_menu() {
 	echo "[1] Factory reset (recovery wipe BCB; already on reboot menu)"
 	echo "[2] Set active slot (a/b)"
 	echo "[3] Power off"
-	echo "[4] Disable verity: temporary disabled (would edit vbmeta; not sent)"
-	echo "[5] Reset FRP: temporary disabled (would erase persist; not sent)"
+	echo "[4] DANGEROUS: verity (vbmeta byte 0x7B; type the word dangerous)"
+	echo "[5] DANGEROUS: reset FRP (backup persist, then erase it)"
 	echo "[6] Reboot recovery"
 	echo "[7] Reboot fastbootd"
-	echo "[8] Unlock BootLoader: temporary disabled"
+	echo "[8] DANGEROUS: unlock bootloader (erases splloader until the last step)"
 	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
 	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
 	read -r -p "Choice: " choice
@@ -1496,14 +1756,8 @@ extra_menu() {
 				run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
 			fi
 			;;
-		4)
-			echo "Disable verity: temporary disabled."
-			echo "spd_dump verity 0 clears vbmeta flags. This tool does not send that."
-			;;
-		5)
-			echo "Reset FRP: temporary disabled."
-			echo "The release menu reads and erases persist. This tool does not erase persist."
-			;;
+		4) verity_menu ;;
+		5) frp_reset_menu ;;
 		6)
 			if confirm_reboot_cmd reboot-recovery; then
 				guarded_misc_session reboot-recovery reboot-recovery
@@ -1547,7 +1801,7 @@ while true; do
 	echo "[6] Flash images from input/"
 	echo "[7] Restore a backup folder"
 	echo "[8] Repartition from XML"
-	echo "[9] Extra (slot, hex mode, disabled unlock / verity / FRP)"
+	echo "[9] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)"
 	echo "[0] Quit"
 	read -r -p "Choice: " choice
 	case ${choice:-} in

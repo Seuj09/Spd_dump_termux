@@ -107,9 +107,10 @@ phone. The shipped `fdl/ums9230/infinix/` pair is one example only.
 ### Menu wipe (BCB only)
 
 Menu reboot option `[5]` writes `misc/misc-wipe.bin` then `reset`. Recovery
-honors `--wipe_data` and erases userdata on the next boot. spdhost does
-**not** erase the `persist` or `userdata` partitions itself (unlike some
-rooted wipe flows). Use only on a sacrificial device.
+honors `--wipe_data` and erases userdata on the next boot. That menu
+item does **not** erase `persist` or `userdata` itself. The separate
+FRP command does back up and erase `persist`, and it is labeled dangerous.
+Use only on a sacrificial device.
 
 This tree is original. It is not a fork of either repository below, and it
 does not carry their code. Read them when you want to see how someone else
@@ -135,9 +136,12 @@ BootROM exploit. The code does none of that: it `write()`s a usbfs descriptor
 (that node is ioctl-based, not a byte stream), the frame has no length or
 checksum, and the exploit function sends 256 zero bytes. Do not start from it.
 
-spdhost also does not implement bootloader exploits, AVB or verity changes,
-or FRP-specific commands. `write-part` and `erase-part` are ordinary partition
-I/O. They ask you to type `yes` unless you pass `--yes`.
+spdhost does not implement bootloader exploits and does not ship
+`fdl2-cboot.bin`, `spl-unlock.bin`, or `gen_spl-unlock`. `verity`,
+`frp-reset`, and `danger-erase` are labeled dangerous: `--yes` does not
+authorize them. You type the word `dangerous` on the terminal, or pass
+`--dangerous` yourself. The menu never passes `--dangerous`. `write-part`
+and `erase-part` still ask you to type `yes` unless you pass `--yes`.
 
 ## Build
 
@@ -327,10 +331,17 @@ brick the disk if it stops halfway).
 
 `write-parts DIR` (and `write-parts-a` / `write-parts-b`) writes
 `DIR/<partition>.img` after `parts`, then sets the active slot when the
-device is A/B. `super.img` without `metadata.img` erases `metadata`, same as
-spd_dump. The scan includes every regular file; spd_dump's directory loop
-skips one entry. Junk names (`*.txt`, `SHA256SUMS`, `misc-slotinfo`,
-`misc-before-*`, `*_bak`) are skipped.
+device is A/B. `super.img` without `metadata.img` erases `metadata` when
+that name is in the live table. A file whose name is not on the phone is
+skipped, and so is a broken `fixnv1` image; the other files are still
+written. An empty file, or one larger than its partition, stops the restore
+before anything is sent. `splloader` is written up to the live row size.
+With no splloader row the file is sent whole; a dump of splloader is still
+256 KiB. A sparse image (the file starts with `0xED26FF3A`) is sent as that
+container, and each chunk may wait up to 100 seconds. The scan includes
+every regular file; spd_dump's directory loop skips one entry. Junk names
+(`*.txt`, `SHA256SUMS`, `misc-slotinfo`, `misc-before-*`, `*_bak`) are
+skipped.
 
 `repartition FILE.xml` sends `<Partition id="name" size="N"/>` rows
 (`N` is the XML integer, MiB, or `0xffffffff` for the last row). It asks
@@ -340,8 +351,30 @@ for `yes`. Run `parts` again afterwards; the cached table is stale.
 writes the whole misc image back, with the same backup and read-back.
 `pack-slot a|b IN OUT` does that patch offline, with no phone attached.
 
-`erase-part NAME` erases one partition. It refuses `persist`, `all`, and
-`splloader` (no FRP helper, no erase-everything, no bootloader-unlock erase).
+`erase-part NAME` erases one partition. It still refuses `persist`,
+`persist_a`, `persist_b`, `all`, `splloader`, and `splloader_bak`, even
+with `--yes` or `--dangerous`.
+
+`verity 0` writes `0x01` at offset `0x7B` of `vbmeta` (the active slot's
+name when the unsuffixed row is absent). `verity 1` writes `0x00` at that
+offset on `vbmeta`, `vbmeta_system`, `vbmeta_vendor`, `vbmeta_system_ext`,
+`vbmeta_product`, and `vbmeta_odm`, and skips a name that is not on the
+phone. This is the byte spd_dump writes. It is not the AVB flag at `0x78`.
+The whole partition is read and written back. A row that does not cover
+`0x7B`, or is over 64MB, is not written. Run `parts` first.
+
+`frp-reset OUT` reads all of `persist` (or `persist_a` / `persist_b` for
+the active slot) to OUT, checks the file size, then erases that partition.
+A failed or short read does not erase. Over 64MB is refused. Run `parts`
+first.
+
+`danger-erase NAME` erases only `persist`, `persist_a`, `persist_b`,
+`splloader`, or `splloader_bak`. A persist name that is not in the live
+table is not erased. `splloader` is still sent when the table has no such
+row, which is what the release unlock does.
+
+Those three commands ignore `--yes`. Without a terminal they send nothing
+unless you pass `--dangerous`.
 
 `reboot-recovery` and `reboot-fastboot` write a 2048-byte BCB to `misc` then
 reset (see misc section). Writes, erases, repartition, and reboot ask you to
@@ -350,9 +383,16 @@ device path. Options go before the commands:
 
 The menu (`scripts/menu.sh`) can flash `input/*.img`, restore a backup
 folder, repartition, set the slot, and dump the imei set (`miscdata`,
-`prodnv`, `l_fixnv1`, `l_fixnv2`, `l_runtimenv1`, `l_runtimenv2`). Unlock
-BootLoader, disable-verity, and FRP reset are listed and temporary disabled:
-nothing is sent. Only the ums9230 Infinix loader pair is shipped. The release
+`prodnv`, `l_fixnv1`, `l_fixnv2`, `l_runtimenv1`, `l_runtimenv2`). Extra menu items
+for verity, FRP reset, and bootloader unlock are labeled DANGEROUS and ask
+you to type the word `dangerous`. Yes does not start them. Unlock sends
+nothing until it can see `fdl2-cboot.bin` and either `spl-unlock.bin` or
+`gen_spl-unlock`. It looks in the current directory, in
+`ums9230/infinix/` (where the release package keeps `fdl2-cboot.bin` next
+to `fdl1-dl.bin`), and beside that package's `menu.sh` (where
+`gen_spl-unlock` lives). Those files are not in this tree. Only the
+ums9230 Infinix loader pair is
+shipped. The release
 menu's second exec address `0x65015f48` is used only when
 `custom_exec_no_verify_65015f48.bin` is actually on disk.
 
@@ -406,6 +446,14 @@ not silently pick the shipped ums9230 Infinix loaders
 `~/.spdhost-menu.conf`. Those files match the release menu's UMS9230 /
 Infinix choice.
 
+After a flash, restore, repartition, slot change, or dump, the menu runs
+the same ending the release menu does: system (`reset`), recovery
+(`reboot-recovery`), fastbootd (`reboot-fastboot`), or power off. Recovery
+and fastbootd write the 2048-byte BCB after the other commands. The slot
+bytes at misc+0x800 are not inside that write. Verity and FRP end with
+`reset` on their own, after you type `dangerous`. Unlock is several
+sessions and also ends by writing the splloader backup back.
+
 Dump (option 1) fetches the live `parts` table into
 `./backup/partition_list.txt` (name + size), prints it like the rooted
 menu's LIST PARTISI, then resolves what you type to the closest name
@@ -415,9 +463,10 @@ bulk dump (splloader, then everything except userdata/cache/blackbox;
 `all_lite` also skips the inactive slot read from misc). Option 4 only refreshes the list. Reboot choices are
 system (`reset`), recovery (`reboot-recovery`), fastbootd
 (`reboot-fastboot`), power off, and optional wipe userdata via
-`misc/misc-wipe.bin` (BCB + reset only). Misc/reboot/wipe paths always use
-a typed confirm and never pass `--yes`. It does not unlock or flash a
-partition you did not name.
+`misc/misc-wipe.bin` (BCB + reset only; that path still does not erase
+persist). Misc/reboot/wipe paths always use a typed confirm and never pass
+`--yes`. The dangerous extra items never pass `--yes` or `--dangerous`;
+spdhost asks for the word `dangerous` on the terminal again.
 
 Option 5, smoke test, is a safe, read-only check tuned for this release:
 `--self-test`, an environment check (`termux-usb`, `termux-toast`/

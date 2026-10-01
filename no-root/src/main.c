@@ -62,6 +62,9 @@ static void usage(void)
 		"                      runs; exit status is 1 and failures are listed\n"
 		"  --no-line-state     skip the smartphone line-state control transfer\n"
 		"  --yes               do not prompt before write / erase / repartition / reboot-*\n"
+		"                      Does NOT authorize verity, frp-reset, or danger-erase.\n"
+		"  --dangerous         authorize those three without a typed word. The menu\n"
+		"                      never passes this. A terminal user types dangerous.\n"
 		"  --confirm-token SHA256  authorize ONE misc write (reboot-*, write-part\n"
 		"                      misc) whose exact bytes have this sha256; any\n"
 		"                      other bytes are refused before sending. For a\n"
@@ -96,7 +99,7 @@ static void usage(void)
 		"  write-part NAME FILE     one partition. misc is 2048 bytes or the\n"
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
-		"                          the device is not A/B. No vbmeta flag edit.\n"
+		"                          the device is not A/B. Does not edit vbmeta.\n"
 		"  write-parts DIR         every image in DIR (NAME.img), then the\n"
 		"                          active slot. write-parts-a / write-parts-b\n"
 		"                          force that slot when those files exist.\n"
@@ -107,6 +110,16 @@ static void usage(void)
 		"  set-active a|b          rewrite misc slot bytes (backup + verify)\n"
 		"  pack-slot a|b IN OUT    offline: patch a misc image at offset 0x800\n"
 		"  erase-part NAME         not persist, not splloader, not all\n"
+		"  verity 0|1              DANGEROUS. Byte 0x7B of vbmeta (spd_dump):\n"
+		"                          0 writes 0x01 (dm-verity off), 1 writes 0x00\n"
+		"                          on each vbmeta* that exists. Not byte 0x78.\n"
+		"                          Needs parts. Over 64MB is refused. --yes is not enough.\n"
+		"  frp-reset OUT           DANGEROUS. Read all of persist to OUT, check\n"
+		"                          the file size, then erase persist. A failed or\n"
+		"                          short read does not erase. Needs parts.\n"
+		"  danger-erase NAME       DANGEROUS. Only persist, persist_a, persist_b,\n"
+		"                          splloader, splloader_bak. erase-part still refuses\n"
+		"                          those names. --yes is not enough.\n"
 		"  chip-uid\n"
 		"  reboot-recovery            write 2048-byte BCB to misc, then reset\n"
 		"  reboot-fastboot            same with --fastboot recovery arg\n"
@@ -247,6 +260,56 @@ static void confirm(int yes, const char *verb, const char *name)
 	exit(1);
 }
 
+/* verity / frp-reset / danger-erase. --yes does not pass this gate.
+ * --dangerous does (tests and a caller that already took the word). */
+static int dangerous_ok;
+
+static void confirm_dangerous(const char *what)
+{
+	char buf[64], prompt[320], hex[3 * 64 + 1];
+	int in_fd = -1, out_fd = -1, tty = -1, n, k;
+
+	if (dangerous_ok) {
+		fprintf(stderr, "DANGEROUS confirmed via --dangerous: %s\n", what);
+		return;
+	}
+	fprintf(stderr, "spdhost: DANGEROUS: %s. --yes does not authorize this.\n", what);
+	tty = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+	if (isatty(STDIN_FILENO))
+		in_fd = STDIN_FILENO;
+	else if (tty >= 0)
+		in_fd = tty;
+	if (in_fd < 0) {
+		fprintf(stderr, "spdhost: refusing %s without a terminal; nothing sent\n", what);
+		exit(1);
+	}
+	out_fd = tty >= 0 ? tty : STDIN_FILENO;
+	snprintf(prompt, sizeof(prompt), "spdhost: type dangerous to %s: ", what);
+	put_fd(out_fd, prompt);
+	fprintf(stderr, "%s(waiting for input on the terminal)\n", prompt);
+	n = read_line_fd(in_fd, buf, sizeof(buf));
+	if (tty >= 0)
+		close(tty);
+	hex[0] = 0;
+	for (k = 0; k < n && k < 64; k++)
+		snprintf(hex + 3 * k, 4, "%02x ", (unsigned char)buf[k]);
+	if (n > 0) {
+		int l = n;
+		while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r' || buf[l - 1] == ' ' || buf[l - 1] == '\t'))
+			l--;
+		buf[l] = 0;
+		if (strcmp(buf, "dangerous") == 0) {
+			fprintf(stderr, "spdhost: DANGEROUS confirmed: %s\n", what);
+			return;
+		}
+	}
+	if (n > 0 && hex[0])
+		hex[strlen(hex) - 1] = 0;
+	fprintf(stderr, "spdhost: not confirmed (read: %s); nothing sent\n",
+		n > 0 ? hex : n == 0 ? "EOF" : strerror(errno));
+	exit(1);
+}
+
 /* Gate for a write of LEN bytes BUF to partition NAME. With --confirm-token:
  * only misc, only once, only these exact bytes; a mismatch refuses before
  * anything is sent. Without a token: --yes or the typed confirm. */
@@ -314,6 +377,8 @@ static int is_command(const char *s)
 		strcmp(s, "exec_addr") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
+		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
+		strcmp(s, "danger-erase") == 0 ||
 		strcmp(s, "write-parts") == 0 || strcmp(s, "write-parts-a") == 0 ||
 		strcmp(s, "write-parts-b") == 0 || strcmp(s, "repartition") == 0 ||
 		strcmp(s, "set-active") == 0 || strcmp(s, "pack-slot") == 0 ||
@@ -583,6 +648,99 @@ static int erase_refused(const char *name)
 	return 0;
 }
 
+static int part_named(struct spd *io, const char *name)
+{
+	int i;
+	if (!io || io->nparts <= 0)
+		return 0;
+	for (i = 0; i < io->nparts; i++)
+		if (!strcmp(io->ptab[i].name, name))
+			return 1;
+	return 0;
+}
+
+static int same_file_size(const char *path, uint64_t expect)
+{
+	FILE *f;
+	off_t n;
+	f = fopen(path, "rb");
+	if (!f)
+		return -1;
+	if (fseeko(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return -1;
+	}
+	n = ftello(f);
+	fclose(f);
+	if (n < 0)
+		return -1;
+	return (uint64_t)n == expect ? 0 : -1;
+}
+
+/* Backup persist, then erase it. A short or failed read leaves the partition. */
+static int frp_reset(struct spd *io, const char *out)
+{
+	char resolved[40];
+	uint64_t sz = 0;
+	int slot, lk;
+
+	if (!io || io->nparts <= 0) {
+		fprintf(stderr, "frp-reset: run parts first; nothing sent\n");
+		return -1;
+	}
+	slot = spd_active_slot(io);
+	lk = spd_lookup_part(io, "persist", slot, resolved, sizeof(resolved), &sz);
+	if (lk != 0 || sz == 0) {
+		fprintf(stderr, "frp-reset: persist is not in the live table; nothing sent\n");
+		return -1;
+	}
+	if (sz > (64ull << 20)) {
+		fprintf(stderr, "frp-reset: %s is %llu bytes, over the 64MB cap; nothing erased\n",
+			resolved, (unsigned long long)sz);
+		return -1;
+	}
+	fprintf(stderr, "DANGEROUS frp-reset: reading %s (%llu bytes) to %s, then erasing it\n",
+		resolved, (unsigned long long)sz, out);
+	if (spd_read_part(io, resolved, 0, sz, out)) {
+		fprintf(stderr, "frp-reset: read failed; %s was not erased\n", resolved);
+		return -1;
+	}
+	if (same_file_size(out, sz)) {
+		fprintf(stderr, "frp-reset: %s size does not match %llu; %s was not erased\n",
+			out, (unsigned long long)sz, resolved);
+		return -1;
+	}
+	if (spd_erase_part(io, resolved)) {
+		fprintf(stderr, "frp-reset: erase of %s failed; backup is %s\n", resolved, out);
+		return -1;
+	}
+	fprintf(stderr, "DANGEROUS frp-reset: erased %s after backup %s\n", resolved, out);
+	return 0;
+}
+
+static int danger_erase(struct spd *io, const char *name)
+{
+	int persist, spl, listed;
+
+	persist = !strcmp(name, "persist") || !strcmp(name, "persist_a") || !strcmp(name, "persist_b");
+	spl = !strcmp(name, "splloader") || !strcmp(name, "splloader_bak");
+	if (!persist && !spl) {
+		fprintf(stderr,
+			"danger-erase: refusing '%s' (only persist, persist_a, persist_b, splloader, splloader_bak); nothing sent\n",
+			name);
+		return -1;
+	}
+	listed = part_named(io, name);
+	if (persist && !listed) {
+		fprintf(stderr, "danger-erase: %s is not in the live table; nothing sent\n", name);
+		return -1;
+	}
+	if (spl && io->nparts > 0 && !listed)
+		fprintf(stderr, "danger-erase: %s is not in the live table; erasing that name anyway\n", name);
+	fprintf(stderr, "DANGEROUS erase: %s\n", name);
+	return spd_erase_part(io, name);
+}
+
 static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab)
 {
 	struct spd_op *ops;
@@ -670,6 +828,7 @@ int main(int argc, char **argv)
 		{"keep-going", no_argument, NULL, 'k'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"yes", no_argument, NULL, 'y'},
+		{"dangerous", no_argument, NULL, 'G'},
 		{"confirm-token", required_argument, NULL, 'C'},
 		{"no-line-state", no_argument, NULL, 'L'},
 		{"self-test", no_argument, NULL, 'T'},
@@ -748,6 +907,9 @@ int main(int argc, char **argv)
 			break;
 		case 'y':
 			yes = 1;
+			break;
+		case 'G':
+			dangerous_ok = 1;
 			break;
 		case 'C': {
 			size_t k;
@@ -1029,6 +1191,36 @@ int main(int argc, char **argv)
 				return 1;
 			confirm(yes, "erase", argv[i + 1]);
 			if (spd_erase_part(io, argv[i + 1]))
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "verity") == 0) {
+			char what[64];
+			need(argc, i, 1, "verity");
+			need_fdl2(io, "verity");
+			if (strcmp(argv[i + 1], "0") != 0 && strcmp(argv[i + 1], "1") != 0) {
+				fprintf(stderr, "verity: want 0 (disable) or 1 (enable)\n");
+				return 1;
+			}
+			snprintf(what, sizeof(what), "%s verity (vbmeta byte 0x7b)",
+				argv[i + 1][0] == '0' ? "disable" : "enable");
+			confirm_dangerous(what);
+			if (spd_verity(io, argv[i + 1][0] == '1'))
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "frp-reset") == 0) {
+			need(argc, i, 1, "frp-reset");
+			need_fdl2(io, "frp-reset");
+			confirm_dangerous("reset FRP (backup persist, then erase it)");
+			if (frp_reset(io, argv[i + 1]))
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "danger-erase") == 0) {
+			char what[80];
+			need(argc, i, 1, "danger-erase");
+			need_fdl2(io, "danger-erase");
+			snprintf(what, sizeof(what), "erase %s", argv[i + 1]);
+			confirm_dangerous(what);
+			if (danger_erase(io, argv[i + 1]))
 				return 1;
 			i += 2;
 		} else if (strcmp(cmd, "chip-uid") == 0) {

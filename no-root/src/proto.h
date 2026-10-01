@@ -68,6 +68,9 @@ int spd_write_part(struct spd *io, const char *name, const char *path);
 int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len);
 /* fixnv1 image: same NV framing spd_dump load_nv_partition uses (not a raw copy). */
 int spd_write_nv(struct spd *io, const char *name, const char *path);
+/* 0 when PATH frames as an NV image. -1 when it is unreadable or broken.
+ * Sends nothing. A restore skips a broken file; a single write-part still fails. */
+int spd_nv_image_ok(const char *path);
 /* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
 int spd_repartition_xml(struct spd *io, const char *path);
 int spd_erase_part(struct spd *io, const char *name);

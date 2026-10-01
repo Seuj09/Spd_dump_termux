@@ -452,7 +452,10 @@ int spd_misc_guard_armed(void)
 }
 
 /* After writing BUF (LEN bytes at offset 0) to misc: read the whole misc
- * back; [0,LEN) must equal BUF and [LEN,end) must equal the backup. */
+ * back; [0,LEN) must equal BUF and [LEN,end) must equal the last image we
+ * accepted. The file from misc-backup stays the pre-session copy. The
+ * in-memory baseline moves forward so a later 2048-byte BCB (reboot-recovery
+ * after set-active) still checks that the slot bytes were not clobbered. */
 int spd_misc_verify(struct spd *io, const uint8_t *buf, size_t len)
 {
 	uint8_t *now;
@@ -467,8 +470,10 @@ int spd_misc_verify(struct spd *io, const uint8_t *buf, size_t len)
 			fprintf(stderr, "misc-verify: first %zu bytes differ from what was written\n", len);
 		else if (memcmp(now + len, guard_before + len, guard_len - len))
 			fprintf(stderr, "misc-verify: bytes after %zu changed (should be untouched)\n", len);
-		else
+		else {
+			memcpy(guard_before, buf, len);
 			rc = 0;
+		}
 	}
 	free(now);
 	if (rc == 0)

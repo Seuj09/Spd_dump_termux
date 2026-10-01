@@ -1,7 +1,8 @@
 /* Directory restore and single-partition writes.
  * Behavior follows spd_dump load_partitions / load_partition_unify, except:
- * no temporary repartition (w_force), no vbmeta flag wipe, and runtimenv is
- * written rather than erased. The directory scan visits every regular file;
+ * no temporary repartition (w_force), and runtimenv is written rather than
+ * erased. vbmeta byte 0x7B is only spd_verity(), not a side effect of write.
+ * The directory scan visits every regular file;
  * spd_dump's readdir loop skips one entry.
  *
  * fseeko/ftello must be declared. On arm32 an implicit declaration passes
@@ -35,6 +36,23 @@ static int file_len(const char *path, uint64_t *out)
 	if (n < 0)
 		return -1;
 	*out = (uint64_t)n;
+	return 0;
+}
+
+/* Dump lookup reports every splloader* name as 256 KiB. A write uses the
+ * live row's byte size, and no cap when that row is absent: spd_dump sends
+ * the file either way. A row that really is 256 KiB still refuses a larger file. */
+static uint64_t write_byte_limit(struct spd *io, const char *resolved, uint64_t lookup_size)
+{
+	int i;
+	if (strncmp(resolved, "splloader", 9) != 0)
+		return lookup_size;
+	if (!io || io->nparts <= 0)
+		return 0;
+	for (i = 0; i < io->nparts; i++) {
+		if (!strcmp(io->ptab[i].name, resolved))
+			return io->ptab[i].size;
+	}
 	return 0;
 }
 
@@ -74,7 +92,7 @@ static int rank_of(const char *name)
 
 struct plan_item {
 	char name[40];
-	char path[512];
+	char path[1024];
 	int rank;
 };
 
@@ -102,6 +120,7 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 		fprintf(stderr, "write %s: %s is missing or empty\n", resolved, path);
 		return -1;
 	}
+	psz = write_byte_limit(io, resolved, psz);
 	if (psz && flen > psz) {
 		fprintf(stderr, "write %s: file is %llu bytes, partition is %llu; nothing sent\n",
 			resolved, (unsigned long long)flen, (unsigned long long)psz);
@@ -144,7 +163,7 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 	struct plan_item *items = NULL;
 	struct spd_op *ops;
 	int nitems = 0, cap = 0, i, pass, vab = 0, slot, have_a, super = 0, metadata = 0;
-	char misc_path[512];
+	char misc_path[1024];
 	misc_path[0] = 0;
 	*n = 0;
 	if (!dir || !dir[0]) {
@@ -161,7 +180,7 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		return NULL;
 	}
 	while ((de = readdir(dp)) != NULL) {
-		char raw[256], name[40], path[512];
+		char raw[256], name[40], path[1024];
 		struct stat st;
 		size_t namelen;
 		char *dot;
@@ -247,7 +266,7 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		for (i = 0; i < nitems; i++) {
 			size_t L = strlen(items[i].name);
 			uint64_t psz = 0, flen = 0;
-			char resolved[40], keep[512];
+			char resolved[40], keep[1024];
 			int lk;
 			if (slot == 1 && L > 2 && !strcmp(items[i].name + L - 2, "_b")) {
 				fprintf(stderr, "write-parts: skip inactive %s\n", items[i].name);
@@ -259,14 +278,16 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 			}
 			lk = spd_lookup_part(io, items[i].name, slot, resolved, sizeof(resolved), &psz);
 			if (lk != 0) {
-				fprintf(stderr, "write-parts: %s is not in the live table\n", items[i].name);
-				free(items);
-				return NULL;
+				fprintf(stderr,
+					"write-parts: skip %s (not in the live table); the rest of this restore continues\n",
+					items[i].name);
+				continue;
 			}
 			if (!strcmp(resolved, "calinv")) {
 				fprintf(stderr, "write-parts: skip calinv\n");
 				continue;
 			}
+			psz = write_byte_limit(io, resolved, psz);
 			if (file_len(items[i].path, &flen) || flen == 0 || (psz && flen > psz)) {
 				fprintf(stderr, "write-parts: %s is empty or larger than the partition (%llu > %llu)\n",
 					resolved, (unsigned long long)flen, (unsigned long long)psz);
@@ -277,6 +298,12 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 				fprintf(stderr, "write-parts: misc image must be 2048 bytes or the whole partition\n");
 				free(items);
 				return NULL;
+			}
+			if (strstr(resolved, "fixnv1") && spd_nv_image_ok(items[i].path)) {
+				fprintf(stderr,
+					"write-parts: skip %s (not an NV image); the rest of this restore continues\n",
+					resolved);
+				continue;
 			}
 			snprintf(keep, sizeof(keep), "%s", items[i].path);
 			snprintf(items[w].name, sizeof(items[w].name), "%s", resolved);
@@ -313,10 +340,17 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 	}
 	free(items);
 	if (super && !metadata) {
-		ops[*n].kind = SPD_OP_ERASE_METADATA;
-		snprintf(ops[*n].name, sizeof(ops[*n].name), "metadata");
-		(*n)++;
-		fprintf(stderr, "write-parts: super is restored without metadata.img; metadata will be erased\n");
+		char meta_name[40];
+		uint64_t meta_sz = 0;
+		if (spd_lookup_part(io, "metadata", 0, meta_name, sizeof(meta_name), &meta_sz) == 0) {
+			ops[*n].kind = SPD_OP_ERASE_METADATA;
+			snprintf(ops[*n].name, sizeof(ops[*n].name), "metadata");
+			(*n)++;
+			fprintf(stderr, "write-parts: super is restored without metadata.img; metadata will be erased\n");
+		} else {
+			fprintf(stderr,
+				"write-parts: super is restored without metadata.img, and metadata is not in the live table; leaving it alone\n");
+		}
 	}
 	if (slot == 1 || slot == 2) {
 		ops[*n].kind = SPD_OP_SET_SLOT;
@@ -324,4 +358,93 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		(*n)++;
 	}
 	return ops;
+}
+
+/* Whole-partition rewrite of one byte at 0x7B. Returns 0 written, 1 absent,
+ * -1 refused or failed (a failed read does not write). */
+static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, int missing_ok)
+{
+	char resolved[40];
+	uint64_t sz = 0;
+	uint8_t *buf;
+	int lk;
+
+	lk = spd_lookup_part(io, name, slot, resolved, sizeof(resolved), &sz);
+	if (lk != 0 || sz == 0) {
+		if (missing_ok)
+			fprintf(stderr, "verity: skip %s (not in the live table)\n", name);
+		return 1;
+	}
+	if (sz <= 0x7B) {
+		fprintf(stderr,
+			"verity: %s is %llu bytes; offset 0x7b is past the end; not written\n",
+			resolved, (unsigned long long)sz);
+		return -1;
+	}
+	if (sz > (64ull << 20) || sz > (uint64_t)SIZE_MAX) {
+		fprintf(stderr,
+			"verity: %s is %llu bytes, over the 64MB patch cap; not written\n",
+			resolved, (unsigned long long)sz);
+		return -1;
+	}
+	buf = malloc((size_t)sz);
+	if (!buf) {
+		fprintf(stderr, "verity: out of memory for %s; not written\n", resolved);
+		return -1;
+	}
+	if (spd_read_part_mem(io, resolved, 0, sz, buf)) {
+		free(buf);
+		fprintf(stderr, "verity: read %s failed; that partition was not written\n", resolved);
+		return -1;
+	}
+	fprintf(stderr, "DANGEROUS verity: %s byte 0x7b: %02x -> %02x (%llu-byte rewrite)\n",
+		resolved, buf[0x7B], val, (unsigned long long)sz);
+	buf[0x7B] = val;
+	if (spd_write_part_buf(io, resolved, buf, (size_t)sz)) {
+		free(buf);
+		return -1;
+	}
+	free(buf);
+	return 0;
+}
+
+int spd_verity(struct spd *io, int enable)
+{
+	static const char *list[] = {
+		"vbmeta", "vbmeta_system", "vbmeta_vendor",
+		"vbmeta_system_ext", "vbmeta_product", "vbmeta_odm", NULL
+	};
+	int slot, i, wrote = 0, rc;
+	uint8_t val = enable ? 0x00 : 0x01;
+
+	if (!io || io->nparts <= 0) {
+		fprintf(stderr, "verity: run parts first; nothing sent\n");
+		return -1;
+	}
+	slot = spd_active_slot(io);
+	if (!enable) {
+		rc = verity_one(io, "vbmeta", slot, val, 0);
+		if (rc != 0) {
+			if (rc > 0)
+				fprintf(stderr, "verity: vbmeta is not in the live table; nothing sent\n");
+			else
+				fprintf(stderr, "verity: vbmeta was not patched\n");
+			return -1;
+		}
+		return 0;
+	}
+	for (i = 0; list[i]; i++) {
+		rc = verity_one(io, list[i], slot, val, 1);
+		if (rc < 0) {
+			fprintf(stderr, "verity: stopped on %s\n", list[i]);
+			return -1;
+		}
+		if (rc == 0)
+			wrote = 1;
+	}
+	if (!wrote) {
+		fprintf(stderr, "verity: no vbmeta partition was in the live table; nothing sent\n");
+		return -1;
+	}
+	return 0;
 }

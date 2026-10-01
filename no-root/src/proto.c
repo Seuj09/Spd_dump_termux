@@ -1106,6 +1106,7 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	FILE *fi;
 	uint64_t len, off;
 	int step = io->step;
+	int chunk_ms = io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000;
 
 	fi = fopen(path, "rb");
 	if (!fi) {
@@ -1123,6 +1124,24 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	}
 	if (fseeko(fi, 0, SEEK_SET) != 0)
 		die("fseek");
+	/* spd_dump waits 100s per chunk when the file is an Android sparse image.
+	 * The container is still sent as raw bytes. Other writes stay at 15s. */
+	{
+		int sparse = 0;
+		if (len >= 4) {
+			uint8_t mag[4];
+			if (fread(mag, 1, 4, fi) != 4)
+				die("short read");
+			sparse = mag[0] == 0x3a && mag[1] == 0xff && mag[2] == 0x26 && mag[3] == 0xed;
+			if (fseeko(fi, 0, SEEK_SET) != 0)
+				die("fseek");
+		}
+		if (sparse) {
+			chunk_ms = io->usb.timeout_ms > 100000 ? io->usb.timeout_ms : 100000;
+			fprintf(stderr, "write %s: sparse image, waiting up to %d ms per chunk\n",
+				name, chunk_ms);
+		}
+	}
 	fprintf(stderr, "write %s: %llu bytes from %s\n", name, (unsigned long long)len, path);
 
 	select_part(io, name, len, BSL_CMD_START_DATA);
@@ -1144,7 +1163,7 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 		if (spd_send(io) < 0)
 			die("send failed during write");
 		{
-			int got = spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000);
+			int got = spd_recv(io, chunk_ms);
 			if (got == 0)
 				die("timeout during write");
 			if (got < 0)
@@ -1168,10 +1187,16 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 {
 	uint64_t off;
 	int step = io->step;
+	int chunk_ms = io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000;
 
 	if (!buf) {
 		fprintf(stderr, "write-part-buf: null buffer\n");
 		return -1;
+	}
+	if (len >= 4 && buf[0] == 0x3a && buf[1] == 0xff && buf[2] == 0x26 && buf[3] == 0xed) {
+		chunk_ms = io->usb.timeout_ms > 100000 ? io->usb.timeout_ms : 100000;
+		fprintf(stderr, "write %s: sparse image, waiting up to %d ms per chunk\n",
+			name, chunk_ms);
 	}
 	fprintf(stderr, "write %s: %zu bytes from buffer\n", name, len);
 
@@ -1191,7 +1216,7 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 		if (spd_send(io) < 0)
 			die("send failed during write");
 		{
-			int got = spd_recv(io, io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000);
+			int got = spd_recv(io, chunk_ms);
 			if (got == 0)
 				die("timeout during write");
 			if (got < 0)
@@ -1270,6 +1295,38 @@ static int nv_frame(uint8_t *mem, size_t flen, size_t *len_out)
 		}
 	}
 	*len_out = len;
+	return 0;
+}
+
+int spd_nv_image_ok(const char *path)
+{
+	FILE *fi;
+	uint8_t *mem;
+	size_t flen, len;
+	off_t sz;
+
+	fi = fopen(path, "rb");
+	if (!fi)
+		return -1;
+	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) < 4 ||
+		(unsigned long long)sz > (unsigned long long)SIZE_MAX ||
+		fseeko(fi, 0, SEEK_SET) != 0) {
+		fclose(fi);
+		return -1;
+	}
+	flen = (size_t)sz;
+	mem = malloc(flen);
+	if (!mem || fread(mem, 1, flen, fi) != flen) {
+		free(mem);
+		fclose(fi);
+		return -1;
+	}
+	fclose(fi);
+	if (nv_frame(mem, flen, &len)) {
+		free(mem);
+		return -1;
+	}
+	free(mem);
 	return 0;
 }
 

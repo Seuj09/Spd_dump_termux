@@ -72,8 +72,14 @@ static uint64_t part_size(const char *n)
 {
 	int i;
 	load_tab();
+	/* A listed splloader row is its real size. An unlisted one stays 256 KiB,
+	 * which is what dumps request. */
+	if (ntab > 0) {
+		for (i = 0; i < ntab; i++) if (!strcmp(tab[i].n, n)) return tab[i].kb << 10;
+		if (!strcmp(n, "splloader")) return 256 << 10;
+		return 0;
+	}
 	if (!strcmp(n, "splloader")) return 256 << 10;
-	if (ntab > 0) { for (i = 0; i < ntab; i++) if (!strcmp(tab[i].n, n)) return tab[i].kb << 10; return 0; }
 	if (!strcmp(n, "misc")) return 1 << 20;
 	if (!strcmp(n, "miscdata")) return 1 << 20;
 	if (!strcmp(n, "userdata")) return 6ull << 30; /* 6 GiB */

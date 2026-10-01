@@ -104,9 +104,231 @@ sh huge parts pt.txt write-part boot_a huge.img; rc=$?
 check "oversized write refused before START (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_huge.log && ! grep -q '62006f006f0074005f006100' sh_huge.seq"
 
-# Menu rows: UBL prints the disabled note and does not call the wrapper.
-check "menu unlock is disabled" bash -c "SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source \"$root/scripts/menu.sh\"; unlock_bootloader_menu' | grep -q 'temporary disabled'"
-check "menu flash/restore/repartition functions exist" bash -c "SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source \"$root/scripts/menu.sh\"; type flash_input_menu restore_backup_menu repartition_menu set_slot_menu extra_menu dump_imei_session'"
+# An unknown name is skipped. The sibling that is on the phone is still written.
+mkdir -p skipdir
+printf 'A' > skipdir/boot_a.img
+printf 'Z' > skipdir/nosuchpart.img
+sh skip parts pt.txt write-parts skipdir; rc=$?
+check "unknown name skipped, boot_a still written (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_skip.seq && grep -q 'skip nosuchpart' sh_skip.log"
+
+# A broken fixnv1 is skipped during a restore. A single write-part still sends nothing.
+mkdir -p nvbad
+printf 'A' > nvbad/boot_a.img
+printf 'NOTNV' > nvbad/l_fixnv1.img
+sh nvbad parts pt.txt write-parts nvbad; rc=$?
+check "broken fixnv1 skipped, boot_a still written (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_nvbad.seq && ! grep -q '6c005f006600690078006e0076003100' sh_nvbad.seq && grep -q 'not an NV image' sh_nvbad.log"
+sh nvone parts pt.txt write-part l_fixnv1 nvbad/l_fixnv1.img; rc=$?
+check "single broken fixnv1 sends nothing (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_nvone.log && ! grep -q '6c005f006600690078006e0076003100' sh_nvone.seq"
+
+# No splloader row: a file past the 256 KiB dump size is offered. This mock's
+# unlisted splloader is still 256 KiB, so the device NACKs, but the client
+# must not refuse before START.
+dd if=/dev/zero of=bigspl.img bs=1024 count=300 status=none
+sh splnack parts pt.txt write-part splloader bigspl.img; rc=$?
+check "splloader over 256KiB is offered when the table has no row (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q '730070006c006c006f006100640065007200' sh_splnack.seq && ! grep -q 'nothing sent' sh_splnack.log"
+# A listed row of 2048 KiB (shift stays 10) accepts that same 300 KiB file.
+cp pt pt-spl
+echo 'splloader 2048' >> pt-spl
+MOCK_PTABLE=$tmp/pt-spl sh splok parts ptspl-out.txt write-part splloader bigspl.img; rc=$?
+check "splloader write uses the live row, not the 256KiB dump size (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '730070006c006c006f006100640065007200' sh_splok.seq && ! grep -q 'nothing sent' sh_splok.log"
+
+# super without a metadata row must not erase after the super write.
+grep -v '^metadata ' pt > pt-nometa
+mkdir -p nometa
+printf 'S' > nometa/super.img
+MOCK_PTABLE=$tmp/pt-nometa sh nometa parts ptnometa.txt write-parts nometa; rc=$?
+check "no metadata row: super is written and metadata is left alone (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'leaving it alone' sh_nometa.log && ! grep -q 'erasing metadata' sh_nometa.log && grep -q '73007500700065007200' sh_nometa.seq"
+
+# Sparse container: same bytes, longer per-chunk wait. Mock acks immediately.
+python3 -c 'open("sparse.img","wb").write(bytes.fromhex("3aff26ed")+b"\x00"*64)'
+sh sparse parts pt.txt write-part super sparse.img; rc=$?
+check "sparse image uses the 100s chunk wait (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'waiting up to 100000 ms' sh_sparse.log && grep -q '73007500700065007200' sh_sparse.seq"
+
+# One oversized image still aborts the whole plan before any START.
+mkdir -p hugedir
+dd if=/dev/zero of=hugedir/boot_a.img bs=1 count=1 seek=$((5*1024*1024)) status=none
+printf 'V' > hugedir/notapart.img
+sh hugedir parts pt.txt write-parts hugedir; rc=$?
+check "oversized image aborts the plan before START (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -q '62006f006f0074005f006100' sh_hugedir.seq"
+
+# DANGEROUS commands. --yes is already on the sh() line and must not be enough.
+cp pt pt-vb
+echo 'vbmeta 1024' >> pt-vb
+MOCK_PTABLE=$tmp/pt-vb sh verbad --dangerous parts ptv.txt verity 0; rc=$?
+check "verity 0 rewrites vbmeta byte 0x7b to 01 (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'DANGEROUS verity: vbmeta byte 0x7b: .* -> 01' sh_verbad.log && grep -q '760062006d00650074006100' sh_verbad.seq"
+MOCK_PTABLE=$tmp/pt-vb sh veron --dangerous parts ptv2.txt verity 1; rc=$?
+check "verity 1 writes 00 and skips missing vbmeta_* (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'DANGEROUS verity: vbmeta byte 0x7b: .* -> 00' sh_veron.log && grep -q 'skip vbmeta_system' sh_veron.log"
+sh vergate --dangerous parts pt.txt verity 0; rc=$?
+check "verity 0 with no vbmeta sends nothing (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_vergate.log && ! grep -q 'DANGEROUS verity:' sh_vergate.log"
+MOCK_PTABLE=$tmp/pt-vb sh vergate2 parts ptv3.txt verity 0; rc=$?
+check "verity ignores --yes (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'does not authorize' sh_vergate2.log && ! grep -q 'DANGEROUS verity:' sh_vergate2.log"
+cp pt pt-huge
+echo 'vbmeta 81920' >> pt-huge
+MOCK_PTABLE=$tmp/pt-huge sh verhuge --dangerous parts pthuge.txt verity 0; rc=$?
+check "verity refuses a vbmeta over 64MB before the patch (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q '64MB' sh_verhuge.log && ! grep -q 'DANGEROUS verity:' sh_verhuge.log"
+
+cp pt pt-frp
+echo 'persist 1024' >> pt-frp
+MOCK_PTABLE=$tmp/pt-frp sh frp --dangerous parts ptfrp.txt frp-reset persist-out.img; rc=$?
+check "frp-reset backs up persist then erases it (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(wc -c < persist-out.img) = 1048576 ] && grep -q 'erased persist' sh_frp.log && grep -q 'SEQ 0a ' sh_frp.seq && grep -q '7000650072007300690073007400' sh_frp.seq"
+MOCK_PTABLE=$tmp/pt-frp sh frpgate parts ptfrp2.txt frp-reset persist-no.img; rc=$?
+check "frp-reset ignores --yes and does not erase (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_frpgate.log && ! grep -q 'SEQ 0a ' sh_frpgate.seq && [ ! -f persist-no.img ]"
+sh frpstill --dangerous parts pt.txt erase-part persist; rc=$?
+check "erase-part persist stays refused with --dangerous (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'refusing' sh_frpstill.log && ! grep -q 'SEQ 0a ' sh_frpstill.seq"
+sh splerg --dangerous parts pt.txt danger-erase splloader; rc=$?
+check "danger-erase splloader is sent when the row is absent (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'erasing that name anyway' sh_splerg.log && grep -q 'SEQ 0a ' sh_splerg.seq && grep -q '730070006c006c006f006100640065007200' sh_splerg.seq"
+sh splno parts pt.txt danger-erase splloader; rc=$?
+check "danger-erase ignores --yes (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_splno.log && ! grep -q 'SEQ 0a ' sh_splno.seq"
+sh bootno --dangerous parts pt.txt danger-erase boot_a; rc=$?
+check "danger-erase refuses boot_a (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'refusing' sh_bootno.log && ! grep -q 'SEQ 0a ' sh_bootno.seq"
+
+# Menu: missing unlock files send nothing. Present files still need a TTY word.
+menu_unlock_missing() {
+	local d
+	d=$(mktemp -d)
+	( cd "$d" && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/echo bash -c "source \"$root/scripts/menu.sh\"; unlock_bootloader_menu" >"$d/out" 2>"$d/err" )
+	grep -q fdl2-cboot.bin "$d/out" && grep -q "nothing sent" "$d/out" && ! grep -q danger-erase "$d/out"
+}
+menu_danger_notty() {
+	local d rec
+	d=$(mktemp -d)
+	rec=$d/ran
+	: >"$rec"
+	cat >"$d/run" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$rec"
+EOF
+	chmod +x "$d/run"
+	( cd "$d" && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER="$d/run" bash -c "source \"$root/scripts/menu.sh\"; verity_menu; frp_reset_menu" </dev/null >"$d/out" 2>"$d/err" )
+	grep -q "Nothing sent" "$d/out" && ! grep -q . "$rec"
+}
+check "menu unlock names missing loaders and sends nothing" menu_unlock_missing
+menu_find_release_files() {
+	local d found
+	d=$(mktemp -d)
+	mkdir -p "$d/ums9230/infinix" "$d/pkg/ums9230/infinix"
+	printf x > "$d/ums9230/infinix/fdl2-cboot.bin"
+	printf x > "$d/pkg/gen_spl-unlock"
+	chmod +x "$d/pkg/gen_spl-unlock"
+	: > "$d/pkg/ums9230/infinix/fdl1-dl.bin"
+	found=$(cd "$d" && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c "source \"$root/scripts/menu.sh\"
+find_user_file fdl2-cboot.bin
+FDL1=\"$d/pkg/ums9230/infinix/fdl1-dl.bin\"
+find_gen_spl_unlock")
+	[[ $found == "$d/ums9230/infinix/fdl2-cboot.bin"$'\n'"$d/pkg/gen_spl-unlock" ]]
+}
+check "menu finds release fdl2-cboot.bin and gen_spl-unlock" menu_find_release_files
+check "menu verity and FRP refuse without a TTY" menu_danger_notty
+# Release menu endings: recovery and fastbootd after the images.
+sh after parts pt.txt write-parts imgs reboot-recovery; rc=$?
+check "write-parts then reboot-recovery writes the BCB (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_after.seq && grep -q 'writing 2048-byte BCB' sh_after.log && grep -q 'reboot-recovery' sh_after.log"
+ba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c "source '$root/scripts/menu.sh'
+boot_after_menu >/dev/null <<'EOF'
+2
+EOF
+boot_after_menu >/dev/null <<'EOF'
+3
+EOF
+printf %s \"\$BOOT_AFTER\"")
+check "menu boot-after offers recovery and fastbootd" test "$ba" = reboot-fastboot
+check "menu flash/restore/repartition functions exist" bash -c "SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source \"$root/scripts/menu.sh\"; type flash_input_menu restore_backup_menu repartition_menu set_slot_menu extra_menu dump_imei_session verity_menu frp_reset_menu unlock_bootloader_menu'"
+# Files present, no TTY: still nothing. Files present on a pty: sessions run, erase only after the dump, and the menu does not pass --dangerous.
+check "menu unlock on a pty dumps before erase and does not pass --dangerous" python3 - "$root" "$tmp" << 'PY'
+import os, pty, select, subprocess, sys, time, pathlib
+root = pathlib.Path(sys.argv[1])
+work = pathlib.Path(sys.argv[2]) / "ubl"
+work.mkdir()
+(work / "fdl2-cboot.bin").write_bytes(b"cboot")
+(work / "spl-unlock.bin").write_bytes(b"unlock")
+rec = work / "ran"
+runner = work / "run"
+runner.write_text("""#!/bin/sh
+printf '%%s\\n' "$*" >> "%s"
+case "$*" in
+  *dump*splloader*)
+    mkdir -p "%s/backup_spl"
+    printf spl > "%s/backup_spl/splloader.img"
+    printf ub > "%s/backup_spl/uboot_a.img"
+    printf 'slot a\\n' > "%s/backup_spl/dump-manifest.txt"
+    ;;
+esac
+exit 0
+""" % (rec, work, work, work, work))
+runner.chmod(0o755)
+fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
+fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
+script = """
+source "%s/scripts/menu.sh"
+FDL1="%s"
+FDL1_ADDR=0x65000800
+FDL2="%s"
+FDL2_ADDR=0x9efffe00
+unlock_bootloader_menu
+""" % (root, fdl1, fdl2)
+env = os.environ.copy()
+env.update(SPDHOST_MENU_LIB="1", SPDHOST_MENU_RUNNER=str(runner), SPDHOST_DUMP_DIR=str(work / "backup"))
+master, slave = pty.openpty()
+p = subprocess.Popen(["bash", "-c", script], stdin=slave, stdout=slave, stderr=slave, cwd=work, env=env)
+os.close(slave)
+os.write(master, b"dangerous\n")
+deadline = time.time() + 15
+while time.time() < deadline and p.poll() is None:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if r:
+        try:
+            os.read(master, 4096)
+        except OSError:
+            break
+    else:
+        try:
+            os.write(master, b"\n")
+        except OSError:
+            break
+if p.poll() is None:
+    p.kill()
+    raise SystemExit("unlock menu hung")
+rc = p.wait()
+text = rec.read_text() if rec.exists() else ""
+lines = [ln for ln in text.splitlines() if ln.strip()]
+def has(pred):
+    return next((i for i, ln in enumerate(lines) if pred(ln)), -1)
+dump_i = has(lambda s: "dump" in s and "splloader" in s and "danger-erase" not in s)
+erase_i = has(lambda s: "danger-erase" in s and "splloader_bak" in s)
+cboot_i = has(lambda s: "write-part" in s and "uboot" in s and "fdl2-cboot.bin" in s)
+unlock_i = has(lambda s: "spl-unlock.bin" in s and "fdl2-dl.bin" not in s)
+status_i = has(lambda s: "read-part" in s and "miscdata" in s and "8192" in s)
+restore_i = has(lambda s: "write-part" in s and "splloader.img" in s and "uboot" in s)
+bad = []
+if rc != 0:
+    bad.append("rc %s" % rc)
+if any("--dangerous" in ln or "--yes" in ln or "--keep-going" in ln for ln in lines):
+    bad.append("flag leaked: " + text)
+order = [dump_i, erase_i, cboot_i, unlock_i, status_i, restore_i]
+if any(i < 0 for i in order) or order != sorted(order):
+    bad.append("order %s\n%s" % (order, text))
+if bad:
+    raise SystemExit("; ".join(bad))
+PY
 bash -n "$root/scripts/menu.sh"
 check "menu.sh syntax" test $? -eq 0
 
