@@ -58,7 +58,18 @@ FDL2=""
 FDL2_ADDR=""
 
 pause() {
+	# Explicit return 0: this is a UI delay, not a readiness signal. Without
+	# it, pause's own exit status (read's status) becomes this function's
+	# implicit return value, and read fails (EOF) whenever stdin is not an
+	# interactive terminal. ready() ends with a call to pause(), and every
+	# session-starting function now gates on `ready || return 1` — so a
+	# non-interactive stdin would make every one of those silently report
+	# "not ready" and abort, even though nothing about the device or the
+	# exec stub was actually checked at that point. Verified: this is what
+	# took tests/menu-dump.sh from 46/47 to 12/47 passing before this line
+	# was added back.
 	read -r -p "Press Enter to continue..." _
+	return 0
 }
 
 cls() {
