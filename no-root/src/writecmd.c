@@ -156,7 +156,7 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	return spd_write_part(io, bak, path);
 }
 
-struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int *n)
+struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n)
 {
 	DIR *dp;
 	struct dirent *de;
@@ -239,7 +239,11 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		if (!strcmp(io->ptab[i].name, "uboot_a"))
 			have_a = 1;
 	slot = spd_active_slot(io);
-	if (force_ab && (force_ab & vab)) {
+	if (flash_each) {
+		fprintf(stderr,
+			"write-files: device slot %s; every named image is written; the slot is not changed\n",
+			slot == 1 ? "a" : slot == 2 ? "b" : "not A/B");
+	} else if (force_ab && (force_ab & vab)) {
 		slot = force_ab;
 		fprintf(stderr, "write-parts: forced slot %s\n", slot == 1 ? "a" : "b");
 	} else if (misc_path[0]) {
@@ -268,11 +272,13 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 			uint64_t psz = 0, flen = 0;
 			char resolved[40], keep[1024];
 			int lk;
-			if (slot == 1 && L > 2 && !strcmp(items[i].name + L - 2, "_b")) {
+			/* Restore drops the inactive slot. A one-file flash (release
+			 * menu option 2) writes the name the user put in input/. */
+			if (!flash_each && slot == 1 && L > 2 && !strcmp(items[i].name + L - 2, "_b")) {
 				fprintf(stderr, "write-parts: skip inactive %s\n", items[i].name);
 				continue;
 			}
-			if (slot == 2 && L > 2 && !strcmp(items[i].name + L - 2, "_a")) {
+			if (!flash_each && slot == 2 && L > 2 && !strcmp(items[i].name + L - 2, "_a")) {
 				fprintf(stderr, "write-parts: skip inactive %s\n", items[i].name);
 				continue;
 			}
@@ -339,7 +345,7 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		}
 	}
 	free(items);
-	if (super && !metadata) {
+	if (!flash_each && super && !metadata) {
 		char meta_name[40];
 		uint64_t meta_sz = 0;
 		if (spd_lookup_part(io, "metadata", 0, meta_name, sizeof(meta_name), &meta_sz) == 0) {
@@ -352,7 +358,7 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 				"write-parts: super is restored without metadata.img, and metadata is not in the live table; leaving it alone\n");
 		}
 	}
-	if (slot == 1 || slot == 2) {
+	if (!flash_each && (slot == 1 || slot == 2)) {
 		ops[*n].kind = SPD_OP_SET_SLOT;
 		ops[*n].slot = slot == 1 ? 'a' : 'b';
 		(*n)++;

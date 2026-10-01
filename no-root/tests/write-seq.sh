@@ -91,6 +91,13 @@ printf 'S' > imgs/super.img
 sh restore parts pt.txt write-parts imgs; rc=$?
 check "write-parts writes boot_a, skips boot_b, erases metadata (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_restore.seq && ! grep -q '62006f006f0074005f006200' sh_restore.seq && grep -q 'erasing metadata' sh_restore.log && grep -q 'set-active: slot a' sh_restore.log"
+mkdir -p flashdir
+printf 'A' > flashdir/boot_a.img
+printf 'B' > flashdir/boot_b.img
+printf 'S' > flashdir/super.img
+sh flash parts pt.txt write-files flashdir; rc=$?
+check "write-files writes both slots and leaves metadata and the slot (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_flash.seq && grep -q '62006f006f0074005f006200' sh_flash.seq && ! grep -q 'erasing metadata' sh_flash.log && ! grep -q 'set-active: slot' sh_flash.log"
 
 sh noerase parts pt.txt erase-part persist; rc=$?
 check "erase persist refused (rc $rc)" \
@@ -158,6 +165,12 @@ printf 'V' > hugedir/notapart.img
 sh hugedir parts pt.txt write-parts hugedir; rc=$?
 check "oversized image aborts the plan before START (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -q '62006f006f0074005f006100' sh_hugedir.seq"
+
+# Two dumps in one process must both stay in the manifest (imei set).
+mkdir -p twodump
+sh twodump parts pt.txt dump boot_a twodump dump boot_b twodump; rc=$?
+check "two dumps append the manifest (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'ok boot_a' twodump/dump-manifest.txt && grep -q 'ok boot_b' twodump/dump-manifest.txt && [ \$(stat -c %s twodump/boot_a.img) = $((4096*1024)) ]"
 
 # DANGEROUS commands. --yes is already on the sh() line and must not be enough.
 cp pt pt-vb
@@ -265,15 +278,16 @@ runner = work / "run"
 runner.write_text("""#!/bin/sh
 printf '%%s\\n' "$*" >> "%s"
 case "$*" in
-  *dump*splloader*)
+  *read-part*splloader*|*dump*splloader*)
     mkdir -p "%s/backup_spl"
     printf spl > "%s/backup_spl/splloader.img"
     printf ub > "%s/backup_spl/uboot_a.img"
-    printf 'slot a\\n' > "%s/backup_spl/dump-manifest.txt"
+    printf 'old\\n' > "%s/backup_spl/uboot.img"
+    printf 'slot a\\nok uboot_a\\n' > "%s/backup_spl/dump-manifest.txt"
     ;;
 esac
 exit 0
-""" % (rec, work, work, work, work))
+""" % (rec, work, work, work, work, work))
 runner.chmod(0o755)
 fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
 fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
@@ -312,12 +326,12 @@ text = rec.read_text() if rec.exists() else ""
 lines = [ln for ln in text.splitlines() if ln.strip()]
 def has(pred):
     return next((i for i, ln in enumerate(lines) if pred(ln)), -1)
-dump_i = has(lambda s: "dump" in s and "splloader" in s and "danger-erase" not in s)
+dump_i = has(lambda s: "read-part" in s and "splloader" in s and "262144" in s and "danger-erase" not in s)
 erase_i = has(lambda s: "danger-erase" in s and "splloader_bak" in s)
 cboot_i = has(lambda s: "write-part" in s and "uboot" in s and "fdl2-cboot.bin" in s)
 unlock_i = has(lambda s: "spl-unlock.bin" in s and "fdl2-dl.bin" not in s)
 status_i = has(lambda s: "read-part" in s and "miscdata" in s and "8192" in s)
-restore_i = has(lambda s: "write-part" in s and "splloader.img" in s and "uboot" in s)
+restore_i = has(lambda s: "write-part" in s and "splloader.img" in s and "uboot_a.img" in s and "parts" in s)
 bad = []
 if rc != 0:
     bad.append("rc %s" % rc)

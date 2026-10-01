@@ -17,8 +17,10 @@ struct spd_op {
 
 /* NULL and *n == 0 on refusal. Caller frees the returned array.
  * force_ab: 0 = follow the device/misc image, 1 = slot a, 2 = slot b
- * (only when that slot's files are actually in the directory). */
-struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int *n);
+ * (only when that slot's files are actually in the directory).
+ * flash_each: release-menu "pasang partisi". Write every named image,
+ * including the inactive slot. Do not erase metadata and do not set the slot. */
+struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n);
 
 /* One file onto a resolved partition. Refuses a file bigger than the live
  * row. splloader uses that row, or no cap when the row is absent (the 256 KiB

@@ -323,6 +323,9 @@ int spd_dump(struct spd *io, const char *target, const char *outdir)
 {
 	char failed[1024] = "";
 	int nfail = 0, i, mode, slot;
+	/* One spdhost process can dump several names (the imei set). The first
+	 * dump creates the manifest; a later dump in that process appends. */
+	static int manifest_started;
 	if (io->nparts <= 0) {
 		fprintf(stderr, "dump: no partition table (run `parts` first)\n");
 		return -1;
@@ -331,11 +334,12 @@ int spd_dump(struct spd *io, const char *target, const char *outdir)
 		char mp[1100], sp[1100];
 		snprintf(mp, sizeof(mp), "%s/dump-manifest.txt", outdir);
 		snprintf(sp, sizeof(sp), "%s/misc-slotinfo.img", outdir);
-		manifest = fopen(mp, "w");
+		manifest = fopen(mp, manifest_started ? "a" : "w");
 		if (!manifest) {
 			fprintf(stderr, "dump: cannot write %s: %s\n", mp, strerror(errno));
 			return -1;
 		}
+		manifest_started = 1;
 		slot_copy_path = sp;
 		slot = spd_active_slot(io);
 		slot_copy_path = NULL;

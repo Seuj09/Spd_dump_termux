@@ -329,19 +329,22 @@ is written with a normal transfer. vbmeta flags are left as they are in the
 file. There is no `w_force` (that repartitions to rename a row, which can
 brick the disk if it stops halfway).
 
-`write-parts DIR` (and `write-parts-a` / `write-parts-b`) writes
-`DIR/<partition>.img` after `parts`, then sets the active slot when the
-device is A/B. `super.img` without `metadata.img` erases `metadata` when
-that name is in the live table. A file whose name is not on the phone is
-skipped, and so is a broken `fixnv1` image; the other files are still
-written. An empty file, or one larger than its partition, stops the restore
-before anything is sent. `splloader` is written up to the live row size.
-With no splloader row the file is sent whole; a dump of splloader is still
-256 KiB. A sparse image (the file starts with `0xED26FF3A`) is sent as that
-container, and each chunk may wait up to 100 seconds. The scan includes
-every regular file; spd_dump's directory loop skips one entry. Junk names
-(`*.txt`, `SHA256SUMS`, `misc-slotinfo`, `misc-before-*`, `*_bak`) are
-skipped.
+`write-parts DIR` (and `write-parts-a` / `write-parts-b`) is the restore
+path. It writes `DIR/<partition>.img` after `parts`, skips the inactive
+slot, then sets the active slot when the device is A/B. `super.img`
+without `metadata.img` erases `metadata` when that name is in the live
+table. `write-files DIR` is the flash path (release menu option 2): every
+named image is written, including an inactive `_a` or `_b` file. It does
+not erase metadata and does not change the slot. A file whose name is not
+on the phone is skipped, and so is a broken `fixnv1` image; the other
+files are still written. An empty file, or one larger than its partition,
+stops the plan before anything is sent. `splloader` is written up to the
+live row size. With no splloader row the file is sent whole; a dump of
+splloader is still 256 KiB. A sparse image (the file starts with
+`0xED26FF3A`) is sent as that container, and each chunk may wait up to
+100 seconds. The scan includes every regular file; spd_dump's directory
+loop skips one entry. Junk names (`*.txt`, `SHA256SUMS`, `misc-slotinfo`,
+`misc-before-*`, `*_bak`) are skipped.
 
 `repartition FILE.xml` sends `<Partition id="name" size="N"/>` rows
 (`N` is the XML integer, MiB, or `0xffffffff` for the last row). It asks
@@ -365,7 +368,7 @@ The whole partition is read and written back. A row that does not cover
 
 `frp-reset OUT` reads all of `persist` (or `persist_a` / `persist_b` for
 the active slot) to OUT, checks the file size, then erases that partition.
-A failed or short read does not erase. Over 64MB is refused. Run `parts`
+A failed or short read does not erase. Over 512MB is refused. Run `parts`
 first.
 
 `danger-erase NAME` erases only `persist`, `persist_a`, `persist_b`,
@@ -452,7 +455,10 @@ the same ending the release menu does: system (`reset`), recovery
 and fastbootd write the 2048-byte BCB after the other commands. The slot
 bytes at misc+0x800 are not inside that write. Verity and FRP end with
 `reset` on their own, after you type `dangerous`. Unlock is several
-sessions and also ends by writing the splloader backup back.
+sessions. It reads splloader as 256 KiB, erases only after that backup
+exists, and the last session loads `parts` before writing splloader and
+the active uboot name back. A failed erase skips the unlock loader and
+still writes that backup back.
 
 Dump (option 1) fetches the live `parts` table into
 `./backup/partition_list.txt` (name + size), prints it like the rooted

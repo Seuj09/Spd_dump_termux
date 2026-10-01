@@ -100,11 +100,15 @@ static void usage(void)
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
 		"                          the device is not A/B. Does not edit vbmeta.\n"
-		"  write-parts DIR         every image in DIR (NAME.img), then the\n"
-		"                          active slot. write-parts-a / write-parts-b\n"
-		"                          force that slot when those files exist.\n"
-		"                          Run parts first. super without metadata.img\n"
-		"                          erases metadata. No w_force repartition.\n"
+		"  write-parts DIR         restore: every image in DIR (NAME.img), skip\n"
+		"                          the inactive slot, then set the active slot.\n"
+		"                          write-parts-a / write-parts-b force that slot\n"
+		"                          when those files exist. Run parts first.\n"
+		"                          super without metadata.img erases metadata.\n"
+		"                          No w_force repartition.\n"
+		"  write-files DIR         flash: every named image, including the\n"
+		"                          inactive slot. Does not erase metadata and\n"
+		"                          does not change the active slot.\n"
 		"  repartition FILE.xml    replace the partition table from XML\n"
 		"                          <Partition id=\"..\" size=\"..\"/>. Destructive.\n"
 		"  set-active a|b          rewrite misc slot bytes (backup + verify)\n"
@@ -117,6 +121,7 @@ static void usage(void)
 		"  frp-reset OUT           DANGEROUS. Read all of persist to OUT, check\n"
 		"                          the file size, then erase persist. A failed or\n"
 		"                          short read does not erase. Needs parts.\n"
+		"                          Over 512MB is refused.\n"
 		"  danger-erase NAME       DANGEROUS. Only persist, persist_a, persist_b,\n"
 		"                          splloader, splloader_bak. erase-part still refuses\n"
 		"                          those names. --yes is not enough.\n"
@@ -124,7 +129,7 @@ static void usage(void)
 		"  reboot-recovery            write 2048-byte BCB to misc, then reset\n"
 		"  reboot-fastboot            same with --fastboot recovery arg\n"
 		"  reset\n"
-		"  power-off\n"
+		"  power-off                  also accepted as poweroff (release menu)\n"
 		"\n"
 		"ADDR, OFF and SIZE accept a 0x hex prefix and a K/M/G suffix.\n"
 		"The first fdl talks to BootROM (CRC-16). A second fdl talks to FDL1\n"
@@ -299,6 +304,10 @@ static void confirm_dangerous(const char *what)
 			l--;
 		buf[l] = 0;
 		if (strcmp(buf, "dangerous") == 0) {
+			/* One typed word covers the rest of this process. The unlock
+			 * session erases splloader and then splloader_bak; a second
+			 * refusal would exit after the first erase. */
+			dangerous_ok = 1;
 			fprintf(stderr, "spdhost: DANGEROUS confirmed: %s\n", what);
 			return;
 		}
@@ -380,13 +389,14 @@ static int is_command(const char *s)
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
 		strcmp(s, "danger-erase") == 0 ||
 		strcmp(s, "write-parts") == 0 || strcmp(s, "write-parts-a") == 0 ||
-		strcmp(s, "write-parts-b") == 0 || strcmp(s, "repartition") == 0 ||
+		strcmp(s, "write-parts-b") == 0 || strcmp(s, "write-files") == 0 ||
+		strcmp(s, "repartition") == 0 ||
 		strcmp(s, "set-active") == 0 || strcmp(s, "pack-slot") == 0 ||
 		strcmp(s, "chip-uid") == 0 ||
 		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
 		strcmp(s, "reset") == 0 || strcmp(s, "dump") == 0 ||
 		strcmp(s, "misc-backup") == 0 ||
-		strcmp(s, "power-off") == 0;
+		strcmp(s, "power-off") == 0 || strcmp(s, "poweroff") == 0;
 }
 
 static int need(int argc, int i, int n, const char *what)
@@ -694,8 +704,10 @@ static int frp_reset(struct spd *io, const char *out)
 		fprintf(stderr, "frp-reset: persist is not in the live table; nothing sent\n");
 		return -1;
 	}
-	if (sz > (64ull << 20)) {
-		fprintf(stderr, "frp-reset: %s is %llu bytes, over the 64MB cap; nothing erased\n",
+	/* The read streams to a file. The cap only stops a corrupt table from
+	 * filling the disk. A normal persist image is well under this. */
+	if (sz > (512ull << 20)) {
+		fprintf(stderr, "frp-reset: %s is %llu bytes, over the 512MB cap; nothing erased\n",
 			resolved, (unsigned long long)sz);
 		return -1;
 	}
@@ -741,12 +753,12 @@ static int danger_erase(struct spd *io, const char *name)
 	return spd_erase_part(io, name);
 }
 
-static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab)
+static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab, int flash_each)
 {
 	struct spd_op *ops;
 	int n = 0, k;
-	confirm(yes, "write all partitions from", dir);
-	ops = spd_plan_writes(io, dir, force_ab, &n);
+	confirm(yes, flash_each ? "write each named image from" : "write all partitions from", dir);
+	ops = spd_plan_writes(io, dir, force_ab, flash_each, &n);
 	if (!ops)
 		return -1;
 	for (k = 0; k < n; k++) {
@@ -1152,15 +1164,17 @@ int main(int argc, char **argv)
 			}
 			i += 3;
 		} else if (strcmp(cmd, "write-parts") == 0 || strcmp(cmd, "write-parts-a") == 0 ||
-			strcmp(cmd, "write-parts-b") == 0) {
-			int force = 0;
+			strcmp(cmd, "write-parts-b") == 0 || strcmp(cmd, "write-files") == 0) {
+			int force = 0, flash = 0;
 			need(argc, i, 1, cmd);
 			need_fdl2(io, cmd);
-			if (!strcmp(cmd, "write-parts-a"))
+			if (!strcmp(cmd, "write-files"))
+				flash = 1;
+			else if (!strcmp(cmd, "write-parts-a"))
 				force = 1;
 			else if (!strcmp(cmd, "write-parts-b"))
 				force = 2;
-			if (run_write_plan(io, yes, argv[i + 1], force))
+			if (run_write_plan(io, yes, argv[i + 1], force, flash))
 				return 1;
 			i += 2;
 		} else if (strcmp(cmd, "repartition") == 0) {
@@ -1244,7 +1258,7 @@ int main(int argc, char **argv)
 				return 1;
 			i++;
 			break; /* spd_dump: `if (!send_and_check(io)) break;` */
-		} else if (strcmp(cmd, "power-off") == 0) {
+		} else if (strcmp(cmd, "power-off") == 0 || strcmp(cmd, "poweroff") == 0) {
 			if (spd_simple(io, 0x17))
 				return 1;
 			i++;

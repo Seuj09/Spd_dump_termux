@@ -769,6 +769,7 @@ dump_imei_session() {
 	mkdir -p "$DUMP_DIR"
 	echo "One session: refresh the table, then dump miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2."
 	ready || return 1
+	rm -f "$DUMP_DIR/dump-manifest.txt"
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" \
 		dump miscdata "$DUMP_DIR" \
@@ -780,7 +781,7 @@ dump_imei_session() {
 		"$BOOT_AFTER"
 	rc=$?
 	[[ -s $raw ]] && load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
-	return "$rc"
+	verify_dump_manifest "$rc"
 }
 
 dump_partition() {
@@ -1407,21 +1408,22 @@ flash_input_menu() {
 	if (( ${#skipped[@]} )); then
 		echo "Not flashed: ${skipped[*]}"
 	fi
+	echo "Each file is written under its own name, including an inactive _a or _b image."
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "An empty image, or one larger than its partition, aborts the flash before anything is sent."
 	echo "misc.img, if present, is backed up and verified."
+	echo "This flash does not change the active slot and does not erase metadata."
 	echo "splloader.img is written up to the live table size. With no splloader row, the file is sent whole (a dump is still 256 KiB)."
 	echo "A broken l_fixnv1 image is skipped. A sparse image waits up to 100 seconds per chunk."
 	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
 	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
-	echo "super.img without metadata.img erases metadata when that partition is on the phone."
 	if ! confirm_action "type yes to flash these partitions: "; then
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-parts "$INPUT_DIR" "$BOOT_AFTER"
+		parts "$(parts_cache_path)" write-files "$INPUT_DIR" "$BOOT_AFTER"
 }
 
 # Release menu option 4: write_parts of the backup folder.
@@ -1543,7 +1545,7 @@ hex_mode_menu() {
 # Release-menu unlock. fdl2-cboot.bin and spl-unlock.bin are not shipped.
 # A missing dump does not continue into the erase. --dangerous is not passed.
 unlock_bootloader_menu() {
-	local cboot unlock genbin= work spl uboot slotf rc
+	local cboot unlock genbin= work spl uboot slotf rc erase_rc=0
 	cboot=$(find_user_file fdl2-cboot.bin || true)
 	unlock=$(find_user_file spl-unlock.bin || true)
 	genbin=$(find_gen_spl_unlock || true)
@@ -1581,9 +1583,13 @@ unlock_bootloader_menu() {
 	spl=$work/splloader.img
 	if [[ ! -s $spl ]] || ! uboot=$(unlock_pick_uboot "$work"); then
 		echo "Backing up splloader and uboot into $work. Nothing is erased in this session."
+		echo "splloader is read as 256 KiB, the size the release menu's r splloader uses."
 		ready || return 1
+		rm -f "$work/dump-manifest.txt"
 		if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-			parts "$(parts_cache_path)" dump splloader "$work" dump uboot "$work" reset; then
+			parts "$(parts_cache_path)" \
+			read-part splloader 0 262144 "$spl" \
+			dump uboot "$work" reset; then
 			echo "Backup failed. splloader was not erased. Nothing further sent."
 			return 1
 		fi
@@ -1607,15 +1613,19 @@ unlock_bootloader_menu() {
 		fi
 	fi
 	echo "DANGEROUS: next session erases splloader and splloader_bak, then reset."
-	echo "spdhost asks for the word dangerous again. Any other answer sends nothing."
-	echo "The backup stays in $work. Run this item again to continue."
+	echo "spdhost asks for the word dangerous once. That answer covers both erases."
+	echo "Any other answer sends nothing."
+	echo "The backup stays in $work."
 	pause || return 1
 	ready || return 1
-	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		danger-erase splloader danger-erase splloader_bak reset; then
-		echo "Erase session failed. If splloader was erased, re-run this item so the last step can restore $work."
-		return 1
+	erase_rc=0
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		danger-erase splloader danger-erase splloader_bak reset || erase_rc=$?
+	if (( erase_rc != 0 )); then
+		echo "Erase session failed (exit $erase_rc)."
+		echo "The unlock loader is skipped. The last session still writes $work back."
 	fi
+	if (( erase_rc == 0 )); then
 	echo "Next session writes $cboot onto uboot (the active slot name)."
 	echo "spdhost asks you to type yes for that write."
 	echo "A file larger than the uboot partition is refused, and the backup is written back."
@@ -1644,19 +1654,37 @@ unlock_bootloader_menu() {
 			echo "Status read failed."
 		unlock_describe_status "$slotf"
 	fi
+	fi
 	echo "Last session writes the dumped splloader and uboot back, then reset."
+	echo "parts runs first so uboot is the active slot name, not the bare word uboot."
 	echo "spdhost asks you to type yes for each of those writes."
 	pause || return 1
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" \
 		write-part splloader "$spl" write-part uboot "$uboot" reset
 }
 
 unlock_pick_uboot() {
-	local d=$1 slot
-	slot=$(awk '/^slot /{print $2; exit}' "$d/dump-manifest.txt" 2>/dev/null || true)
-	if [[ $slot == a && -s $d/uboot_a.img ]]; then printf '%s\n' "$d/uboot_a.img"; return 0; fi
-	if [[ $slot == b && -s $d/uboot_b.img ]]; then printf '%s\n' "$d/uboot_b.img"; return 0; fi
+	local d=$1 tag name pick=
+	# The manifest names the image this dump actually wrote. An older
+	# uboot_a.img left in the folder must not win over a new uboot.img.
+	if [[ -f $d/dump-manifest.txt ]]; then
+		while read -r tag name _; do
+			[[ $tag == ok ]] || continue
+			case $name in
+				uboot|uboot_a|uboot_b)
+					if [[ -s $d/$name.img ]]; then
+						pick=$d/$name.img
+					fi
+					;;
+			esac
+		done < "$d/dump-manifest.txt"
+	fi
+	if [[ -n $pick ]]; then
+		printf '%s\n' "$pick"
+		return 0
+	fi
 	if [[ -s $d/uboot.img ]]; then printf '%s\n' "$d/uboot.img"; return 0; fi
 	if [[ -s $d/uboot_a.img ]]; then printf '%s\n' "$d/uboot_a.img"; return 0; fi
 	if [[ -s $d/uboot_b.img ]]; then printf '%s\n' "$d/uboot_b.img"; return 0; fi
@@ -1716,7 +1744,7 @@ frp_reset_menu() {
 	echo "into a backup file, checks that file's size, then erases that partition, then reset."
 	echo "A failed or short read does not erase. Factory reset still does not erase persist."
 	echo "erase-part persist stays refused."
-	echo "A persist image over 64MB is refused."
+	echo "A persist image over 512MB is refused."
 	if ! confirm_dangerous "type dangerous to reset FRP: "; then
 		return 1
 	fi
