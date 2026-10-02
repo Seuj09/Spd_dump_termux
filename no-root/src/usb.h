@@ -37,7 +37,7 @@ void spd_usb_close(struct spd_usb *u);
 void spd_usb_enable_reacquire(struct spd_usb *u, const char *self_path);
 
 /* Called by the process termux-usb starts. Sends TERMUX_USB_FD to sock_path. */
-int spd_usb_emit_fd(const char *sock_path);
+int spd_usb_emit_fd(const char *sock_path, const char *argv_fd);
 
 /* Close the dead handle and open the device again.
  * Desktop: scan vid:pid. Termux: ask termux-usb for a new descriptor.

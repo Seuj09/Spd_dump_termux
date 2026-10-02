@@ -1,3 +1,4 @@
 no-root/dist/
 no-root/.cross-arm32/
 no-root/.cross-arm64/
+__pycache__/

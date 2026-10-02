@@ -57,6 +57,19 @@ static int brom_trace_on(void)
 	return e && e[0] && e[0] != '0';
 }
 
+/* Opt-in switch for extra control/bulk traffic the vendor reference does not
+ * send. Each of these was added by a diagnostics experiment to work around a
+ * symptom that was never reproduced here, and each was then folded into the
+ * branch as if it were a fix — so all three shipped on by default, and a phone
+ * saw a byte stream and two control transfers that the known-good client
+ * (spd_dump/common.c) never sends. Default off now; the env var turns one back
+ * on for A/B testing against a real phone. */
+static int extra_on(const char *name)
+{
+	const char *e = getenv(name);
+	return e && e[0] && e[0] != '0';
+}
+
 
 /* EXPERIMENT (item 3): one-line device summary for BootROM debugging.
  * Only printed with SPDHOST_BROM_TRACE=1 or --verbose-style trace. */
@@ -92,13 +105,17 @@ static void trace_device(struct spd_usb *u)
 
 /* CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints, called only from
  * spd_brom_after_line_state() — i.e. only on the BootROM-hello path, after
- * line-state, never from every open/reacquire (that included post-FDL EXEC
- * reacquires, which this has nothing to do with). Also resets the data
- * toggle on both sides, which rules out a toggle mismatch after an earlier
- * cancelled transfer. Errors are not fatal (some BootROMs stall the
- * request) but are always printed, trace or not — a real failure here is
- * worth knowing about even outside a debugging session.
- * Disable for A/B testing with SPDHOST_NO_CLEAR_HALT=1. */
+ * line-state, never from every open/reacquire.
+ *
+ * OFF BY DEFAULT. The vendor reference sends no CLEAR_FEATURE at all: after
+ * line-state it goes straight to the CHECK_BAUD bulk send. This was added as
+ * an unproven mitigation for a toggle desync no one has reproduced, and it
+ * puts two control transfers between the phone being detected and the hello —
+ * on a BootROM that stalls the request, that is a wedge at the worst possible
+ * moment. SPDHOST_CLEAR_HALT=1 opts back in; SPDHOST_NO_CLEAR_HALT=1 is the
+ * explicit opt-out and wins over it, so a global export cannot re-enable this
+ * by accident. Errors are not fatal (some BootROMs stall the request) but are
+ * always printed when the feature is on. */
 void spd_usb_clear_halts(struct spd_usb *u)
 {
 	const char *off = getenv("SPDHOST_NO_CLEAR_HALT");
@@ -106,9 +123,9 @@ void spd_usb_clear_halts(struct spd_usb *u)
 
 	if (!u || !u->handle)
 		return;
-	if (off && off[0] && off[0] != '0') {
+	if ((off && off[0] && off[0] != '0') || !extra_on("SPDHOST_CLEAR_HALT")) {
 		if (brom_trace_on())
-			fprintf(stderr, "brom: clear_halt skipped (SPDHOST_NO_CLEAR_HALT)\n");
+			fprintf(stderr, "brom: clear_halt skipped (off by default; SPDHOST_CLEAR_HALT=1 to send it)\n");
 		return;
 	}
 	ei = libusb_clear_halt(u->handle, (unsigned char)u->ep_in);
@@ -238,11 +255,19 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 	int err, cfg = 0;
 	u->handle = h;
 	u->gone = 0;
-	err = libusb_get_configuration(h, &cfg);
-	if (err == 0 && cfg == 0) {
-		err = libusb_set_configuration(h, 1);
-		if (err < 0 && err != LIBUSB_ERROR_NOT_SUPPORTED && err != LIBUSB_ERROR_BUSY)
-			fprintf(stderr, "warning: set_configuration: %s\n", libusb_error_name(err));
+	/* OFF BY DEFAULT. The vendor reference never issues GET_CONFIGURATION or
+	 * SET_CONFIGURATION — it detaches and claims. On a phone the kernel has
+	 * already configured the device, so a SET_CONFIGURATION here is at best
+	 * noise and at worst a re-enumeration, i.e. the device disappearing right
+	 * after it was detected. SPDHOST_SET_CONFIG=1 restores it for hosts where
+	 * the device really does arrive unconfigured. */
+	if (extra_on("SPDHOST_SET_CONFIG")) {
+		err = libusb_get_configuration(h, &cfg);
+		if (err == 0 && cfg == 0) {
+			err = libusb_set_configuration(h, 1);
+			if (err < 0 && err != LIBUSB_ERROR_NOT_SUPPORTED && err != LIBUSB_ERROR_BUSY)
+				fprintf(stderr, "warning: set_configuration: %s\n", libusb_error_name(err));
+		}
 	}
 	if (accept_vendor(u, strict_pid) || claim_bulk(u)) {
 		/* claim failed: nothing to release. accept_vendor fail: no claim yet. */
@@ -388,9 +413,14 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		fprintf(stderr, "usb send short: %d/%d\n", sent, len);
 		return -2;
 	}
-	/* Match the known-good clients: a zero-length packet only for a
-	 * 512-byte high-speed bulk pipe, and only when the transfer fills it. */
-	if (u->out_mps == 512 && (len % 512) == 0) {
+	/* OFF BY DEFAULT. A zero-length packet is a real URB on the wire, not a
+	 * no-op, and the vendor reference never sends one — it sends exactly len
+	 * bytes for an encoded message and for a raw loader chunk alike. On an
+	 * HDLC-framed loader an extra empty OUT packet at a 512-byte boundary
+	 * desyncs the stream, and every receive after it times out, which is one
+	 * of the two failure shapes being chased on a real phone. Set
+	 * SPDHOST_SEND_ZLP=1 to send it again. */
+	if (extra_on("SPDHOST_SEND_ZLP") && u->out_mps == 512 && (len % 512) == 0) {
 		int dummy = 0;
 		libusb_bulk_transfer(u->handle, u->ep_out, NULL, 0, &dummy, u->timeout_ms);
 	}
@@ -480,7 +510,7 @@ static int recv_fd(int sock)
 	return fd;
 }
 
-int spd_usb_emit_fd(const char *sock_path)
+int spd_usb_emit_fd(const char *sock_path, const char *argv_fd)
 {
 	struct sockaddr_un addr;
 	const char *env;
@@ -491,8 +521,15 @@ int spd_usb_emit_fd(const char *sock_path)
 	env = getenv("TERMUX_USB_FD");
 	if ((!env || !env[0]) && (env = getenv("SPD_USB_FD")) && env[0])
 		; /* SPD_USB_FD aliases TERMUX_USB_FD */
+	/* termux-usb only sets TERMUX_USB_FD when it was given -E. Without it the
+	 * descriptor is the launcher's argv[1] — the same two-form contract the
+	 * wrapper's generated launcher already honours (${TERMUX_USB_FD:-${1:-}}).
+	 * Reading only the env var here would make reopen fail outright on an
+	 * older termux-api. */
+	if ((!env || !env[0]) && argv_fd && argv_fd[0])
+		env = argv_fd;
 	if (!env || !env[0]) {
-		fprintf(stderr, "SPDHOST_EMIT_SOCK set but TERMUX_USB_FD/SPD_USB_FD is missing\n");
+		fprintf(stderr, "SPDHOST_EMIT_SOCK set but no USB fd (TERMUX_USB_FD/SPD_USB_FD unset, no argv[1])\n");
 		return 1;
 	}
 	errno = 0;
@@ -581,6 +618,28 @@ static void print_bus_paths(void)
 		fprintf(stderr, "  (none)\n");
 }
 
+/* Does the installed termux-usb understand -E (export TERMUX_USB_FD)?
+ * The wrapper probes the same way and keeps a legacy fallback, and the reopen
+ * child below used to hardcode -E anyway — so on a termux-api that predates
+ * the flag, every reopen attempt failed and the tool could never pick the
+ * device up again after a loader reset: the handle stays dead and every
+ * subsequent transfer times out. Probe, and drop -E when it is not there. */
+static int termux_usb_has_e(void)
+{
+	FILE *p = popen("termux-usb -h 2>&1", "r");
+	char buf[4096];
+	size_t n = 0;
+	int found = 0;
+
+	if (!p)
+		return 0;
+	n = fread(buf, 1, sizeof(buf) - 1, p);
+	buf[n] = 0;
+	pclose(p);
+	found = strstr(buf, " -E ") != NULL;
+	return found;
+}
+
 /* P4 post-FDL reconnect SM (deferred — stub/docs only this release):
  * intended harden on gone/post-EXEC: close → wait unique 1782 (prefer 4d00)
  * → re-termux-usb → new wrap; refuse multi-device auto-pick; never mid-hello.
@@ -592,6 +651,7 @@ static int grab_termux(struct spd_usb *u)
 	char dev[128];
 	struct sockaddr_un addr;
 	int listen_fd = -1, conn = -1, got = -1, i;
+	int has_e;
 	const char *tmp;
 
 	if (!u->self_path[0]) {
@@ -615,6 +675,9 @@ static int grab_termux(struct spd_usb *u)
 		rmdir(dir);
 		return -1;
 	}
+	/* Once, before the retry loop: this spawns a helper, and the loop runs up
+	 * to 60 times inside a window the BootROM measures in seconds. */
+	has_e = termux_usb_has_e();
 	listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
 		perror("socket");
@@ -671,8 +734,18 @@ static int grab_termux(struct spd_usb *u)
 			break;
 		}
 		if (pid == 0) {
+			const char *av[8];
+			int k = 0;
 			setenv("SPDHOST_EMIT_SOCK", sock_path, 1);
-			execlp("termux-usb", "termux-usb", "-r", "-E", "-e", u->self_path, dev, (char *)NULL);
+			av[k++] = "termux-usb";
+			av[k++] = "-r";
+			if (has_e)
+				av[k++] = "-E";
+			av[k++] = "-e";
+			av[k++] = u->self_path;
+			av[k++] = dev;
+			av[k] = NULL;
+			execvp("termux-usb", (char *const *)av);
 			perror("termux-usb");
 			_exit(127);
 		}

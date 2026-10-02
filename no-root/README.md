@@ -502,6 +502,17 @@ The BootROM window is short and the first permission dialog usually outlasts
 it. Cold-unplug the target ≥5 s between sessions; success once does not make
 later tries stickier without a replug.
 
+Nothing that talks to Termux:API runs between "the device was found" and
+`termux-usb` being spawned. That gap is the whole window, and every API call
+is a broadcast round trip through the same app that has to raise the
+permission dialog. Detection is a poll (`termux-usb -l`, then 0.3 s), so
+"found" already lands up to a poll interval after the device appeared;
+`usb: listed … @Xms` and `usb: child start fd=N @Zms` in the wrapper output
+are the two timestamps to compare when a session dies right after detection.
+The wake lock is taken before the wait rather than after detection for the
+same reason, and `termux-toast`/`termux-vibrate` no longer fire on the found
+path.
+
 Stay in the package root so `scripts/spdhost-usb` finds `./spdhost`. Set
 `SPDHOST_BROM_TRACE=1` for claim→try breadcrumbs (`brom: open/claim`,
 `brom: line-state done`, `brom: try N`), including device speed and endpoint
@@ -512,7 +523,15 @@ BootROM hello send/recv uses `SPDHOST_BROM_TIMEOUT` only, not
 `SPDHOST_BROM_TIMEOUT_MIN` up to that ceiling over
 `SPDHOST_BROM_TIMEOUT_RAMP` tries, so more tries land inside the window.
 Each BootROM start prints a line like
-`brom: hello hello_to=250..3000(x6) wall=43750(auto) tries=15`.
+`brom: hello hello_to=1000..3000(x6) wall=46000(auto) tries=15`.
+
+The floor of that ramp (`SPDHOST_BROM_TIMEOUT_MIN`, default 1000 ms) is the
+part that has to stay at least as long as a real reply. Every try sends a
+fresh `0x7e`, so a BootROM that answers try 1 *while* try 2 is being sent
+emits two VER frames: the first is read as try 2's answer and the second sits
+in the buffer until the next command reads it and aborts with
+`unexpected response 0x0081`. A 250 ms floor — below a plausible reply time —
+made that race reachable; 1000 ms is the reference's flat per-try value.
 
 A mid-hello USB reacquire was removed: it hit `LIBUSB_ERROR_BUSY` and a
 second Allow dialog. `SPDHOST_BROM_REACQ` therefore defaults to **0**, and
@@ -531,7 +550,7 @@ binary directly; the command words after that are the same.
 |---|---|---|
 | `SPDHOST_BROM_TRIES` | 15 | hello attempts |
 | `SPDHOST_BROM_TIMEOUT` | 3000 | per-try ceiling (ms), hello only |
-| `SPDHOST_BROM_TIMEOUT_MIN` | 250 | ramp floor |
+| `SPDHOST_BROM_TIMEOUT_MIN` | 1000 | ramp floor (the reference's flat value) |
 | `SPDHOST_BROM_TIMEOUT_RAMP` | 6 | tries spent reaching the ceiling |
 | `SPDHOST_BROM_NO_RAMP` | 0 | `1` = every try uses the ceiling |
 | `SPDHOST_BROM_WALL_MS` | auto | overall wall; explicit wins, capped at 120000 |
@@ -539,7 +558,11 @@ binary directly; the command words after that are the same.
 | `SPDHOST_BROM_SETTLE_MS` | 100 | pause after line-state, before hello |
 | `SPDHOST_BROM_DRAIN` | 0 | `1` = short bulk-IN drain after settle |
 | `SPDHOST_BROM_REACQ` | 0 | soft same-handle settle+retry after a miss (`1`/`2`) |
-| `SPDHOST_NO_CLEAR_HALT` | 0 | `1` = skip the `libusb_clear_halt` on both bulk endpoints |
+| `SPDHOST_LOADER_BAUD4` | 0 | `1` = send 4x`0x7e` on loader check-baud tries 7-10 |
+| `SPDHOST_CLEAR_HALT` | 0 | `1` = send `libusb_clear_halt` on both bulk endpoints before the hello |
+| `SPDHOST_NO_CLEAR_HALT` | 0 | `1` = force that off even with `SPDHOST_CLEAR_HALT=1` |
+| `SPDHOST_SET_CONFIG` | 0 | `1` = `SET_CONFIGURATION(1)` when the device reads as config 0 |
+| `SPDHOST_SEND_ZLP` | 0 | `1` = zero-length OUT packet after a 512-byte-multiple bulk write |
 | `SPDHOST_BROM_TRACE` | 0 | `1` = breadcrumb timestamps without `--verbose` |
 | `SPD_USB_ATTACHED_GRACE` | 0 | wrapper grace before it gives up on the device |
 | `SPD_USB_SKIP_REQUEST` | 0 | `1` = omit `-r` on a warm, already-authorized run |
@@ -547,6 +570,17 @@ binary directly; the command words after that are the same.
 **Warn:** `SPD_USB_SKIP_REQUEST=1` fails open if the grant was never given
 (permission denied / never started). Keep the default `-r` for a cold first
 plug, and do not export it as a global default in menus.
+
+The last four rows before `SPDHOST_BROM_TRACE` are all **off by default**, and
+that is deliberate. Between the device being detected and the first `0x7e`,
+the reference client (`spd_dump/common.c`) sends exactly one control transfer
+— the line-state one. Anything else is traffic a phone never sees from the
+client that works, and all four of these were once on. A BootROM that stalls
+`CLEAR_FEATURE(ENDPOINT_HALT)`, or a USB stack that re-enumerates on
+`SET_CONFIGURATION`, drops the device right there — which is what
+"device exited immediately after being detected" and the blanket
+`LIBUSB_ERROR_TIMEOUT` that follows look like. Turn one back on to A/B a
+specific phone, not to fix a general failure.
 
 ## Command order
 
@@ -565,6 +599,15 @@ scanning for vendor `1782` (any product id, which is logged; the vendor must
 stay `1782`). A reset during `read-part` or `write-part` aborts that command
 instead of resending the chunk. Reconnect is **not** attempted mid-BootROM
 hello.
+
+The Termux reopen speaks both descriptor forms. `termux-usb -E` exports the
+descriptor as `TERMUX_USB_FD`; an older `termux-usb` without `-E` passes it as
+the launcher's `argv[1]` instead. Both sides handle both: the wrapper probes
+for `-E` once and its launcher reads `${TERMUX_USB_FD:-${1:-}}`, and the
+reopen child probes the same way before choosing its `termux-usb` arguments
+rather than hardcoding `-E`. Without that, a phone that resets after a loader
+step on an older Termux:API could never be reopened — the handle stayed dead
+and every following transfer timed out.
 
 ## What this is not
 

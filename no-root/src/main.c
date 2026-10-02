@@ -883,7 +883,9 @@ int main(int argc, char **argv)
 
 	emit = getenv("SPDHOST_EMIT_SOCK");
 	if (emit && emit[0])
-		return spd_usb_emit_fd(emit); /* short helper process; no signal handling needed */
+		/* short helper process; no signal handling needed. argv[1] is the
+		 * legacy termux-usb fd form — see spd_usb_emit_fd(). */
+		return spd_usb_emit_fd(emit, argc > 1 ? argv[1] : NULL);
 
 	install_signal_handlers();
 

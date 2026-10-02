@@ -241,6 +241,16 @@ api_hint() {
 attached_grace=${SPD_USB_ATTACHED_GRACE:-0}
 [[ $attached_grace =~ ^[0-9]+$ ]] || attached_grace=0
 
+# Keep the CPU awake (released on exit). Taken here, before the wait, and not
+# after the device is found: termux-wake-lock is a Termux:API round trip, and
+# on the found→termux-usb path it sits inside the BootROM's few-second window
+# and contends with the app that has to raise the permission dialog. Its job
+# is to keep the CPU up while we wait and then dump, so earlier is also where
+# it belongs.
+if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
+	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
+fi
+
 if [[ -z $dev ]]; then
 	wait_s=${SPD_USB_WAIT:-90}
 	[[ $wait_s =~ ^[0-9]+$ ]] || wait_s=90
@@ -273,12 +283,13 @@ if [[ -z $dev ]]; then
 			dev=${new[0]}
 			echo >&2
 			echo "found $dev" >&2
-			# Backgrounded: each termux-vibrate/termux-toast call is a Termux:API
-			# round-trip (hundreds of ms), and this line sits between "found" and
-			# termux-usb -e — the exact Allow/spawn race the ramp is trying to
-			# win. Do not block that on notification latency.
-			notify_vibrate 100 &
-			notify_toast "spdhost: device found" &
+			# Nothing else here on purpose. termux-vibrate and termux-toast used
+			# to run backgrounded from this line, and backgrounding does not
+			# help: each is a Termux:API round trip through the same app that
+			# termux-usb is about to ask for the permission dialog, so they
+			# contend for it while the BootROM window drains. The line above is
+			# the detection cue; the vibrate on success/failure still happens
+			# after termux-usb returns, where it costs nothing.
 			break
 		fi
 		if (( ${#new[@]} > 1 )); then
@@ -315,11 +326,6 @@ if [[ -z $dev ]]; then
 fi
 
 usb_log "listed $dev"
-
-# Keep the CPU awake for long dumps (released on exit).
-if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
-	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
-fi
 
 # -r request permission (Android asks again after every replug) unless
 # SPD_USB_SKIP_REQUEST=1 (warm already-authorized experiments).
