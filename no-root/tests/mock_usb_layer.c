@@ -85,6 +85,19 @@ static void build_descriptors(void)
 
 /* --------------------------------------------------------------------- libusb */
 int libusb_init(libusb_context **c) { if (c) *c = NULL; return 0; }
+#if defined(LIBUSB_API_VERSION) && LIBUSB_API_VERSION >= 0x0100010A
+/* usb.c picks this form when the headers are new enough, so the mock has to
+ * provide whichever one the header in front of it selects — otherwise the
+ * suite builds here and fails to link on a runner with a newer libusb. */
+int libusb_init_context(libusb_context **c, const struct libusb_init_option *opts, int n)
+{
+	(void)opts;
+	(void)n;
+	if (c)
+		*c = NULL;
+	return 0;
+}
+#endif
 void libusb_exit(libusb_context *c) { (void)c; }
 int libusb_set_option(libusb_context *c, enum libusb_option o, ...)
 {

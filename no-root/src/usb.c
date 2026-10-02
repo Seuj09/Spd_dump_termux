@@ -518,9 +518,12 @@ int spd_usb_emit_fd(const char *sock_path, const char *argv_fd)
 	long fd;
 	int sock;
 
-	env = getenv("TERMUX_USB_FD");
-	if ((!env || !env[0]) && (env = getenv("SPD_USB_FD")) && env[0])
-		; /* SPD_USB_FD aliases TERMUX_USB_FD */
+	env = getenv("TERMUX_USB_FD");      /* SPD_USB_FD aliases TERMUX_USB_FD */
+	if (!env || !env[0]) {
+		env = getenv("SPD_USB_FD");
+		if (env && !env[0])
+			env = NULL;
+	}
 	/* termux-usb only sets TERMUX_USB_FD when it was given -E. Without it the
 	 * descriptor is the launcher's argv[1] — the same two-form contract the
 	 * wrapper's generated launcher already honours (${TERMUX_USB_FD:-${1:-}}).
