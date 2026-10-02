@@ -90,6 +90,32 @@ FDL2_ADDR=""
 SOC=""
 DEVICE=""
 
+# Run a command under a wall-clock limit.
+#
+# `timeout` is used when present. The fallback is a bash watchdog rather than a
+# bare exec, because termux-usb -l can block forever when the Termux:API app is
+# missing or was killed by battery optimisation, and a bare fallback would turn
+# a diagnostic probe into an unbounded hang. Never write this as
+# `command -v timeout && timeout 5 cmd || cmd`: when the bounded call is present
+# but merely *fails*, that form runs the unbounded one anyway.
+bounded() {
+	local t=$1 pid wd rc
+	shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$t" "$@"
+		return $?
+	fi
+	"$@" &
+	pid=$!
+	( sleep "$t"; kill -TERM "$pid" 2>/dev/null ) &
+	wd=$!
+	wait "$pid" 2>/dev/null
+	rc=$?
+	kill -TERM "$wd" 2>/dev/null
+	wait "$wd" 2>/dev/null
+	return $rc
+}
+
 pause() {
 	# Explicit return 0: this is a UI delay, not a readiness signal. Without
 	# it, pause's own exit status (read's status) becomes this function's
@@ -151,9 +177,11 @@ load_config() {
 		esac
 	done < "$CONFIG"
 	# Hex mode's second address depends on the chip. File paths stay as saved.
+	# config_chip_check then repairs (or refuses) a chip/address mix.
 	if [[ -n $SOC ]]; then
 		soc_profile "$SOC" || true
 	fi
+	config_chip_check
 }
 
 # Release menu addresses. Primary exec stub, then the hex-mode alternate.
@@ -181,6 +209,121 @@ soc_profile() {
 			;;
 		*) return 1 ;;
 	esac
+}
+
+# SoC named by a loader path, or nothing. This tree stores loaders as
+# fdl/<soc>/[<brand>/[alternatif/<model>/]]... (see shipped_fdl_pair), so the
+# first segment under fdl/ is the chip the bytes belong to. A typed path that
+# does not have that shape names no chip.
+path_soc() {
+	local p=$1 seg
+	[[ -n $p ]] || return 0
+	case $p in
+		*/fdl/*) seg=${p#*/fdl/} ;;
+		fdl/*)   seg=${p#fdl/} ;;
+		*) return 0 ;;
+	esac
+	seg=${seg%%/*}
+	case $seg in ums9230|ums512|sc9863a) printf '%s\n' "$seg" ;; esac
+	return 0
+}
+
+# SoC whose exec stub is at this address, or nothing. The table is spelled out
+# rather than read from soc_profile's globals, because soc_profile overwrites
+# them for whichever chip was asked for last and this is called to compare one
+# address against every chip at once.
+exec_soc_name() {
+	local a=$1
+	a=${a,,}
+	a=${a#0x}
+	case $a in
+		65015f08|65015f48) printf '%s\n' ums9230 ;;
+		3ee8|3f48)          printf '%s\n' ums512 ;;
+		4ee8|4f48)          printf '%s\n' sc9863a ;;
+	esac
+	return 0
+}
+
+# The saved config keeps the chip and its loader addresses as independent
+# fields, but FDL1_ADDR, FDL2_ADDR and the exec stub address are all a pure
+# function of the chip. A file left over from another chip can therefore name
+# one chip and carry another's addresses -- ums9230 Infinix loaders with
+# sc9863a's 0x5000/0x4ee8 -- which sends a loader and a stub built for
+# different chips. That is a brick, so it is caught here, before any session.
+#
+# The loader path decides, because it is evidence: a path naming a different
+# known chip than SOC is refused outright (guessing which field is stale is how
+# you brick a phone -- pick option 3 instead), and when SOC is empty the path
+# supplies the chip instead of leaving the question open. When the paths name
+# no chip, SOC wins. Either way each address field the file got wrong is
+# replaced, with a note.
+CONFIG_CHIP_ERROR=""
+config_chip_check() {
+	local ps1 ps2 ps soc_f1 soc_f2
+	CONFIG_CHIP_ERROR=""
+	ps1=$(path_soc "${FDL1:-}")
+	ps2=$(path_soc "${FDL2:-}")
+	# Two loaders from two different chips are already a mixed pair, whether or
+	# not SOC agrees with one of them. Nothing can be derived from that, so it
+	# is refused the same way.
+	if [[ -n $ps1 && -n $ps2 && $ps1 != "$ps2" ]]; then
+		CONFIG_CHIP_ERROR="FDL1 is ${ps1}'s and FDL2 is ${ps2}'s"
+		{
+			echo "config $CONFIG is inconsistent:"
+			echo "  FDL1=$FDL1"
+			echo "  FDL2=$FDL2"
+			echo "The two loader paths name different chips (${ps1} and ${ps2}), so they are not a pair."
+			echo "Refusing all sessions until that is fixed: option 3 re-picks the loaders."
+		} >&2
+		return 0
+	fi
+	ps=${ps1:-$ps2}	# the chip the paths name, if any
+	if [[ -n ${SOC:-} ]]; then
+		soc_profile "$SOC" || return 0 # unknown chip: leave the file's values alone
+		if [[ -n $ps && $ps != "$SOC" ]]; then
+			CONFIG_CHIP_ERROR="SOC=$SOC but the loaders are $ps"
+			{
+				echo "config $CONFIG is inconsistent:"
+				echo "  SOC=$SOC"
+				echo "  FDL1=${FDL1:-none}"
+				echo "  FDL2=${FDL2:-none}"
+				echo "The loader path says these loaders are $ps's, so using them with $SOC's addresses would send a loader and an exec stub for different chips."
+				echo "Refusing all sessions until that is fixed: option 3 re-picks the loaders."
+			} >&2
+			return 0
+		fi
+	elif [[ -n $ps ]]; then
+		# No chip in the config, but the loader path names one. Adopt it: the
+		# addresses below are then checked against the chip the loaders really
+		# are, instead of nothing being checked at all.
+		soc_profile "$ps" || return 0
+		SOC=$ps
+		echo "config: no chip was set; the loader path says these are $ps's, so that is the chip now." >&2
+	else
+		return 0	# no chip anywhere: nothing to derive the addresses from
+	fi
+	soc_f1=$SOC_FDL1_ADDR
+	soc_f2=$SOC_FDL2_ADDR
+	if [[ -n ${FDL1_ADDR:-} && ${FDL1_ADDR,,} != "${soc_f1,,}" ]]; then
+		echo "config: FDL1_ADDR=$FDL1_ADDR is not $SOC's $soc_f1; using $soc_f1." >&2
+		FDL1_ADDR=$soc_f1
+	fi
+	if [[ -n ${FDL2_ADDR:-} && ${FDL2_ADDR,,} != "${soc_f2,,}" ]]; then
+		echo "config: FDL2_ADDR=$FDL2_ADDR is not $SOC's $soc_f2; using $soc_f2." >&2
+		FDL2_ADDR=$soc_f2
+	fi
+	# 0/off is a deliberate "no exec stub", not a stale address, so it stands.
+	case ${EXEC_ADDR,,} in
+		''|0|0x0|off) ;;
+		*)
+			if [[ ${EXEC_ADDR,,} != "${EXEC_ADDR_DEFAULT,,}" &&
+			      ${EXEC_ADDR,,} != "${EXEC_ADDR_ALT,,}" ]]; then
+				echo "config: EXEC_ADDR=$EXEC_ADDR is not $SOC's $EXEC_ADDR_DEFAULT; using $EXEC_ADDR_DEFAULT." >&2
+				EXEC_ADDR=$EXEC_ADDR_DEFAULT
+			fi
+			;;
+	esac
+	return 0
 }
 
 soc_brands() {
@@ -255,7 +398,7 @@ resolve_misc_dir() {
 # Offer the shipped Infinix UMS9230 pair only after an explicit chip/model
 # confirm, or when SPDHOST_ALLOW_DEFAULT_FDL=1. Never apply silently.
 apply_ums9230_infinix_defaults() {
-	local dir reply
+	local dir reply ps1 ps2
 	# Config (or a prior confirm) already complete — leave it alone.
 	if [[ -n ${FDL1:-} && -f $FDL1 && -n ${FDL1_ADDR:-} && -n ${FDL2:-} && -f $FDL2 && -n ${FDL2_ADDR:-} ]]; then
 		return 0
@@ -279,10 +422,27 @@ apply_ums9230_infinix_defaults() {
 			return 0
 		fi
 	fi
-	[[ -n $FDL1_ADDR ]] || FDL1_ADDR=$FDL1_ADDR_DEFAULT
-	[[ -n $FDL2_ADDR ]] || FDL2_ADDR=$FDL2_ADDR_DEFAULT
+	# What goes into the session has to be one chip end to end. A loader already
+	# set for a different chip must not be kept alongside the ums9230 pair, and
+	# the addresses are not back-filled field by field either: SOC, the exec
+	# stub and both addresses all follow from the ums9230 pair the user just
+	# confirmed (select_shipped_model assigns them the same way).
+	ps1=$(path_soc "${FDL1:-}")
+	ps2=$(path_soc "${FDL2:-}")
+	if [[ -n $ps1 && $ps1 != ums9230 ]] || [[ -n $ps2 && $ps2 != ums9230 ]]; then
+		echo "${FDL1:-}/$FDL2 are ${ps1:-$ps2} loaders, not ums9230 ones." >&2
+		echo "Use option 3 to set the loaders for your chip." >&2
+		return 0
+	fi
 	[[ -n $FDL1 ]] || FDL1=$dir/fdl1-dl.bin
 	[[ -n $FDL2 ]] || FDL2=$dir/fdl2-dl.bin
+	FDL1_ADDR=$FDL1_ADDR_DEFAULT
+	FDL2_ADDR=$FDL2_ADDR_DEFAULT
+	if soc_profile ums9230; then
+		SOC=ums9230
+		EXEC_ADDR=$EXEC_ADDR_DEFAULT
+	fi
+	CONFIG_CHIP_ERROR=""
 }
 
 # Both askers return 1 on EOF (Ctrl-D, or stdin that is not a terminal) instead
@@ -319,7 +479,7 @@ ask_file() {
 }
 
 configure_loaders_manual() {
-	local choice ea nf1 na1 nf2 na2
+	local choice ea nf1 na1 nf2 na2 ps1 ps2 cur
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
 	# Collect into locals and commit only once all four answers are in: an
@@ -329,9 +489,11 @@ configure_loaders_manual() {
 	na1=$(ask_addr "FDL1 address:") || return 1
 	nf2=$(ask_file "FDL2 file:") || return 1
 	na2=$(ask_addr "FDL2 address:") || return 1
+	cur=$(exec_addr_value || true)
 	echo "Which chip are these loaders for? This picks the exec stub."
 	echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
-	echo "[1] ums9230   [2] sc9863a   [3] ums512   [Enter] keep ${EXEC_ADDR:-$EXEC_ADDR_DEFAULT}"
+	echo "[1] ums9230   [2] sc9863a   [3] ums512"
+	echo "[Enter] keep ${cur:-no exec stub} and leave the chip unset"
 	read -r -p "Choice: " choice
 	FDL1=$nf1
 	FDL1_ADDR=$na1
@@ -341,12 +503,40 @@ configure_loaders_manual() {
 		1) soc_profile ums9230 && SOC=ums9230 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
 		2) soc_profile sc9863a && SOC=sc9863a && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
 		3) soc_profile ums512 && SOC=ums512 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
-		'') ;;
+		'')
+			# Enter means "the chip is still whatever it was", which is exactly
+			# what the loader path can contradict: keeping SOC here would pair
+			# these new paths with the previous chip's addresses on the next
+			# load. So unset the chip and PIN the value that was shown (0 when
+			# there is no stub), so it cannot drift when EXEC_ADDR_DEFAULT
+			# changes with a profile. If the typed path does name a chip,
+			# config_chip_check adopts it and reconciles the addresses on the
+			# next load, so the mix above cannot survive a reload either.
+			SOC=""
+			EXEC_ADDR=${cur:-0}
+			;;
 		*) echo "Unchanged exec stub." ;;
 	esac
-	save_config
 	ea=$(exec_addr_value || true)
-	echo "Saved $CONFIG (exec ${ea:-disabled})"
+	# Last chance to notice a mix, before it is written to the config and used.
+	# Both the path and the exec stub can name a chip; nothing here is refused
+	# (the user typed these values), so it is said out loud instead.
+	ps1=$(path_soc "$nf1")
+	ps2=$(path_soc "$nf2")
+	if [[ -n $ps1 && -n $ps2 && $ps1 != "$ps2" ]]; then
+		echo "warning: $nf1 is ${ps1}'s and $nf2 is ${ps2}'s." >&2
+	fi
+	ps1=${ps1:-$ps2}
+	who=$(exec_soc_name "$ea")
+	if [[ -n $ps1 && -n $SOC && $SOC != "$ps1" ]]; then
+		echo "warning: the loaders are ${ps1}'s but you picked $SOC." >&2
+	fi
+	if [[ -n $ps1 && -n $who && $who != "$ps1" ]]; then
+		echo "warning: exec_addr ${ea} is ${who}'s stub but the loaders are ${ps1}'s." >&2
+	fi
+	CONFIG_CHIP_ERROR=""
+	save_config
+	echo "Saved $CONFIG (chip ${SOC:-unset}, exec ${ea:-disabled})"
 }
 
 # Shipped fdl1-dl.bin + fdl2-dl.bin for one release-menu model.
@@ -513,6 +703,14 @@ configure_loaders() {
 }
 
 need_loaders() {
+	# A config that pairs one chip's loaders with another chip's addresses must
+	# not reach a session: config_chip_check() explains what is wrong at load
+	# time, and this is what stops every option until option 3 fixes it.
+	if [[ -n ${CONFIG_CHIP_ERROR:-} ]]; then
+		echo "Refusing: $CONFIG_CHIP_ERROR."
+		echo "Option 3 re-picks the loaders; the explanation is in the config warning above."
+		return 1
+	fi
 	if [[ -f $FDL1 && -n $FDL1_ADDR && -f $FDL2 && -n $FDL2_ADDR ]]; then
 		return 0
 	fi
@@ -1389,15 +1587,19 @@ find_user_file() {
 	return 1
 }
 
-# aarch64 ELF from the release zip. PATH, then the same places as the files.
-find_gen_spl_unlock() {
+# Release helper from the zip. These are x86-64 ELF binaries, so they run on a
+# PC and cannot execute on the phone; the built-in spdhost image tools are what
+# the menu prefers (see spdhost_has_image_tools). PATH, then the same places as
+# the files. Named lookup because the release ships both the standard and the
+# legacy spl algorithm.
+find_release_tool() {
 	local p
-	p=$(command -v gen_spl-unlock 2>/dev/null || true)
+	p=$(command -v "$1" 2>/dev/null || true)
 	if [[ -n $p && -x $p ]]; then
 		printf '%s\n' "$p"
 		return 0
 	fi
-	p=$(find_user_file gen_spl-unlock || true)
+	p=$(find_user_file "$1" || true)
 	if [[ -n $p && -x $p ]]; then
 		printf '%s\n' "$p"
 		return 0
@@ -1405,11 +1607,33 @@ find_gen_spl_unlock() {
 	return 1
 }
 
+find_gen_spl_unlock() {
+	find_release_tool "${1:-gen_spl-unlock}"
+}
+
+# True when the resolved spdhost understands the offline image tools. Probed by
+# running one with no arguments and looking for its usage line, so an older
+# spdhost build falls back to the release binary instead of failing mid-unlock.
+spdhost_has_image_tools() {
+	local bin out
+	bin=$(resolve_spdhost_bin 2>/dev/null) || return 1
+	[[ -n $bin ]] || return 1
+	out=$("$bin" gen-spl-unlock 2>&1 || true)
+	[[ $out == *"gen-spl-unlock IN OUT"* ]]
+}
+
 # Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
 # resolver, so --self-test runs the same build the wrapper would actually
 # launch (not a stale PATH copy from an older install).
 resolve_spdhost_bin() {
 	local script_dir cand
+	# Explicit override first: tests point this at the binary they built, and a
+	# user can run a spdhost kept outside this tree (e.g. an older release).
+	if [[ -n ${SPDHOST_BIN:-} ]]; then
+		[[ -f $SPDHOST_BIN && -x $SPDHOST_BIN ]] || return 1
+		(cd "$(dirname "$SPDHOST_BIN")" && printf '%s/%s\n' "$(pwd)" "$(basename "$SPDHOST_BIN")")
+		return 0
+	fi
 	script_dir=$(cd "$(dirname "$0")" && pwd)
 	for cand in \
 		"$script_dir/../spdhost" \
@@ -1498,11 +1722,28 @@ smoke_test() {
 	echo
 
 	echo "== Live device probe (read-only) =="
-	local devs=""
+	local devs="" probe_rc=0 tries=0
 	if command -v termux-usb >/dev/null 2>&1; then
-		devs=$( (command -v timeout >/dev/null 2>&1 && timeout 5 termux-usb -l || termux-usb -l) 2>/dev/null | grep -oE '/dev/bus/usb/[0-9]+/[0-9]+' || true)
+		# Always bounded (see bounded() above), and retried so a single slow
+		# answer is not mistaken for "nothing plugged in". An empty list with
+		# a clean exit is the normal "no device attached" case; a non-zero
+		# exit means termux-usb never answered.
+		while (( tries < 3 )); do
+			devs=$(bounded 5 termux-usb -l 2>/dev/null)
+			probe_rc=$?
+			[[ -n $devs || $probe_rc == 0 ]] && break
+			tries=$((tries + 1))
+			(( tries < 3 )) && sleep 1
+		done
+		devs=$(printf '%s\n' "$devs" | grep -oE '/dev/bus/usb/[0-9]+/[0-9]+' || true)
 	fi
 	if [[ -z $devs ]]; then
+		if (( probe_rc != 0 )) && command -v termux-usb >/dev/null 2>&1; then
+			echo "termux-usb -l did not answer within 5s (stopped after 3 tries)."
+			echo "That is usually the Termux:API app missing, not yet opened, or"
+			echo "killed by battery optimisation — see the notes at the end."
+			echo
+		fi
 		echo "No USB device currently listed by termux-usb -l."
 		echo "Connect one in BootROM mode and run this smoke test again to also"
 		echo "check live detection — and, if you like, try pressing Ctrl-C partway"
@@ -1581,6 +1822,12 @@ smoke_test() {
 guarded_misc_session() {
 	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN
 	shift
+	# The caller's last command is what ends the session (reset, power-off).
+	# One --confirm-token authorizes exactly ONE misc write, so a caller must
+	# never put a second misc-writing command (reboot-recovery, reboot-fastboot,
+	# another write-part misc) behind this one: spdhost refuses it and exits.
+	local ending=reset
+	if (( $# > 0 )); then ending=${!#}; fi
 	MISC_CONFIRM_TOKEN=
 	if [[ ! $tok =~ ^[0-9a-f]{64}$ ]]; then
 		echo "menu: not confirmed ($kind: no confirm token); nothing written" >&2
@@ -1612,11 +1859,42 @@ guarded_misc_session() {
 		rc=1
 	fi
 	if (( rc != 0 )); then
-		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no reset happens after a failed backup or a misc read-back mismatch."
+		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no $ending happens after a failed backup or a misc read-back mismatch."
 	else
-		echo "$kind: misc written, read back and verified, then reset."
+		echo "$kind: misc written, read back and verified, then $ending."
 	fi
 	return "$rc"
+}
+
+# Read the whole misc partition into MISC_LIVE_IMAGE (a private temp file).
+# Read-only: the session runs `parts` (misc size) and `misc-backup` (read +
+# read-back check) and nothing else, so there is no write, no confirm token.
+# Returns 1 and leaves no file behind on failure.
+#
+# Sets a global instead of printing the path because run_session writes the
+# command line and its output to stdout: a $(...) caller would capture all of
+# that, not just the path.
+#
+# The file lands in the temp dir, NOT in DUMP_DIR: write-parts restores every
+# NAME.img it finds there, so a live misc image in DUMP_DIR could be written
+# back by a later restore.
+MISC_LIVE_IMAGE=""
+read_misc_image() {
+	local dir img rc
+	MISC_LIVE_IMAGE=
+	dir=$(spd_tmpdir) || { echo "no writable temp directory (set TMPDIR)" >&2; return 1; }
+	img=$(mktemp "$dir/spdhost-misc-live.XXXXXX") || return 1
+	ready || { rm -f "$img"; return 1; }
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" misc-backup "$img"
+	rc=$?
+	if (( rc != 0 )) || [[ ! -s $img ]]; then
+		echo "reading misc failed (exit $rc); nothing written." >&2
+		rm -f "$img"
+		return 1
+	fi
+	MISC_LIVE_IMAGE=$img
+	return 0
 }
 
 restore_misc_menu() {
@@ -1826,6 +2104,7 @@ restore_image_names() {
 # Release menu option 4: write_parts of the backup folder.
 restore_backup_menu() {
 	local -a names=()
+	local cmd slot
 	need_loaders || return
 	if [[ ! -d $DUMP_DIR ]]; then
 		echo "No backup directory $DUMP_DIR."
@@ -1850,10 +2129,21 @@ restore_backup_menu() {
 	if ! confirm_action "type yes to restore this backup: "; then
 		return 1
 	fi
+	# A/B phones: write-parts writes the images for the slot the backup's own
+	# misc image names (offset 0x800) and drops the other slot's files, so a
+	# restore after the phone was switched lands on the wrong slot. -a and -b
+	# force one. Off an A/B phone there are no _a/_b names and this is ignored.
+	read -r -p "Restore to slot [Enter] as the backup's misc says / [a] / [b]: " slot
+	case ${slot:-} in
+		a|A) cmd=write-parts-a ;;
+		b|B) cmd=write-parts-b ;;
+		*) cmd=write-parts ;;
+	esac
+	echo "Using $cmd (${slot:+forced slot ${slot,,}; }the other slot's images are skipped)."
 	echo "spdhost asks once more on the terminal before it sends anything."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-parts "$DUMP_DIR" "$BOOT_AFTER"
+		parts "$(parts_cache_path)" "$cmd" "$DUMP_DIR" "$BOOT_AFTER"
 }
 
 # Same shape spd_repartition_xml accepts: one <Partitions> list, each entry
@@ -1901,8 +2191,38 @@ repartition_menu() {
 		repartition "$xml" "$BOOT_AFTER"
 }
 
+# Splice the shipped 2048-byte BCB for a recovery/fastbootd ending onto the
+# front of a full misc image: IN OUT, OUT the same size as IN. The point is
+# that a slot change and a BCB ending become ONE misc write, because one
+# --confirm-token authorizes exactly one misc write per session and a second
+# session would need the phone back in download mode after the reset.
+# misc+0x800 is past the 2048 bytes, so the slot survives either way.
+splice_misc_bcb() {
+	local kind=$1 in=$2 out=$3 bcb want got
+	resolve_misc_dir || return 1
+	case $kind in
+		reboot-recovery) bcb=$MISC_DIR/misc-recovery.bin ;;
+		reboot-fastboot) bcb=$MISC_DIR/misc-fastbootd.bin ;;
+		*) echo "no shipped BCB for $kind" >&2; return 1 ;;
+	esac
+	[[ -f $bcb ]] || { echo "missing $bcb" >&2; return 1; }
+	if (( $(stat -c %s "$bcb") != 2048 )); then
+		echo "$bcb is not a 2048-byte BCB" >&2
+		return 1
+	fi
+	# Must be the exact bytes spdhost's reboot-* command synthesizes, or the
+	# merged image would not boot where the user asked.
+	want=$(misc_bcb_sha256 "$kind")
+	got=$(sha256sum "$bcb" | awk '{print $1}')
+	if [[ $got != "$want" ]]; then
+		echo "refusing: $bcb is not the BCB spdhost writes for $kind" >&2
+		return 1
+	fi
+	{ head -c 2048 "$bcb"; tail -c +2049 "$in"; } > "$out" || return 1
+}
+
 set_slot_menu() {
-	local which
+	local which live src patched digest bin ending rc
 	need_loaders || return
 	echo "Set the active A/B slot. This rewrites 32 bytes at misc+0x800"
 	echo "and then rewrites the whole misc partition (backup + read-back)."
@@ -1917,13 +2237,59 @@ set_slot_menu() {
 		*) echo "Unchanged."; return 1 ;;
 	esac
 	continue_choice "set the active slot to $which" || return
-	if ! confirm_action "type yes to set the active slot to $which: "; then
+	bin=$(resolve_spdhost_bin) || {
+		echo "spdhost binary not found next to this tree or on PATH. From no-root/: make" >&2
+		return 1
+	}
+	# The confirm token is the sha256 of exactly what spdhost will write, so
+	# the image must exist BEFORE the write session starts: read misc now,
+	# build the image to write, hash it. pack-slot applies the same
+	# bootloader_control set-active builds (spdhost --self-test checks those 32
+	# bytes byte-for-byte against spd_dump's slot_a/slot_b).
+	echo "Reading misc first so the confirm token can cover the exact bytes written."
+	read_misc_image || return 1
+	live=$MISC_LIVE_IMAGE
+	src=$live
+	ending=reset
+	case $BOOT_AFTER in
+		power-off)
+			ending=power-off
+			;;
+		reboot-recovery|reboot-fastboot)
+			# Fold the BCB in instead of running reboot-* afterwards: that
+			# command is itself a misc write, and one token authorizes one.
+			src=$live.merged
+			if ! splice_misc_bcb "$BOOT_AFTER" "$live" "$src"; then
+				rm -f "$live" "$src"
+				return 1
+			fi
+			echo "Ending is $BOOT_AFTER: its 2048-byte BCB is part of this write."
+			;;
+	esac
+	patched=$src.slot-$which
+	if ! "$bin" pack-slot "$which" "$src" "$patched"; then
+		echo "pack-slot failed; misc was not touched." >&2
+		rm -f "$live" "$src" "$patched"
 		return 1
 	fi
-	echo "spdhost asks once more on the terminal after it has read misc."
-	ready || return 1
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" set-active "$which" "$BOOT_AFTER"
+	rm -f "$live" "$src"
+	digest=$(sha256sum "$patched" | awk '{print $1}')
+	echo "About to write $(stat -c %s "$patched") bytes to partition 'misc' (active slot $which), then $ending."
+	echo "misc image sha256: $digest"
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
+	if [[ ! -t 0 ]]; then
+		echo "refusing to write misc without a TTY (no silent --yes)" >&2
+		rm -f "$patched"
+		return 1
+	fi
+	if ! menu_typed_yes "type yes to set the active slot to $which: " "$digest"; then
+		rm -f "$patched"
+		return 1
+	fi
+	guarded_misc_session "set-active $which" write-part misc "$patched" "$ending"
+	rc=$?
+	rm -f "$patched"
+	return "$rc"
 }
 
 boot_after_menu() {
@@ -1932,6 +2298,8 @@ boot_after_menu() {
 	echo "Same four endings as the release menu."
 	echo "Recovery and fastbootd write the 2048-byte BCB after the other work, then reset."
 	echo "misc+0x800 (the slot) is past that 2048-byte write, so the slot stays."
+	echo "A slot change with a recovery/fastbootd ending writes the BCB and the"
+	echo "slot together in one misc write (one confirm token = one misc write)."
 	echo "Now: $BOOT_AFTER"
 	echo "[1] system (reset)"
 	echo "[2] recovery"
@@ -1982,31 +2350,114 @@ hex_mode_menu() {
 	fi
 }
 
-# Release-menu unlock. fdl2-cboot.bin and spl-unlock.bin are not shipped.
+# Build spl-unlock.bin from the splloader dump.
+#
+# Prefers the built-in tool in spdhost: it is aarch64, so it runs on the phone,
+# and it never overwrites the file it is given. The release's gen_spl-unlock is
+# x86-64 (PC only) and removes its INPUT and renames over it, so it gets a copy
+# to destroy.
+#
+# The built-in reports how many signature sites it patched. Zero means the
+# pattern did not match this splloader generation -- which is exactly when the
+# legacy algorithm is the right answer, so offer it instead of guessing which
+# SoC generation the user has.
+unlock_make_spl_unlock() {
+	local work=$1 spl=$2 out=$work/spl-unlock.bin bin err rc reply legacy
+
+	if spdhost_has_image_tools; then
+		bin=$(resolve_spdhost_bin)
+		err=$("$bin" gen-spl-unlock "$spl" "$out" 2>&1 >/dev/null)
+		rc=$?
+		[[ -n $err ]] && printf '  %s\n' "$err"
+		if (( rc != 0 )) || [[ ! -s $out ]]; then
+			echo "Built-in gen-spl-unlock failed (exit $rc). splloader was not erased."
+			return 1
+		fi
+		if [[ $err == *"patched 0 signature site"* ]]; then
+			legacy=$work/spl-unlock-legacy.bin
+			echo
+			echo "The standard pattern matched nothing in this splloader."
+			echo "'gen-spl-unlock-legacy' targets an older layout. Trying it is"
+			echo "free: the dump is only read, never modified."
+			read -r -p "Try the legacy algorithm as well? [y/N] " reply
+			if [[ ${reply,,} == y ]]; then
+				err=$("$bin" gen-spl-unlock-legacy "$spl" "$legacy" 2>&1 >/dev/null)
+				rc=$?
+				[[ -n $err ]] && printf '  %s\n' "$err"
+				if (( rc == 0 )) && [[ -s $legacy ]]; then
+					if [[ $err == *"patched 0 signature site"* ]]; then
+						echo "The legacy pattern matched nothing either."
+						echo "Keeping the standard output; it may still work."
+					else
+						cp -f "$legacy" "$out"
+						echo "Using the legacy result."
+					fi
+				fi
+			fi
+		fi
+		return 0
+	fi
+
+	bin=$(find_gen_spl_unlock || true)
+	if [[ -z $bin ]]; then
+		echo "Cannot build spl-unlock.bin: this spdhost has no built-in image"
+		echo "tools and gen_spl-unlock was not found."
+		echo "The release package ships gen_spl-unlock beside its menu.sh. It is"
+		echo "an x86-64 binary, so it runs on a PC, not on the phone."
+		echo "splloader was not erased."
+		return 1
+	fi
+	echo "note: using the release's gen_spl-unlock (x86-64). It is given a copy,"
+	echo "      because it deletes the file it patches."
+	cp -f "$spl" "$work/splloader.bin"
+	if ! ( cd "$work" && "$bin" splloader.bin ); then
+		echo "gen_spl-unlock failed. splloader was not erased."
+		return 1
+	fi
+	if [[ ! -s $out ]]; then
+		echo "gen_spl-unlock did not write spl-unlock.bin. splloader was not erased."
+		return 1
+	fi
+	return 0
+}
+
+# Release-menu unlock. fdl2-cboot.bin is shipped only for ums9230/infinix.
 # A missing dump does not continue into the erase. --dangerous is not passed.
 unlock_bootloader_menu() {
-	local cboot unlock genbin= work spl uboot slotf rc erase_rc=0
+	local cboot unlock can_gen=0 work spl uboot slotf rc erase_rc=0
 	cboot=$(find_user_file fdl2-cboot.bin || true)
 	unlock=$(find_user_file spl-unlock.bin || true)
-	genbin=$(find_gen_spl_unlock || true)
-	if [[ -z $cboot || ( -z $unlock && -z $genbin ) ]]; then
+	if [[ -z $unlock ]]; then
+		if spdhost_has_image_tools; then
+			can_gen=1
+		elif find_gen_spl_unlock >/dev/null 2>&1; then
+			can_gen=1
+		fi
+	fi
+	if [[ -z $cboot || ( -z $unlock && $can_gen == 0 ) ]]; then
 		echo "DANGEROUS unlock: nothing sent."
 		if [[ -z $cboot ]]; then
+			local fdl_root parent
+			fdl_root=$(pkg_fdl_root 2>/dev/null || true)
+			parent=${fdl_root%/fdl}
 			echo "Missing fdl2-cboot.bin."
-			echo "The release package has it next to fdl1-dl.bin (ums9230/infinix/) and in the menu directory."
-			echo "This tree does not ship that file and does not invent it."
+			echo "  looked beside the loaders: $(dirname "${FDL1:-<fdl1>}")/fdl2-cboot.bin"
+			[[ -n $parent ]] && echo "  and the package root: $parent/fdl2-cboot.bin"
+			echo "  and the working directory: $PWD/fdl2-cboot.bin"
+			echo "This is a vendor blob, shipped here for ums9230/infinix only."
+			echo "Release packages carry one copy per model (fdl/<chip>/<brand>/);"
+			echo "it is not derivable from the other files, so another model's"
+			echo "package has to supply it."
 		fi
-		if [[ -z $unlock && -z $genbin ]]; then
-			echo "Missing spl-unlock.bin and gen_spl-unlock."
-			echo "The release package has gen_spl-unlock beside its menu.sh. It builds spl-unlock.bin from the splloader backup."
-			echo "This tree does not ship either file."
+		if [[ -z $unlock && $can_gen == 0 ]]; then
+			echo "Missing spl-unlock.bin, and nothing here can build it."
+			echo "The release package ships gen_spl-unlock beside its menu.sh"
+			echo "(x86-64, PC only). A current spdhost builds it on the phone."
 		fi
 		return 1
 	fi
 	if [[ -z $unlock ]]; then
-		echo "spl-unlock.bin is missing. $genbin runs after the backup, before the erase."
-	else
-		genbin=
+		echo "spl-unlock.bin is missing; it is built from the backup, before the erase."
 	fi
 	echo "DANGEROUS: Unlock BootLoader."
 	echo "This follows the release menu: back up splloader and uboot, erase splloader"
@@ -2040,17 +2491,10 @@ unlock_bootloader_menu() {
 	else
 		echo "Reusing $spl and $uboot. The erase still runs."
 	fi
-	if [[ -n $genbin ]]; then
-		cp -f "$spl" "$work/splloader.bin"
-		if ! ( cd "$work" && "$genbin" splloader.bin ); then
-			echo "gen_spl-unlock failed. splloader was not erased."
-			return 1
-		fi
+	if [[ -z $unlock ]]; then
 		unlock=$work/spl-unlock.bin
-		if [[ ! -s $unlock ]]; then
-			echo "gen_spl-unlock did not write spl-unlock.bin. splloader was not erased."
-			return 1
-		fi
+		echo "Building spl-unlock.bin from $spl."
+		unlock_make_spl_unlock "$work" "$spl" || return 1
 	fi
 	echo "DANGEROUS: next session erases splloader and splloader_bak, then reset."
 	echo "spdhost asks for the word dangerous once. That answer covers both erases."
@@ -2214,6 +2658,95 @@ chip_uid_action() {
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" chip-uid
 }
 
+# Read-only: one session that refreshes the table and prints the byte size
+# spdhost resolves for one name (the same table a dump or a write uses). This
+# is the release menu's "check partition size", and it is the way to confirm
+# the cached table still matches the phone after a repartition.
+check_part_action() {
+	local name
+	need_loaders || return 1
+	read -r -p "Partition name (boot, boot_a, misc, ...): " name
+	if [[ -z ${name:-} ]]; then
+		echo "Cancelled."
+		return 1
+	fi
+	if [[ ! $name =~ ^[A-Za-z0-9_]+$ ]]; then
+		echo "A partition name is letters, digits and _ only." >&2
+		return 1
+	fi
+	echo "Read-only: parts, then check-part $name. Nothing is written."
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" check-part "$name"
+}
+
+# erase-part clears one partition. persist, splloader, splloader_bak and all
+# are refused in spdhost itself (that guard is in C and stays there, so it also
+# holds for a hand-typed spdhost-usb command); everything else is real data
+# loss, so it needs the typed word and the menu still passes no --yes --
+# spdhost asks on the terminal as well.
+erase_part_action() {
+	local name
+	need_loaders || return 1
+	echo "erase-part clears one partition on the phone. It cannot be undone."
+	echo "spdhost refuses: persist, persist_a, persist_b, splloader, splloader_bak, all."
+	read -r -p "Partition name to erase: " name
+	if [[ -z ${name:-} ]]; then
+		echo "Cancelled."
+		return 1
+	fi
+	if [[ ! $name =~ ^[A-Za-z0-9_]+$ ]]; then
+		echo "A partition name is letters, digits and _ only." >&2
+		return 1
+	fi
+	# Refused in spdhost too; saying it here first means not asking anyone to
+	# type "dangerous" for something that would be refused anyway.
+	case $name in
+		persist|persist_a|persist_b|splloader|splloader_bak|all|erase_all)
+			echo "Refusing: spdhost never erases $name." >&2
+			return 1
+			;;
+	esac
+	if ! confirm_dangerous "type dangerous to erase $name: "; then
+		return 1
+	fi
+	echo "spdhost asks once more on the terminal before it erases."
+	ready || return 1
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" erase-part "$name" "$BOOT_AFTER"
+}
+
+# Offline: patch a dumped misc image so it names slot a or b. This is the same
+# pack-slot that set_slot_menu hashes for its --confirm-token; here it only
+# writes a file, nothing is sent and no phone is needed. The slot block is
+# misc+0x800, so a 2048-byte image is not enough on its own -- use a full misc
+# dump.
+pack_slot_action() {
+	local bin in img out which
+	bin=$(resolve_spdhost_bin) || { echo "spdhost binary not found (make)." >&2; return 1; }
+	read -r -p "misc image [$DUMP_DIR/misc.img]: " in
+	in=${in:-$DUMP_DIR/misc.img}
+	if [[ ! -f $in ]]; then
+		echo "No such file: $in" >&2
+		return 1
+	fi
+	read -r -p "Slot to make active [a/b]: " which
+	which=${which,,}
+	case $which in
+		a|b) ;;
+		*) echo "Choose a or b." >&2; return 1 ;;
+	esac
+	out=${in%.img}-slot$which.img
+	if ! "$bin" pack-slot "$which" "$in" "$out"; then
+		echo "pack-slot failed; nothing usable was written." >&2
+		rm -f "$out"
+		return 1
+	fi
+	echo "Wrote $out: the image for slot $which, same size as $in."
+	echo "Flash it from menu [6] (or [7] for a whole folder)."
+	record_sha256 "$out" || true
+}
+
 extra_menu() {
 	local choice
 	echo "Extra"
@@ -2228,6 +2761,9 @@ extra_menu() {
 	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
 	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
 	echo "[11] Read the chip UID (read-only; spd_dump's chip_uid)"
+	echo "[12] Check one partition's live size (read-only)"
+	echo "[13] DANGEROUS: erase one partition (type the word dangerous)"
+	echo "[14] Build a slot a/b misc image from a dump (offline, no phone)"
 	echo "[0] Back"
 	read -r -p "Choice: " choice
 	case $choice in
@@ -2243,6 +2779,9 @@ extra_menu() {
 		9) continue_choice "hex mode" || return ;;
 		10) continue_choice "boot mode after flash / restore" || return ;;
 		11) continue_choice "read the chip UID" || return ;;
+		12) continue_choice "check a partition's live size" || return ;;
+		13) continue_choice "erase a partition" || return ;;
+		14) continue_choice "build a slot image" || return ;;
 		*) echo "Unchanged."; return ;;
 	esac
 	case $choice in
@@ -2273,6 +2812,9 @@ extra_menu() {
 		9) hex_mode_menu ;;
 		10) boot_after_menu ;;
 		11) chip_uid_action ;;
+		12) check_part_action ;;
+		13) erase_part_action ;;
+		14) pack_slot_action ;;
 	esac
 }
 
