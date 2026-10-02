@@ -21,17 +21,23 @@ permissions:
   contents: write
 
 concurrency:
-  # One build per branch. A newer push cancels the older build rather than
-  # racing it to the same release tag.
+  # One build per branch, queued rather than cancelled. Each push publishes its
+  # own tag, so cancelling a run halfway would strand a release with only some
+  # of its assets -- and the next push would not revisit that tag to repair it.
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
-  # The suite in no-root/tests needs gcc, python3 and a pty; the cross build
-  # needs autoconf for libusb and qemu-user to smoke-test what it produced.
+  # Two sets in one list. The suite in no-root/tests compiles spdhost for the
+  # runner, so it needs gcc and the real libusb headers (pkg-config finds them;
+  # without the -dev package `-lusb-1.0` has no .so to link against) and
+  # python3 for the pty driver. The cross build needs autoconf, automake and
+  # libtool to build libusb from source, and qemu-user to smoke-test what it
+  # produced. file and unzip are only for the "show what was produced" step.
   APT_DEPS: >-
-    gcc make git autoconf automake libtool python3 python3-pip
-    qemu-user qemu-user-static unzip file
+    gcc make git pkg-config libusb-1.0-0-dev python3 python3-pip
+    autoconf automake libtool qemu-user qemu-user-static
+    file unzip
 
 jobs:
   test:
@@ -96,7 +102,16 @@ jobs:
           # ziglang ships zig, used only as a C compiler with its bundled musl.
           # It builds libusb and spdhost for the two phone targets, so no
           # Android SDK or NDK is involved.
-          pip3 install --user ziglang
+          #
+          # The retry is for PEP 668: the runner's system python refuses a
+          # plain install on newer Ubuntu images. --break-system-packages does
+          # not exist on older pip, hence the fallback rather than using it
+          # outright. Either way the package lands under $HOME, not in the
+          # system python.
+          if ! pip3 install --user ziglang; then
+            echo "plain install refused; retrying with --break-system-packages (PEP 668)"
+            pip3 install --user --break-system-packages ziglang
+          fi
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: make cross (arm32 + arm64)
@@ -131,9 +146,15 @@ jobs:
 
           sha=$(git rev-parse HEAD)
           short=$(printf '%s' "$sha" | cut -c1-7)
-          branch=$(git rev-parse --abbrev-ref HEAD)
           subject=$(git log -1 --pretty=%s)
           built=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          # A push checks out its branch, so this is the branch name; the
+          # fallback is for a detached HEAD, where git prints "HEAD".
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$branch" = HEAD ]; then
+            branch=${GITHUB_REF_NAME:-detached}
+          fi
 
           # Tag shape follows the existing per-commit pre-releases:
           # spdhost-exp-<slug>-<short sha>. The slug is the first word of the
@@ -187,10 +208,13 @@ jobs:
             echo '```'
             # The full commit message, minus the Co-Authored-By trailer and any
             # blank lines left dangling at the end. Paragraph breaks survive.
+            # The 200-line cap is inside awk, not a `head` after it: head
+            # closing the pipe early would SIGPIPE awk, and pipefail would then
+            # fail the step on a long commit message.
             git log -1 --pretty=%B | awk '
               /^Co-Authored-By:/ { next }
-              { line[NR] = $0; if ($0 != "") last = NR }
-              END { for (i = 1; i <= last; i++) print line[i] }' | head -200
+              { line[NR] = $0; if ($0 != "") last = NR; if (NR > 200) exit }
+              END { for (i = 1; i <= last; i++) print line[i] }'
             echo '```'
             echo
             echo "### Files changed"
