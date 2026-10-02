@@ -253,16 +253,49 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
             echo
-            echo "### Termux"
+            echo "### Termux: install and run"
+            echo
+            echo "One line, in a Termux shell. It updates the packages, installs what"
+            echo "the tool needs, downloads this release, unpacks the tree for this"
+            echo "phone's architecture and starts the menu. Paste it whole and press"
+            echo "enter:"
             echo
             echo '```sh'
-            echo "curl -LO https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/spdhost-arm32-arm64-static-$short.zip"
-            echo "unzip -o spdhost-arm32-arm64-static-$short.zip -d \"\$HOME\""
-            echo "cd \"\$HOME/spdhost-arm32\"   # or spdhost-arm64"
-            echo "bash scripts/menu.sh"
+            # Single-quoted on purpose: the line has $, "", () and || in it, and
+            # a double-quoted echo would eat or mangle every one of them. Only
+            # the three build facts are spliced in from this shell.
+            echo 'pkg update -y && pkg upgrade -y && pkg install -y termux-api unzip curl && curl -LO https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/'"$tag"'/spdhost-arm32-arm64-static-'"$short"'.zip && unzip -o spdhost-arm32-arm64-static-'"$short"'.zip -d "$HOME" && cd "$HOME/$( [ "$(uname -m)" = aarch64 ] && echo spdhost-arm64 || echo spdhost-arm32 )" && bash scripts/menu.sh'
             echo '```'
-            echo "Unplug for at least 5 seconds between sessions. Connect only after the"
-            echo "wrapper says to plug in, while holding volume down."
+            echo
+            echo "Before the first run, install the **Termux:API** app from F-Droid"
+            echo "(<https://f-droid.org/packages/com.termux.api/>) or the Play Store."
+            echo "\`pkg install termux-api\` installs the command line tools only;"
+            echo "\`termux-usb\` talks to that app, and without it the menu cannot see"
+            echo "the phone. Open it once after installing so Android finishes setting"
+            echo "it up. If the phone is not detected, run \`termux-wake-lock\` and turn"
+            echo "off battery optimisation for both Termux and Termux:API."
+            echo
+            echo "The first time the menu reaches for the phone, Android shows a USB"
+            echo "permission dialog for the Unisoc device: allow it. The wrapper also"
+            echo "asks for it up front so the answer is cached for later sessions."
+            echo
+            echo "Then, for every session:"
+            echo
+            echo "1. Power the phone off and hold **volume down**."
+            echo "2. Unplug it for at least 5 seconds first if it was connected."
+            echo "3. Start the menu and pick the action; connect the cable only when it"
+            echo "   says to, and keep holding volume down until it is running."
+            echo
+            echo "To re-run later without downloading again:"
+            echo
+            echo '```sh'
+            echo 'cd "$HOME/spdhost-arm64"   # or spdhost-arm32'
+            echo 'bash scripts/menu.sh'
+            echo '```'
+            echo
+            echo "If a zip is ever re-downloaded over an old one, \`unzip -o\` replaces"
+            echo "the files but never touches \`backup/\` or \`input/\`, so earlier dumps"
+            echo "and the images you queued to flash are still there."
           } >/tmp/body.md
 
           if gh release view "$tag" >/dev/null 2>&1; then

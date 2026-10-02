@@ -160,6 +160,61 @@ head -c 1048576 /dev/zero >"$misc_in2"
 tr=$(menu pack_slot_action "misc image" "$misc_in2\r" "Slot to make active" 'x\r')
 check "pack-slot: a bad slot letter writes nothing" test ! -e "${misc_in2%.img}-slotx.img"
 
+# promote_dump_action -- menu [9]. Filesystem only, no phone. The point is
+# what it refuses to do: input/ also holds the images a user meant to flash,
+# so an image already there is never replaced, and the dump folder's non-image
+# files (SHA256SUMS, *.txt, *.xml, *_bak, misc-before-*) stay behind.
+pd=$tmp/promote_dump
+pi=$tmp/promote_input
+mkdir -p "$pd" "$pi"
+: >"$pd/system.img"                       # new name -> copied
+head -c 100 /dev/zero >"$pd/vendor.img"   # input has the same name, other size -> skipped
+printf 'BBBBBBBBBB' >"$pd/dtbo.img"        # input has the same name and size -> left alone
+printf 'AAAAAAAAAA' >"$pi/dtbo.img"
+printf 'KEEP' >"$pi/vendor.img"
+: >"$pd/SHA256SUMS"; : >"$pd/notes.txt"; : >"$pd/partitions.xml"
+: >"$pd/misc-before-1.img"; : >"$pd/uboot_bak.img"; : >"$pd/l_fixnv1.img"
+pd_tr=$tmp/promote-1.pty
+rm -f "$tmp/ran/log"
+python3 "$drive" "$pd_tr" "type yes to copy" 'yes\r' -- \
+	"SPDHOST_DUMP_DIR=$pd SPDHOST_INPUT_DIR=$pi $tmp/fn.sh promote_dump_action" </dev/null
+pd_out=$(cat "$pd_tr")
+check "promote: a new image is copied into input/" test -f "$pi/system.img"
+check "promote: the l_fixnv1 image is copied too" test -f "$pi/l_fixnv1.img"
+check "promote: an existing name with the same size keeps its own bytes" \
+	test "$(cat "$pi/dtbo.img" 2>/dev/null)" = AAAAAAAAAA
+check "promote: an existing name with another size is not overwritten" \
+	test "$(cat "$pi/vendor.img" 2>/dev/null)" = KEEP
+check "promote: SHA256SUMS is not copied" test ! -e "$pi/SHA256SUMS"
+check "promote: *.txt is not copied" test ! -e "$pi/notes.txt"
+check "promote: *.xml is not copied" test ! -e "$pi/partitions.xml"
+check "promote: *_bak is not copied" test ! -e "$pi/uboot_bak.img"
+check "promote: a misc backup image is not copied" test ! -e "$pi/misc-before-1.img"
+check "promote: says which file it skipped and why" \
+	bash -c '[[ $1 == *"different file of that name"* ]]' _ "$pd_out"
+check "promote: points at the flash menu afterwards" \
+	bash -c '[[ $1 == *"menu [6]"* ]]' _ "$pd_out"
+
+# A second run has nothing left to do and must not be an error or a rewrite.
+pd_tr2=$tmp/promote-2.pty
+rm -f "$tmp/ran/log"
+python3 "$drive" "$pd_tr2" -- \
+	"SPDHOST_DUMP_DIR=$pd SPDHOST_INPUT_DIR=$pi $tmp/fn.sh promote_dump_action" </dev/null
+pd_out2=$(cat "$pd_tr2")
+check "promote: a second run copies nothing" \
+	bash -c '[[ $1 == *"Nothing new to copy"* || $1 == *"already has every one"* ]]' _ "$pd_out2"
+
+# Declining the confirm copies nothing.
+pd2=$tmp/promote_dump2
+pi2=$tmp/promote_input2
+mkdir -p "$pd2" "$pi2"
+head -c 3 /dev/zero >"$pd2/boot.img"
+pd_tr3=$tmp/promote-3.pty
+rm -f "$tmp/ran/log"
+python3 "$drive" "$pd_tr3" "type yes to copy" 'no\r' -- \
+	"SPDHOST_DUMP_DIR=$pd2 SPDHOST_INPUT_DIR=$pi2 $tmp/fn.sh promote_dump_action" </dev/null
+check "promote: answering no copies nothing" test ! -e "$pi2/boot.img"
+
 echo
 echo "menu-extra: $pass passed, $fail failed"
 (( fail == 0 ))

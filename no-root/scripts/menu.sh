@@ -544,7 +544,11 @@ configure_loaders_manual() {
 # or a subdirectory name under alternatif/ (the release spelling "alternativ"
 # is accepted too).
 shipped_fdl_pair() {
-	local root=$1 soc=$2 brand=$3 model=$4 dir
+	# model is the optional fourth argument ("main pair" = no model). Written
+	# with :- because this file runs under set -u: a caller that leaves it off
+	# would otherwise abort the whole menu with "unbound variable" instead of
+	# getting the main pair.
+	local root=$1 soc=$2 brand=$3 model=${4:-} dir
 	if [[ -n $model ]]; then
 		for dir in "$root/$soc/$brand/alternatif/$model" "$root/$soc/$brand/alternativ/$model"; do
 			if [[ -f $dir/fdl1-dl.bin && -f $dir/fdl2-dl.bin ]]; then
@@ -2059,6 +2063,7 @@ flash_input_menu() {
 	if (( ${#names[@]} == 0 )); then
 		echo "No partition images in $INPUT_DIR."
 		echo "That folder is there now. Copy images into it, then choose this again."
+		echo "If you just dumped from this phone, menu [9] copies those dumps here."
 		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
 		return 1
 	fi
@@ -2072,8 +2077,9 @@ flash_input_menu() {
 	echo "Each file is written under its own name, including an inactive _a or _b image."
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "An empty image, or one larger than its partition, aborts the flash before anything is sent."
-	echo "misc.img, if present, is backed up and verified."
-	echo "This flash does not change the active slot and does not erase metadata."
+	echo "misc.img, if present, is backed up and verified. Writing it also restores the"
+	echo "slot record it was dumped with; no other file here can change the slot."
+	echo "This flash does not erase metadata."
 	echo "splloader.img is written up to the live table size. With no splloader row, the file is sent whole (a dump is still 256 KiB)."
 	echo "A broken l_fixnv1 image is skipped. A sparse image waits up to 100 seconds per chunk."
 	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
@@ -2085,6 +2091,94 @@ flash_input_menu() {
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" write-files "$INPUT_DIR" "$BOOT_AFTER"
+}
+
+# A dump lands in DUMP_DIR; a flash reads INPUT_DIR. The release menu leaves
+# the user to move files between them by hand (that is what the "letak file di
+# folder input" step means). This copies the images one way, so a partition
+# that was just read off a phone is the partition menu [6] will write, under
+# the same name it was dumped with.
+#
+# It only ever adds files: an existing input/NAME.img of the same size is left
+# alone, and one of a different size is reported and skipped, never replaced.
+# That matters because input/ is also where a user keeps the images they meant
+# to flash -- silently swapping one for a dump would change what gets written.
+promote_dump_action() {
+	local -a names=() copied=() same=() clash=()
+	local n f base src dst ssz dsz
+	echo "Copy dumped images from the dump folder into the flash folder."
+	echo "  from: $DUMP_DIR"
+	echo "  to:   $INPUT_DIR"
+	echo "Only partition images are copied (the same names menu [7] restores)."
+	echo "A file already in the flash folder with the same size is left alone;"
+	echo "one with a different size is skipped, never overwritten."
+	if [[ ! -d $DUMP_DIR ]]; then
+		echo "No dump folder yet: $DUMP_DIR"
+		return 1
+	fi
+	mkdir -p "$INPUT_DIR" || { echo "Could not create $INPUT_DIR" >&2; return 1; }
+	shopt -s nullglob
+	for f in "$DUMP_DIR"/*; do
+		[[ -f $f ]] || continue
+		base=$(basename "$f")
+		part_image_candidate "$base" || continue
+		# A dump is NAME.img; anything else in the dump folder (a .bin kept
+		# from elsewhere) is renamed by the flash menu itself, so leave it.
+		[[ $base == *.img ]] || continue
+		names+=("$base")
+	done
+	shopt -u nullglob
+	if (( ${#names[@]} == 0 )); then
+		echo "No *.img partition images in $DUMP_DIR. Dump one first (menu [1])."
+		return 1
+	fi
+	for base in "${names[@]}"; do
+		src=$DUMP_DIR/$base
+		dst=$INPUT_DIR/$base
+		if [[ -e $dst ]]; then
+			ssz=$(stat -c %s "$src" 2>/dev/null || echo 0)
+			dsz=$(stat -c %s "$dst" 2>/dev/null || echo 0)
+			if [[ $ssz == "$dsz" ]]; then same+=("$base"); else clash+=("$base"); fi
+			continue
+		fi
+		copied+=("$base")
+	done
+	echo
+	if (( ${#copied[@]} )); then
+		echo "Will copy:"
+		printf '  %s\n' "${copied[@]}"
+	else
+		echo "Nothing new to copy."
+	fi
+	(( ${#same[@]} )) && echo "Already there, same size (left alone): ${same[*]}"
+	(( ${#clash[@]} )) && echo "Skipped, a different file of that name is already there: ${clash[*]}"
+	if (( ${#copied[@]} == 0 )); then
+		echo "menu [6] already has every one of these images."
+		return 0
+	fi
+	if ! confirm_action "type yes to copy these into the flash folder: "; then
+		return 1
+	fi
+	n=0
+	for base in "${copied[@]}"; do
+		src=$DUMP_DIR/$base
+		dst=$INPUT_DIR/$base
+		if cp -n "$src" "$dst" 2>/dev/null; then
+			ssz=$(stat -c %s "$src" 2>/dev/null || echo 0)
+			dsz=$(stat -c %s "$dst" 2>/dev/null || echo 0)
+			if [[ $ssz == "$dsz" ]]; then
+				echo "ok   $base $(fmt_size "$ssz")"
+				n=$((n + 1))
+			else
+				echo "short copy of $base ($dsz of $ssz bytes); removed" >&2
+				rm -f "$dst"
+			fi
+		else
+			echo "could not copy $base (a file appeared there, or the copy failed)" >&2
+		fi
+	done
+	echo "$n image(s) in $INPUT_DIR. Choose menu [6] to flash them."
+	return 0
 }
 
 # Names write-parts will look at: regular files in this directory that
@@ -2846,7 +2940,8 @@ while true; do
 	echo "[6] Flash images from $INPUT_DIR"
 	echo "[7] Restore a backup folder"
 	echo "[8] Repartition from XML"
-	echo "[9] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)"
+	echo "[9] Copy dumped images into the flash folder ($INPUT_DIR)"
+	echo "[10] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)"
 	echo "[0] Quit"
 	echo "After a number: y continues, n goes back."
 	# EOF (Ctrl-D, or stdin that ran out) has to end the loop: read leaves
@@ -2874,7 +2969,9 @@ while true; do
 			restore_backup_menu; pause ;;
 		8) continue_choice "repartition" || { pause; continue; }
 			repartition_menu; pause ;;
-		9) continue_choice "extra menu" || { pause; continue; }
+		9) continue_choice "copy dumps into the flash folder" || { pause; continue; }
+			promote_dump_action; pause ;;
+		10) continue_choice "extra menu" || { pause; continue; }
 			extra_menu; pause ;;
 		0) continue_choice "quit" && exit 0
 			pause ;;

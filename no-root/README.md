@@ -373,7 +373,8 @@ is labeled dangerous. Use only on a sacrificial device.
 [6] Flash images from input/
 [7] Restore a backup folder
 [8] Repartition from XML
-[9] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)
+[9] Copy dumped images into the flash folder
+[10] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)
 [0] Quit
 ```
 
@@ -392,6 +393,17 @@ whose loaders are one chip's and whose addresses are another's is refused
 with both names. Stale addresses are repaired from the chip, and an empty
 `SOC` beside a loader path is filled in from the path rather than used as a
 way around the check.
+
+Two folders sit beside `fdl/` in an unpacked package, and both are created if
+they are missing (a copy run from elsewhere gets them in `$PWD`):
+`backup/` is what `[1]` writes into and `[7]` restores from, and `input/` is
+what `[6]` flashes. `SHA256SUMS` and `dump-manifest.txt` land in `backup/`
+too. The release menu leaves you to move files between the two by hand; `[9]`
+does it for you, copying the partition images from the dump folder into the
+flash folder. It only adds files: an image already in `input/` at the same
+size is left alone, and one of a different size is reported and skipped
+rather than replaced, because `input/` also holds the images you actually
+meant to flash.
 
 Dump `[1]` fetches the live table into `./backup/partition_list.txt`, prints
 it like the rooted menu's LIST PARTISI, then resolves what you type to the

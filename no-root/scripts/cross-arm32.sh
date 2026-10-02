@@ -195,6 +195,8 @@ cp -r "$root/fdl" "$pkg/fdl"
 cp -r "$root/misc" "$pkg/misc"   # BCB images for menu [5] wipe (package-relative lookup)
 mkdir -p "$pkg/input"
 cp "$root/input/"*.txt "$pkg/input/" 2>/dev/null || true
+mkdir -p "$pkg/backup"
+cp "$root/backup/"*.txt "$pkg/backup/" 2>/dev/null || true
 cp "$root/README.md" "$root/LICENSE" "$pkg/"
 chmod +x "$pkg/spdhost" "$pkg/spd_dump/spd_dump" "$pkg/scripts/"* "$pkg/spd_dump/scripts/"*
 short=$(printf '%s' "$sha" | cut -c1-7)

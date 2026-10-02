@@ -1,0 +1,16 @@
+This folder is where the menu writes what it reads off the phone.
+
+Menu [1] (dump partitions) writes NAME.img here, one file per partition,
+plus SHA256SUMS and dump-manifest.txt. The file for the active slot is
+written without a suffix (boot.img); the other slot keeps its own name
+(boot_b.img) and is only read when you ask for it by name or with `all`.
+
+Menu [7] (restore a backup) writes the images in this folder back to the
+phone. Menu [9] copies the partition images from here into input/, which is
+the folder menu [6] flashes from, so a partition you dumped can be the
+partition you flash without moving files by hand.
+
+The folder is created by the menu if it is missing. Nothing here is needed
+for the tool to run: an empty backup/ is the normal state on a fresh copy.
+Keep the dumps. The last misc image (misc-before-<time>.img) is the one to
+write back if a misc write ever goes wrong.
