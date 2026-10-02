@@ -2163,19 +2163,38 @@ promote_dump_action() {
 	for base in "${copied[@]}"; do
 		src=$DUMP_DIR/$base
 		dst=$INPUT_DIR/$base
-		if cp -n "$src" "$dst" 2>/dev/null; then
-			ssz=$(stat -c %s "$src" 2>/dev/null || echo 0)
-			dsz=$(stat -c %s "$dst" 2>/dev/null || echo 0)
-			if [[ $ssz == "$dsz" ]]; then
-				echo "ok   $base $(fmt_size "$ssz")"
-				n=$((n + 1))
-			else
-				echo "short copy of $base ($dsz of $ssz bytes); removed" >&2
-				rm -f "$dst"
-			fi
-		else
-			echo "could not copy $base (a file appeared there, or the copy failed)" >&2
+		tmp=$dst.new.$$
+		# Copy beside the destination, check the size there, and only then
+		# publish it. `ln` fails if the name exists, which is the atomic
+		# no-clobber: a file that appeared while this was running is left
+		# exactly as it is. Nothing here ever removes a file this loop did
+		# not just write -- cp -n returns 0 without copying, so pairing it
+		# with a fallback `rm -f "$dst"` would delete a stranger's image.
+		rm -f "$tmp"
+		if ! cp "$src" "$tmp" 2>/dev/null; then
+			echo "could not copy $base into $INPUT_DIR" >&2
+			rm -f "$tmp"
+			continue
 		fi
+		ssz=$(stat -c %s "$src" 2>/dev/null || echo 0)
+		tsz=$(stat -c %s "$tmp" 2>/dev/null || echo 0)
+		if [[ $ssz != "$tsz" ]]; then
+			echo "short copy of $base ($tsz of $ssz bytes); not installed" >&2
+			rm -f "$tmp"
+			continue
+		fi
+		if ln "$tmp" "$dst" 2>/dev/null; then
+			echo "ok   $base $(fmt_size "$ssz")"
+			n=$((n + 1))
+		elif [[ -e $dst ]]; then
+			echo "$base appeared in $INPUT_DIR while copying; left alone" >&2
+		elif cp "$tmp" "$dst" 2>/dev/null; then
+			echo "ok   $base $(fmt_size "$ssz")"
+			n=$((n + 1))
+		else
+			echo "could not install $base into $INPUT_DIR" >&2
+		fi
+		rm -f "$tmp"
 	done
 	echo "$n image(s) in $INPUT_DIR. Choose menu [6] to flash them."
 	return 0

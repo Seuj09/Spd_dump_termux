@@ -194,6 +194,10 @@ check "promote: says which file it skipped and why" \
 	bash -c '[[ $1 == *"different file of that name"* ]]' _ "$pd_out"
 check "promote: points at the flash menu afterwards" \
 	bash -c '[[ $1 == *"menu [6]"* ]]' _ "$pd_out"
+check "promote: leaves no .new.* temporary behind" \
+	bash -c '! ls "$1"/*.new.* >/dev/null 2>&1' _ "$pi"
+check "promote: wrote exactly the two new names" \
+	bash -c '[ "$(ls "$1" | sort | tr "\n" " ")" = "dtbo.img l_fixnv1.img system.img vendor.img " ]' _ "$pi"
 
 # A second run has nothing left to do and must not be an error or a rewrite.
 pd_tr2=$tmp/promote-2.pty
