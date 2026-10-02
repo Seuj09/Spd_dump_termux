@@ -264,8 +264,24 @@ jobs:
             # Single-quoted on purpose: the line has $, "", () and || in it, and
             # a double-quoted echo would eat or mangle every one of them. Only
             # the three build facts are spliced in from this shell.
-            echo 'pkg update -y && pkg upgrade -y && pkg install -y termux-api unzip curl && curl -LO https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/'"$tag"'/spdhost-arm32-arm64-static-'"$short"'.zip && unzip -o spdhost-arm32-arm64-static-'"$short"'.zip -d "$HOME" && cd "$HOME/$( [ "$(uname -m)" = aarch64 ] && echo spdhost-arm64 || echo spdhost-arm32 )" && bash scripts/menu.sh'
+            echo 'pkg update -y && pkg upgrade -y && pkg install -y termux-api unzip curl && (termux-setup-storage || true) && curl -LO https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/'"$tag"'/spdhost-arm32-arm64-static-'"$short"'.zip && unzip -o spdhost-arm32-arm64-static-'"$short"'.zip -d "$HOME" && cd "$HOME/$( [ "$(uname -m)" = aarch64 ] && echo spdhost-arm64 || echo spdhost-arm32 )" && bash scripts/menu.sh'
             echo '```'
+            echo
+            echo "\`termux-setup-storage\` opens the Android storage permission; allow"
+            echo "it. That is what lets the tool use **shared storage**, where the"
+            echo "images you actually have live. It reads and writes:"
+            echo
+            echo "- \`/sdcard/spdhost/input\` -- the images menu [6] flashes. Put"
+            echo "  \`boot.img\`, \`vbmeta.img\`, \`l_fixnv1.img\` there from any file"
+            echo "  manager or browser download and flash them straight away."
+            echo "- \`/sdcard/spdhost/backup\` -- what menu [1] dumps, so the files are"
+            echo "  visible to other apps instead of hidden inside Termux."
+            echo
+            echo "Both folders are created on first run. If the permission was denied,"
+            echo "the tool says so and uses \`input/\` and \`backup/\` inside the folder"
+            echo "you unzipped instead -- nothing is lost, the files are just not on"
+            echo "/sdcard. Extra menu [15] switches between the two, and"
+            echo "\`SPDHOST_SHARED_DIR\` names a different shared folder."
             echo
             echo "Before the first run, install the **Termux:API** app from F-Droid"
             echo "(<https://f-droid.org/packages/com.termux.api/>) or the Play Store."

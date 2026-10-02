@@ -5,8 +5,30 @@ set -u
 
 CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
 # Filled in once this file's path is known. SPDHOST_DUMP_DIR wins, then a
-# DUMP_DIR already set by the caller (tests), then backup/ beside fdl/.
-DUMP_DIR="${SPDHOST_DUMP_DIR:-${DUMP_DIR:-}}"
+# DUMP_DIR already set by the caller (tests), then shared storage, then
+# backup/ beside fdl/.
+DUMP_DIR_FROM_ENV="${SPDHOST_DUMP_DIR:-${DUMP_DIR:-}}"
+DUMP_DIR="$DUMP_DIR_FROM_ENV"
+INPUT_DIR_FROM_ENV="${SPDHOST_INPUT_DIR:-}"
+# Where the images live, when shared storage is in play: <base>/spdhost/.
+# auto = shared storage if Termux can see it, package folders otherwise.
+# SPDHOST_STORAGE= overrides the saved config, the way the other SPDHOST_
+# variables do; the config is only consulted when it is unset.
+STORAGE_MODE=${SPDHOST_STORAGE:-auto}
+case $STORAGE_MODE in
+	auto|shared|package) ;;
+	*)
+		echo "note: SPDHOST_STORAGE=$STORAGE_MODE is not auto/shared/package; using auto." >&2
+		STORAGE_MODE=auto
+		;;
+esac
+STORAGE_MODE_FROM_ENV=${SPDHOST_STORAGE:-}
+SPDHOST_SHARED_NAME=spdhost
+STORAGE_USED=""
+# Set once apply_storage_mode has run and the folders were created; the menu
+# prints it so the paths on screen are never a guess.
+INPUT_DIR_PKG=""
+DUMP_DIR_PKG=""
 FDL1_ADDR_DEFAULT=0x65000800
 FDL2_ADDR_DEFAULT=0x9efffe00
 # BootROM exec_addr (spd_dump's no-verify stub path; see TERMUX.md). With it,
@@ -34,27 +56,20 @@ BOOT_AFTER=reset
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # Package root is the directory that contains fdl/ (parent of scripts/).
 # A menu copied into $PREFIX/bin has no fdl next to it, so images stay in
-# $PWD/input, which is created before the first prompt.
-if [[ -z ${SPDHOST_INPUT_DIR:-} ]]; then
-	if [[ -d $script_dir/../fdl ]]; then
-		INPUT_DIR=$(cd "$script_dir/.." && pwd)/input
-	elif [[ -d $script_dir/fdl ]]; then
-		INPUT_DIR=$script_dir/input
-	else
-		INPUT_DIR=$PWD/input
-	fi
+# $PWD/input, which is created before the first prompt. These two are kept:
+# the storage switch has to be able to come back here.
+if [[ -d $script_dir/../fdl ]]; then
+	INPUT_DIR_PKG=$(cd "$script_dir/.." && pwd)/input
+	DUMP_DIR_PKG=$(cd "$script_dir/.." && pwd)/backup
+elif [[ -d $script_dir/fdl ]]; then
+	INPUT_DIR_PKG=$script_dir/input
+	DUMP_DIR_PKG=$script_dir/backup
 else
-	INPUT_DIR=$SPDHOST_INPUT_DIR
+	INPUT_DIR_PKG=$PWD/input
+	DUMP_DIR_PKG=$PWD/backup
 fi
-if [[ -z $DUMP_DIR ]]; then
-	if [[ -d $script_dir/../fdl ]]; then
-		DUMP_DIR=$(cd "$script_dir/.." && pwd)/backup
-	elif [[ -d $script_dir/fdl ]]; then
-		DUMP_DIR=$script_dir/backup
-	else
-		DUMP_DIR=$PWD/backup
-	fi
-fi
+INPUT_DIR=${INPUT_DIR_FROM_ENV:-$INPUT_DIR_PKG}
+DUMP_DIR=${DUMP_DIR_FROM_ENV:-$DUMP_DIR_PKG}
 RUNNER=()
 # Test hook: SPDHOST_MENU_RUNNER=/path/to/runner replaces spdhost-usb (tests/menu-dump.sh).
 if [[ -n ${SPDHOST_MENU_RUNNER:-} ]]; then
@@ -135,6 +150,143 @@ cls() {
 	printf '\033[2J\033[H'
 }
 
+# --------------------------------------------------------------- shared storage
+# On a phone the images a user actually has -- a browser download, something a
+# file manager copied, a zip another app extracted -- are on shared storage
+# (/sdcard), and Termux cannot see any of it until `termux-setup-storage` has
+# been run once and the permission allowed. So the flash and dump folders are
+# picked like this:
+#
+#   SPDHOST_INPUT_DIR / SPDHOST_DUMP_DIR   wins outright (tests, power users)
+#   STORAGE=package                        the folders beside fdl/ in the package
+#   STORAGE=auto (default)                 <shared>/spdhost/{input,backup} when
+#                                          shared storage is visible and
+#                                          writable, the package folders when
+#                                          it is not
+#   STORAGE=shared                         shared storage, and say so when it
+#                                          is missing instead of silently
+#                                          using the package
+#
+# Nothing here is required: a phone with no storage permission keeps working
+# out of the package, which is the only layout that needs no Android grant.
+
+# The base directory Termux can actually read/write, or nothing. A plain -d is
+# not enough: /sdcard is a mount point that exists whether or not the app has
+# been granted storage, and a listing is what fails when it has not.
+shared_storage_base() {
+	local b
+	# An explicit SPDHOST_SHARED_DIR is the whole answer, working or not:
+	# a caller that names one path does not want the search falling through
+	# to /sdcard behind its back. It is also how a test says "pretend this
+	# phone has no shared storage" (point it at a path that is not there).
+	if [[ -n ${SPDHOST_SHARED_DIR:-} ]]; then
+		b=$SPDHOST_SHARED_DIR
+		[[ -d $b && -w $b ]] && ls "$b" >/dev/null 2>&1 || return 1
+		printf '%s\n' "$b"
+		return 0
+	fi
+	for b in "$HOME/storage/shared" /sdcard /storage/emulated/0; do
+		[[ -d $b ]] || continue
+		ls "$b" >/dev/null 2>&1 || continue
+		[[ -w $b ]] || continue
+		printf '%s\n' "$b"
+		return 0
+	done
+	return 1
+}
+
+# <base>/spdhost, where the folders live. One name, so everything this tool
+# writes to shared storage sits under one directory a file manager can find.
+shared_storage_root() {
+	local base
+	base=$(shared_storage_base) || return 1
+	printf '%s/%s\n' "${base%/}" "$SPDHOST_SHARED_NAME"
+}
+
+# Recompute INPUT_DIR/DUMP_DIR from STORAGE_MODE and create the folders.
+# Called at startup, and again when the storage switch changes the mode.
+apply_storage_mode() {
+	local root
+	INPUT_DIR=${INPUT_DIR_FROM_ENV:-$INPUT_DIR_PKG}
+	DUMP_DIR=${DUMP_DIR_FROM_ENV:-$DUMP_DIR_PKG}
+	STORAGE_USED=""
+	[[ $STORAGE_MODE == package ]] && return 0
+	root=$(shared_storage_root) || root=""
+	if [[ -z $root ]]; then
+		if [[ $STORAGE_MODE == shared ]]; then
+			echo "note: STORAGE=shared, but Termux cannot see shared storage." >&2
+			echo "      Run termux-setup-storage once and allow the permission;" >&2
+			echo "      using the package folders for now." >&2
+		fi
+		return 0
+	fi
+	if ! mkdir -p "$root/input" "$root/backup" 2>/dev/null; then
+		echo "note: could not create $root; using the package folders." >&2
+		return 0
+	fi
+	[[ -n $INPUT_DIR_FROM_ENV ]] || INPUT_DIR=$root/input
+	[[ -n $DUMP_DIR_FROM_ENV ]] || DUMP_DIR=$root/backup
+	STORAGE_USED=$root
+	return 0
+}
+
+# One line for the header: which layout is in use and where it is.
+storage_describe() {
+	if [[ -n $INPUT_DIR_FROM_ENV || -n $DUMP_DIR_FROM_ENV ]]; then
+		printf 'set by SPDHOST_INPUT_DIR / SPDHOST_DUMP_DIR'
+		return
+	fi
+	if [[ -n $STORAGE_USED ]]; then
+		printf 'shared storage (%s)' "$STORAGE_USED"
+	elif [[ $STORAGE_MODE == package ]]; then
+		printf 'package folders (STORAGE=package)'
+	elif [[ $STORAGE_MODE == shared ]]; then
+		printf 'package folders: shared storage is not visible (STORAGE=shared)'
+	else
+		printf 'package folders, no shared storage'
+	fi
+}
+
+# [15] Switch between the two layouts. Writes the choice to the menu config
+# and re-applies it now, so the paths change without a restart.
+storage_switch_menu() {
+	local choice root
+	echo "Where the flash and dump folders live."
+	echo "  flash: $INPUT_DIR"
+	echo "  dump:  $DUMP_DIR"
+	echo "  now:   $(storage_describe)"
+	echo
+	root=$(shared_storage_root) || root=""
+	if [[ -n $root ]]; then
+		echo "[1] Shared storage: $root/{input,backup}  (what you put there with a file manager)"
+	else
+		echo "[1] Shared storage: not visible. Run termux-setup-storage and allow it."
+	fi
+	echo "[2] Package folders: $INPUT_DIR_PKG and $DUMP_DIR_PKG"
+	echo "[0] Back"
+	read -r -p "Choice: " choice
+	case ${choice:-} in
+		1)
+			STORAGE_MODE=shared
+			;;
+		2)
+			STORAGE_MODE=package
+			;;
+		0|'') echo "Unchanged."; return 0 ;;
+		*) echo "Not a choice."; return 1 ;;
+	esac
+	if [[ -n $INPUT_DIR_FROM_ENV || -n $DUMP_DIR_FROM_ENV ]]; then
+		echo "note: SPDHOST_INPUT_DIR / SPDHOST_DUMP_DIR is set and still wins."
+	fi
+	apply_storage_mode
+	mkdir -p "$INPUT_DIR" 2>/dev/null || echo "note: could not create $INPUT_DIR" >&2
+	mkdir -p "$DUMP_DIR" 2>/dev/null || echo "note: could not create $DUMP_DIR" >&2
+	save_config
+	echo "Flash folder: $INPUT_DIR"
+	echo "Dump folder:  $DUMP_DIR"
+	echo "Saved to $CONFIG."
+}
+
 save_config() {
 	umask 077
 	cat > "$CONFIG" << EOF
@@ -146,6 +298,7 @@ EXEC_ADDR=$EXEC_ADDR
 SOC=$SOC
 DEVICE=$DEVICE
 BOOT_AFTER=$BOOT_AFTER
+STORAGE=$STORAGE_MODE
 EOF
 }
 
@@ -173,6 +326,12 @@ load_config() {
 				# Allowlist, not a free-form word: this value is passed to
 				# run_session as a command argument.
 				[[ $val =~ ^(reset|reboot-recovery|reboot-fastboot|power-off)$ ]] && BOOT_AFTER=$val
+				;;
+			STORAGE)
+				# Allowlist: this picks between two path layouts, and
+				# anything else is not a third one. SPDHOST_STORAGE=
+				# wins over what is saved here.
+				[[ -z $STORAGE_MODE_FROM_ENV && $val =~ ^(auto|shared|package)$ ]] && STORAGE_MODE=$val
 				;;
 		esac
 	done < "$CONFIG"
@@ -2877,6 +3036,7 @@ extra_menu() {
 	echo "[12] Check one partition's live size (read-only)"
 	echo "[13] DANGEROUS: erase one partition (type the word dangerous)"
 	echo "[14] Build a slot a/b misc image from a dump (offline, no phone)"
+	echo "[15] Storage folders: shared storage (/sdcard) or the package"
 	echo "[0] Back"
 	read -r -p "Choice: " choice
 	case $choice in
@@ -2895,6 +3055,7 @@ extra_menu() {
 		12) continue_choice "check a partition's live size" || return ;;
 		13) continue_choice "erase a partition" || return ;;
 		14) continue_choice "build a slot image" || return ;;
+		15) continue_choice "storage folders" || return ;;
 		*) echo "Unchanged."; return ;;
 	esac
 	case $choice in
@@ -2928,6 +3089,7 @@ extra_menu() {
 		12) check_part_action ;;
 		13) erase_part_action ;;
 		14) pack_slot_action ;;
+		15) storage_switch_menu ;;
 	esac
 }
 
@@ -2938,6 +3100,8 @@ fi
 
 load_config
 apply_ums9230_infinix_defaults
+# After load_config, because the saved config is what picks the layout.
+apply_storage_mode
 mkdir -p "$INPUT_DIR" || echo "Could not create $INPUT_DIR" >&2
 mkdir -p "$DUMP_DIR" || echo "Could not create $DUMP_DIR" >&2
 
@@ -2947,6 +3111,7 @@ while true; do
 	echo "wrapper: ${RUNNER[0]}"
 	echo "FDL1: ${FDL1:-unset} ${FDL1_ADDR:-}"
 	echo "FDL2: ${FDL2:-unset} ${FDL2_ADDR:-}"
+	echo "Folders: $(storage_describe)"
 	echo "Dumps go to: $DUMP_DIR"
 	echo "Flash input: $INPUT_DIR"
 	echo "After flash/restore: $BOOT_AFTER"

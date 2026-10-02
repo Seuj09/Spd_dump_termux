@@ -57,12 +57,18 @@ In Termux, not in a chroot:
 ```sh
 pkg update
 pkg install git clang make pkg-config libusb termux-api
+termux-setup-storage
 git clone https://github.com/Seuj09/Spd_dump_termux.git
 cd Spd_dump_termux/no-root
 make
 ./spdhost --self-test
 cp spdhost scripts/spdhost-usb "$PREFIX/bin/"
 ```
+
+`termux-setup-storage` asks for Android's storage permission. Allow it: that
+is what lets the menu read images you put on `/sdcard` and write dumps there
+(see the folders paragraph under [The menu](#the-menu)). Skip it and the menu
+still works, out of `input/` and `backup/` in this directory.
 
 `$PREFIX` is already set by Termux (`/data/data/com.termux/files/usr`).
 `command -v spdhost` and `command -v spdhost-usb` must both print a path
@@ -394,15 +400,39 @@ with both names. Stale addresses are repaired from the chip, and an empty
 `SOC` beside a loader path is filled in from the path rather than used as a
 way around the check.
 
-Two folders sit beside `fdl/` in an unpacked package, and both are created if
-they are missing (a copy run from elsewhere gets them in `$PWD`):
-`backup/` is what `[1]` writes into and `[7]` restores from, and `input/` is
-what `[6]` flashes. `SHA256SUMS` and `dump-manifest.txt` land in `backup/`
-too. The release menu leaves you to move files between the two by hand; `[9]`
-does it for you, copying the partition images from the dump folder into the
-flash folder. It only adds files: an image already in `input/` at the same
-size is left alone, and one of a different size is reported and skipped
-rather than replaced, because `input/` also holds the images you actually
+Two folders hold the images: `backup/` is what `[1]` writes into and `[7]`
+restores from, and `input/` is what `[6]` flashes. `SHA256SUMS`,
+`dump-manifest.txt` and `partition_list.txt` land in `backup/` too.
+
+**Where those folders are depends on the phone.** On Termux, after
+`termux-setup-storage` has been run and allowed, they are
+
+```
+/sdcard/spdhost/input    images to flash  (menu [6] reads this)
+/sdcard/spdhost/backup   dumps            (menu [1] writes this)
+```
+
+so a file you downloaded in a browser or copied with a file manager is one
+move away from being flashed, and a dump is visible to other apps instead of
+hidden inside Termux's private directory. The tool creates both on first run.
+Without storage permission it falls back to `input/` and `backup/` inside the
+folder it was unzipped into, and says which one it is using in the header.
+
+Extra `[15]` shows the folders in use and switches between the two layouts.
+Three settings control it, in order of precedence:
+
+| Setting | Effect |
+| --- | --- |
+| `SPDHOST_INPUT_DIR` / `SPDHOST_DUMP_DIR` | names one folder outright; the layout below is ignored |
+| `SPDHOST_STORAGE=auto\|shared\|package` | this run only; beats the saved config |
+| `STORAGE=` in `~/.spdhost-menu.conf` | what `[15]` saves; `auto` means shared storage when it is visible, the package folders when it is not |
+| `SPDHOST_SHARED_DIR=/some/dir` | the only shared path searched, under which `spdhost/` is created (used by the tests, and by anyone who wants the images somewhere else) |
+
+The release menu leaves you to move files between the two folders by hand;
+`[9]` does it for you, copying the partition images from the dump folder into
+the flash folder. It only adds files: an image already there at the same size
+is left alone, and one of a different size is reported and skipped rather
+than replaced, because the flash folder also holds the images you actually
 meant to flash.
 
 Dump `[1]` fetches the live table into `./backup/partition_list.txt`, prints
@@ -434,6 +464,7 @@ Extra:
 [12] Check one partition's live size (read-only)
 [13] DANGEROUS: erase one partition
 [14] Build a slot a/b misc image from a dump (offline, no phone)
+[15] Storage folders: shared storage (/sdcard) or the package
 ```
 
 `[13]` refuses `persist`, `splloader` and `all` outright. `[14]` runs

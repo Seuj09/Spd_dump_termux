@@ -1,14 +1,24 @@
 This folder is where the menu writes what it reads off the phone.
 
 Menu [1] (dump partitions) writes NAME.img here, one file per partition,
-plus SHA256SUMS and dump-manifest.txt. The file for the active slot is
-written without a suffix (boot.img); the other slot keeps its own name
-(boot_b.img) and is only read when you ask for it by name or with `all`.
+plus SHA256SUMS and dump-manifest.txt, and the live partition table as
+partition_list.txt. The file for the active slot is written without a
+suffix (boot.img); the other slot keeps its own name (boot_b.img) and is
+only read when you ask for it by name or with `all`.
+
+On a phone the folder the menu uses is
+    /sdcard/spdhost/backup
+once termux-setup-storage has been run and allowed, so the dumps are visible
+to other apps instead of hidden inside Termux. This folder is the fallback:
+when the phone has not granted storage access, the menu uses the backup/
+folder inside the folder the tool was unzipped into. Extra menu [15] shows
+which one is in use and switches between them.
 
 Menu [7] (restore a backup) writes the images in this folder back to the
-phone. Menu [9] copies the partition images from here into input/, which is
-the folder menu [6] flashes from, so a partition you dumped can be the
-partition you flash without moving files by hand.
+phone. Menu [9] copies the partition images from here into the flash folder
+(input/, or /sdcard/spdhost/input), which is the folder menu [6] flashes
+from, so a partition you dumped can be the partition you flash without moving
+files by hand.
 
 The folder is created by the menu if it is missing. Nothing here is needed
 for the tool to run: an empty backup/ is the normal state on a fresh copy.
