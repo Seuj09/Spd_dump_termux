@@ -16,6 +16,11 @@ Copy the one that matches the host phone. An arm64 binary will not start on
 a 32-bit phone. The release zip's `spd_dump` is arm64 only; this tree
 replaces it for a 32-bit host.
 
+That release is the curated one. Builds made from each commit land as
+pre-releases (`spdhost-exp-…`) on the [Releases
+page](https://github.com/Seuj09/Spd_dump_termux/releases); see
+[Cross-compiling](#cross-compiling-for-a-phone-optional).
+
 ```sh
 uname -m
 curl -L -o spdhost https://github.com/Seuj09/Spd_dump_termux/releases/download/spdhost-source/spdhost-arm64
@@ -93,6 +98,14 @@ cannot find usbfs on a phone and fails with `LIBUSB_ERROR_OTHER`. The build
 machine only runs the emulated `--self-test` and argument error paths when
 `qemu-arm`/`qemu-aarch64` is installed. **Test the result on the phone
 before publishing it.**
+
+CI does the same on every push to `main` or
+`experiment/brom-hello-diagnostics` that touches `no-root/`, and on demand from
+the Actions tab: `.github/workflows/build.yml` runs the test suite, then
+`make cross`, then publishes both single-architecture zips and the combined one
+as a pre-release tagged `spdhost-exp-<slug>-<short sha>`, with the commit and
+the UTC build date in the description. It proves the binaries build and that
+the emulated checks pass; it never runs them on a phone.
 
 ### Tests
 
