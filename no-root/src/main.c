@@ -5,6 +5,8 @@
 #include "dumpcmd.h"
 #include "writecmd.h"
 #include "sha256.h"
+#include "dhtb.h"
+#include "pac.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -121,6 +123,16 @@ static void usage(void)
 		"                          <Partition id=\"..\" size=\"..\"/>. Destructive.\n"
 		"  set-active a|b          rewrite misc slot bytes (backup + verify)\n"
 		"  pack-slot a|b IN OUT    offline: patch a misc image at offset 0x800\n"
+		"  gen-spl-unlock IN OUT   offline: patch a dumped splloader into an\n"
+		"                          unlock image (DHTB, aarch64). Ported from the\n"
+		"                          release's x86-64 gen_spl-unlock so it runs here.\n"
+		"  gen-spl-unlock-legacy IN OUT   the same for an older SoC generation\n"
+		"  gen-fdl1-dl IN OUT      offline: patch an fdl1 for download mode\n"
+		"  chsize IN OUT           offline: cut a DHTB image to its real size\n"
+		"  unpac [-d DIR] {list|extract|check} FILE.pac [names]\n"
+		"                          offline: read or extract a Spreadtrum .pac\n"
+		"  The six offline tools open no USB and ignore the device options.\n"
+		"  Unlike the release tools they never overwrite their input file.\n"
 		"  erase-part NAME         not persist, not splloader, not all\n"
 		"  verity 0|1              DANGEROUS. Byte 0x7B of vbmeta (spd_dump):\n"
 		"                          0 writes 0x01 (dm-verity off), 1 writes 0x00\n"
@@ -988,6 +1000,10 @@ int main(int argc, char **argv)
 				return 1;
 			}
 		}
+		/* Pure computation over synthetic buffers: the header math and the
+		 * three patch patterns, and the PAC CRC the extractor reports. */
+		if (spd_dhtb_selftest() || spd_pac_selftest())
+			return 1;
 		return spd_selftest();
 	}
 	if (optind < argc && strcmp(argv[optind], "pack-slot") == 0) {
@@ -997,6 +1013,38 @@ int main(int argc, char **argv)
 			return 2;
 		}
 		return spd_pack_slot_file(argv[optind + 1][0], argv[optind + 2], argv[optind + 3]) ? 1 : 0;
+	}
+	/* Offline image tools. No USB, so they run before a device is required
+	 * (same place as pack-slot above). Each is IN OUT and writes only OUT:
+	 * the release tools remove and rename over their INPUT, so running
+	 * `gen_spl-unlock splloader.bin` destroys the dump it is patching. */
+	{
+		static const struct {
+			const char *name;
+			int (*fn)(const char *, const char *);
+		} tools[] = {
+			{ "gen-spl-unlock", spd_gen_spl_unlock },
+			{ "gen-spl-unlock-legacy", spd_gen_spl_unlock_legacy },
+			{ "gen-fdl1-dl", spd_gen_fdl1_dl },
+			{ "chsize", spd_dhtb_chsize },
+		};
+		size_t t;
+		for (t = 0; t < sizeof(tools) / sizeof(tools[0]); t++) {
+			if (optind >= argc || strcmp(argv[optind], tools[t].name) != 0)
+				continue;
+			if (optind + 2 >= argc) {
+				fprintf(stderr, "%s IN OUT\n", tools[t].name);
+				return 2;
+			}
+			return tools[t].fn(argv[optind + 1], argv[optind + 2]) ? 1 : 0;
+		}
+	}
+	if (optind < argc && strcmp(argv[optind], "unpac") == 0) {
+		if (optind + 1 >= argc) {
+			fprintf(stderr, "unpac [-d dir] {list|extract|check} firmware.pac [names]\n");
+			return 2;
+		}
+		return spd_pac_main(argc - optind, argv + optind) ? 1 : 0;
 	}
 	if (optind >= argc) {
 		usage();

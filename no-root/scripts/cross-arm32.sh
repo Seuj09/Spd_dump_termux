@@ -140,6 +140,7 @@ cc -static -s -O2 -Wall -Wextra -Wno-sign-compare -Werror=implicit-function-decl
 	-o "$OUT/spdhost" \
 	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
+	"$root/src/dhtb.c" "$root/src/pac.c" \
 	"${LIB[@]}" -lpthread
 
 # --- spd_dump (vendored TomKing tree) ---------------------------------------
