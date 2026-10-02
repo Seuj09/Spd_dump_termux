@@ -39,10 +39,17 @@ FIXTURES=$(cat "$FX/INDEX")
 have_ref() { [[ -n $QEMU && -x $X86_64_LOADER && -f $REF/unpac ]]; }
 
 echo "== golden: reference (qemu-x86_64) vs spdhost =="
+# Every reference comparison below is gated on have_ref(). When the reference
+# is absent this suite must report skips, not failures: an empty $REF/unpac
+# produces empty output, which would otherwise read as the vendor disagreeing
+# with us on every single case. On a CI runner that is exactly what happens --
+# the release tree is a local artifact and is not in this repository.
 if [[ -z $QEMU ]]; then
 	note "qemu-x86_64-static not found: reference comparisons skipped"
 elif [[ ! -x $X86_64_LOADER ]]; then
 	note "$X86_64_LOADER not found: reference comparisons skipped"
+elif [[ ! -f $REF/unpac ]]; then
+	note "$REF/unpac not found: reference comparisons skipped"
 fi
 
 # Run both tools in their own copy of the fixture dir. Reference stdout/stderr
@@ -72,8 +79,6 @@ setup_pair() { # fixture -> $tmp/a $tmp/b
 for mode in list check; do
 	for f in $FIXTURES; do
 		setup_pair "$f"
-		ref_run "$tmp/a" "$mode" "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"
-		rrc=$?
 		our_run "$tmp/b" "$mode" "$f.pac" >"$tmp/o.out" 2>"$tmp/o.err"
 		orc=$?
 
@@ -81,6 +86,9 @@ for mode in list check; do
 			note "$mode/$f: no reference binary"
 			continue
 		fi
+
+		ref_run "$tmp/a" "$mode" "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"
+		rrc=$?
 
 		cmp -s "$tmp/r.out" "$tmp/o.out"
 		check "$mode/$f: stdout identical" $?
@@ -97,8 +105,6 @@ done
 EXTRACT_SAFE="main safe3 emptyname zeroff probe"
 for f in $EXTRACT_SAFE; do
 	setup_pair "$f"
-	ref_run "$tmp/a" extract "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"
-	rrc=$?
 	our_run "$tmp/b" extract "$f.pac" >"$tmp/o.out" 2>"$tmp/o.err"
 	orc=$?
 
@@ -106,6 +112,9 @@ for f in $EXTRACT_SAFE; do
 		note "extract/$f: no reference binary"
 		continue
 	fi
+
+	ref_run "$tmp/a" extract "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"
+	rrc=$?
 
 	cmp -s "$tmp/r.out" "$tmp/o.out"
 	check "extract/$f: stdout identical" $?
@@ -199,17 +208,30 @@ fi
 # match, so this stays a difference in exit status only.
 for f in unsafe_last unsafe_mid unsafe_first colon backslash dotdot onlyunsafe; do
 	setup_pair "$f"
-	ref_run "$tmp/a" extract "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"; rrc=$?
 	our_run "$tmp/b" extract "$f.pac" >"$tmp/o.out" 2>"$tmp/o.err"; orc=$?
 
-	cmp -s "$tmp/r.out" "$tmp/o.out"
-	check "unsafe/$f: stdout identical" $?
-	# Neither tool may create a file outside the flat directory.
+	# The three checks that do not need the vendor tool, so they run always:
+	# neither tool may create a file outside the flat directory, the refusal
+	# must be reported, and we must exit non-zero for it. That last one is the
+	# whole point of this section, so it is asserted here rather than left to
+	# the comparison below.
 	if [[ -z $(find "$tmp/a" "$tmp/b" -mindepth 2 -type f -name '*.bin' 2>/dev/null) ]]
 	then check "unsafe/$f: nothing written to a subdirectory" 0
 	else check "unsafe/$f: nothing written to a subdirectory" 1; fi
 	grep -q '!!! unsafe filename detected' "$tmp/o.out"
 	check "unsafe/$f: reports the refusal" $?
+	[[ $orc == 1 ]]
+	check "unsafe/$f: we exit 1 on a refused name" $?
+
+	if ! have_ref; then
+		note "unsafe/$f: no reference binary"
+		continue
+	fi
+
+	ref_run "$tmp/a" extract "$f.pac" >"$tmp/r.out" 2>"$tmp/r.err"; rrc=$?
+
+	cmp -s "$tmp/r.out" "$tmp/o.out"
+	check "unsafe/$f: stdout identical" $?
 
 	if [[ $f == unsafe_mid || $f == unsafe_first ]]; then
 		[[ $rrc == 1 && $orc == 1 ]]

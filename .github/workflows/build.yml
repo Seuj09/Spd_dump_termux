@@ -69,20 +69,31 @@ jobs:
           # the vendor x86-64 binaries in the release tree, which is a local
           # artifact and is not in this repository. A skip is reported, never
           # counted as a pass. Anything with a non-zero failure count fails
-          # the job and its FAIL lines are echoed.
+          # the job and its output is echoed.
+          #
+          # set +e because the runner's shell is "bash -e {0}": without this,
+          # a suite that exits non-zero aborts the step at the assignment
+          # below, before its output is printed, and the failure is reported
+          # as a bare exit code with nothing to diagnose. The loop judges each
+          # suite itself and exits 1 at the end.
+          set +e
           fail=0
           for t in tests/*.sh; do
             name=$(basename "$t" .sh)
             out=$("$t" 2>&1); rc=$?
             summary=$(printf '%s\n' "$out" | grep -E "^${name}: [0-9]+ passed," | tail -1)
             if [ -z "$summary" ]; then
-              summary=$(printf '%s\n' "$out" \
-                | grep -cE '^(PASS:|ok[[:space:]])' | sed 's/^/passed=/')
+              summary=$(printf '%s\n' "$out" | sed -n 's/^\(.*\): \([0-9]*\) passed, \([0-9]*\) failed.*/\1: \2 passed, \3 failed/p' | tail -1)
             fi
+            # Some suites (exec-addr-seq) print only PASS/FAIL lines and no
+            # summary, so fall back to counting them.
+            [ -n "$summary" ] ||
+              summary="passed=$(printf '%s\n' "$out" | grep -cE '^(PASS:|ok[[:space:]])' || true)"
             printf '%-16s rc=%s  %s\n' "$name" "$rc" "$summary"
             if [ "$rc" != 0 ] || printf '%s\n' "$out" | grep -qE '^(FAIL:|FAIL[[:space:]])'; then
               fail=1
-              printf '%s\n' "$out" | grep -E '^(FAIL:|FAIL[[:space:]])' | head -20
+              echo "--- $name output"
+              printf '%s\n' "$out" | tail -60
             fi
           done
           [ "$fail" = 0 ] || { echo "test suite failed"; exit 1; }
