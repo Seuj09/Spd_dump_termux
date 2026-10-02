@@ -168,11 +168,17 @@ jobs:
           fi
 
           # Tag shape follows the existing per-commit pre-releases:
-          # spdhost-exp-<slug>-<short sha>. The slug is the first word of the
-          # commit subject with any "type(scope): " prefix stripped.
+          # spdhost-exp-<slug>-<short sha>. The slug is the first meaningful
+          # word of the commit subject, with any "type(scope): " prefix
+          # stripped and leading stopwords skipped -- taking the literal first
+          # word gave "spdhost-exp-the-..." for "fix(tests,ci): the PAC suite
+          # failed ...", which says nothing about the build.
           slug=$(printf '%s' "$subject" \
             | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//' \
-            | tr 'A-Z' 'a-z' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -d- -f1 | cut -c1-16)
+            | tr 'A-Z' 'a-z' \
+            | tr -cs 'a-z0-9' '\n' \
+            | awk 'BEGIN{split("the a an and or of for to in on with at by from as is are be this that it its no not",s," "); for(i in s) stop[s[i]]=1}
+                   $0 != "" && !stop[$0] { print substr($0,1,16); exit }')
           [ -n "$slug" ] || slug=build
           tag="spdhost-exp-$slug-$short"
 
