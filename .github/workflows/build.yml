@@ -1,0 +1,237 @@
+name: build
+
+# Builds spdhost for both phone architectures -- arm32 (Termux armv7l/armv8l)
+# and arm64 (aarch64) -- zips each one with the menu, the loaders and the misc
+# BCB images, and publishes both plus a combined zip to a GitHub Release whose
+# body is the commit that produced it and the build date.
+#
+# Runs on a push to either of the two live branches when something under
+# no-root/ changed, and on demand from the Actions tab.
+on:
+  push:
+    branches:
+      - main
+      - experiment/brom-hello-diagnostics
+    paths:
+      - 'no-root/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # One build per branch. A newer push cancels the older build rather than
+  # racing it to the same release tag.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The suite in no-root/tests needs gcc, python3 and a pty; the cross build
+  # needs autoconf for libusb and qemu-user to smoke-test what it produced.
+  APT_DEPS: >-
+    gcc make git autoconf automake libtool python3 python3-pip
+    qemu-user qemu-user-static unzip file
+
+jobs:
+  test:
+    name: no-root test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $APT_DEPS
+
+      - name: Build spdhost
+        working-directory: no-root
+        run: make
+
+      - name: spdhost --self-test
+        working-directory: no-root
+        run: ./spdhost --self-test
+
+      - name: Run every suite in no-root/tests
+        working-directory: no-root
+        run: |
+          # Each suite prints "PASS:"/"FAIL:" or "ok"/"FAIL" lines and a
+          # trailing "<name>: N passed, M failed[, K skipped]" summary. Skips
+          # are expected here for the two golden suites: they compare against
+          # the vendor x86-64 binaries in the release tree, which is a local
+          # artifact and is not in this repository. A skip is reported, never
+          # counted as a pass. Anything with a non-zero failure count fails
+          # the job and its FAIL lines are echoed.
+          fail=0
+          for t in tests/*.sh; do
+            name=$(basename "$t" .sh)
+            out=$("$t" 2>&1); rc=$?
+            summary=$(printf '%s\n' "$out" | grep -E "^${name}: [0-9]+ passed," | tail -1)
+            if [ -z "$summary" ]; then
+              summary=$(printf '%s\n' "$out" \
+                | grep -cE '^(PASS:|ok[[:space:]])' | sed 's/^/passed=/')
+            fi
+            printf '%-16s rc=%s  %s\n' "$name" "$rc" "$summary"
+            if [ "$rc" != 0 ] || printf '%s\n' "$out" | grep -qE '^(FAIL:|FAIL[[:space:]])'; then
+              fail=1
+              printf '%s\n' "$out" | grep -E '^(FAIL:|FAIL[[:space:]])' | head -20
+            fi
+          done
+          [ "$fail" = 0 ] || { echo "test suite failed"; exit 1; }
+
+  build:
+    name: arm32 + arm64 static build
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $APT_DEPS
+          # ziglang ships zig, used only as a C compiler with its bundled musl.
+          # It builds libusb and spdhost for the two phone targets, so no
+          # Android SDK or NDK is involved.
+          pip3 install --user ziglang
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: make cross (arm32 + arm64)
+        working-directory: no-root
+        run: make cross
+
+      - name: Show what was produced
+        working-directory: no-root
+        run: |
+          ls -l dist dist/arm32 dist/arm64
+          echo "--- dist/SHA256SUMS"
+          cat dist/SHA256SUMS
+          echo "--- per-architecture zips"
+          unzip -l dist/arm32/spdhost-arm32-static-*.zip
+          unzip -l dist/arm64/spdhost-arm64-static-*.zip
+
+      - name: Keep the build for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: |
+            no-root/dist/*.zip
+            no-root/dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish the release
+        working-directory: no-root
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          sha=$(git rev-parse HEAD)
+          short=$(printf '%s' "$sha" | cut -c1-7)
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          subject=$(git log -1 --pretty=%s)
+          built=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          # Tag shape follows the existing per-commit pre-releases:
+          # spdhost-exp-<slug>-<short sha>. The slug is the first word of the
+          # commit subject with any "type(scope): " prefix stripped.
+          slug=$(printf '%s' "$subject" \
+            | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//' \
+            | tr 'A-Z' 'a-z' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -d- -f1 | cut -c1-16)
+          [ -n "$slug" ] || slug=build
+          tag="spdhost-exp-$slug-$short"
+
+          # The parenthetical in the release name is the commit subject, cut at
+          # a word boundary so it never ends mid-word.
+          summary=$(printf '%s' "$subject" | cut -c1-60)
+          if [ "${#subject}" -gt 60 ]; then
+            trimmed=$(printf '%s' "$summary" | sed -E 's/[[:space:]]+[^[:space:]]*$//')
+            [ -n "$trimmed" ] && summary=$trimmed
+          fi
+          title="spdhost exp $slug $short ($summary)"
+
+          assets=(
+            "dist/arm32/spdhost-arm32-static-$short.zip"
+            "dist/arm64/spdhost-arm64-static-$short.zip"
+            "dist/spdhost-arm32-arm64-static-$short.zip"
+            "dist/SHA256SUMS"
+          )
+          for a in "${assets[@]}"; do
+            [ -f "$a" ] || { echo "missing asset: $a" >&2; exit 1; }
+          done
+
+          {
+            echo "Experimental pre-release (not Latest) from \`$branch\` @ \`$sha\`."
+            echo
+            echo "Static musl builds of spdhost and the vendored spd_dump, with the"
+            echo "menu, the FDL loaders, the cboot blob and the misc BCB images, for"
+            echo "both phone architectures. arm32 is ARMv7-A + NEON (\`arm-linux-musleabihf\`),"
+            echo "arm64 is generic \`aarch64\`. Each zip unpacks to its own \`spdhost-arm32/\`"
+            echo "or \`spdhost-arm64/\` tree."
+            echo
+            echo "### Build"
+            echo
+            echo '```'
+            echo "branch   $branch"
+            echo "commit   $sha"
+            echo "subject  $subject"
+            echo "built    $built"
+            echo "runner   $RUNNER_OS $RUNNER_ARCH"
+            echo '```'
+            echo
+            echo "### Commit message"
+            echo
+            echo '```'
+            # The full commit message, minus the Co-Authored-By trailer and any
+            # blank lines left dangling at the end. Paragraph breaks survive.
+            git log -1 --pretty=%B | awk '
+              /^Co-Authored-By:/ { next }
+              { line[NR] = $0; if ($0 != "") last = NR }
+              END { for (i = 1; i <= last; i++) print line[i] }' | head -200
+            echo '```'
+            echo
+            echo "### Files changed"
+            echo
+            echo '```'
+            git show --stat --oneline --no-color -1 | tail -n +2
+            echo '```'
+            echo
+            echo "### Assets"
+            echo
+            echo "- \`spdhost-arm32-static-$short.zip\` -- 32-bit ARM (Termux armv7l/armv8l)"
+            echo "- \`spdhost-arm64-static-$short.zip\` -- 64-bit ARM (aarch64)"
+            echo "- \`spdhost-arm32-arm64-static-$short.zip\` -- both trees in one zip"
+            echo "- \`SHA256SUMS\` -- checksums for all of the above"
+            echo
+            echo "### SHA-256"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "### Termux"
+            echo
+            echo '```sh'
+            echo "curl -LO https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/spdhost-arm32-arm64-static-$short.zip"
+            echo "unzip -o spdhost-arm32-arm64-static-$short.zip -d \"\$HOME\""
+            echo "cd \"\$HOME/spdhost-arm32\"   # or spdhost-arm64"
+            echo "bash scripts/menu.sh"
+            echo '```'
+            echo "Unplug for at least 5 seconds between sessions. Connect only after the"
+            echo "wrapper says to plug in, while holding volume down."
+          } >/tmp/body.md
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; replacing its assets"
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --title "$title" \
+              --notes-file /tmp/body.md \
+              --target "$sha" \
+              --prerelease
+          fi
+          echo "published $tag"
