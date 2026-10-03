@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# The BootROM path must send what the vendor reference sends — nothing more.
+# The BootROM path must send what the known-good build sends.
 #
-# src/usb.c grew three pieces of extra traffic that spd_dump/common.c never
-# sends: CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints, SET_CONFIGURATION
-# when the device reports config 0, and a zero-length OUT packet after any
-# transfer that fills a 512-byte packet. All three came from a diagnostics
-# experiment that was marked "no merge" and never proven on hardware, and all
-# three had ended up on by default — two control transfers and a stray URB
-# inserted between the phone being detected and the first hello, which is
-# exactly where the reported "device leaves the bus / every transfer times
-# out" failures live.
+# src/usb.c carries three pieces of extra traffic that spd_dump/common.c does
+# not send: CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints, a
+# SET_CONFIGURATION when the device reports config 0, and a zero-length OUT
+# packet after any transfer that fills a 512-byte packet. A previous change
+# reasoned from the vendor reference and turned all three OFF by default.
+# Every release after that detected the phone and then timed out, while
+# spdhost-exp-write-a6cb72d — which sends all three — worked.
 #
-# Each is now off unless its SPDHOST_* variable asks for it, and that is what
-# this guards: not just the values, but that the opt-ins still work, so a
-# future change cannot quietly make them unconditional again.
+# So the default here is the known-good build's: all three on. Each has a
+# kill switch (SPDHOST_NO_CLEAR_HALT / SPDHOST_NO_SET_CONFIG /
+# SPDHOST_NO_SEND_ZLP) for A/B testing on a host that dislikes one, and this
+# suite pins both the default and the switch, so a future change cannot
+# silently flip either.
 #
 # Usage (from no-root/): tests/usb-extra.sh
 set -uo pipefail
@@ -33,58 +33,59 @@ $cc -O1 -Wall -Wextra -std=c11 -D_FILE_OFFSET_BITS=64 -I"$root/src" \
 	"$root/tests/mock_usb_layer.c" \
 	|| { echo "usb-extra: build failed"; exit 1; }
 
-# run NAME [VAR=VALUE ...] -- one log per call.
+# run NAME [VAR=VALUE ...] -- one log per call. Every kill switch is cleared
+# first so a stray export in the test environment cannot decide an assertion.
 run() {
 	local log=$1; shift
 	: > "$log"
-	env -u SPDHOST_CLEAR_HALT -u SPDHOST_NO_CLEAR_HALT -u SPDHOST_SEND_ZLP \
-		-u SPDHOST_SET_CONFIG USB_LOG="$log" "$@" "$tmp/drive" >/dev/null 2>&1
+	env -u SPDHOST_NO_CLEAR_HALT -u SPDHOST_NO_SET_CONFIG -u SPDHOST_NO_SEND_ZLP \
+		USB_LOG="$log" "$@" "$tmp/drive" >/dev/null 2>&1
 }
 
-echo "== the vendor's byte stream is the default =="
+echo "== the known-good build's traffic is the default =="
 log=$tmp/default.log
 run "$log"
 has "the descriptor mps is the 512 the ZLP rule keys off" "$log" '^mps in=512 out=512$'
-has "line-state is still sent (it is not extra traffic)" "$log" '^control rt=0x21 r=34 wv=0x601'
-hasnt "no CLEAR_FEATURE by default" "$log" 'clear_halt'
-hasnt "no GET_CONFIGURATION by default" "$log" 'get_config'
-hasnt "no SET_CONFIGURATION by default" "$log" 'set_config'
-hasnt "no zero-length OUT packet by default" "$log" 'bulk ep=0x01 len=0$'
-has "a transfer that fills a packet is sent once" "$log" '^bulk ep=0x01 len=512$'
+has "line-state is still sent" "$log" '^control rt=0x21 r=34 wv=0x601'
+has "CLEAR_FEATURE is sent on the IN endpoint" "$log" 'clear_halt ep=0x81'
+has "CLEAR_FEATURE is sent on the OUT endpoint" "$log" 'clear_halt ep=0x01'
+has "the configuration is read" "$log" '^get_config$'
+has "configuration 1 is written when 0 is read" "$log" '^set_config 1$'
+has "a transfer that fills the pipe is followed by a zero-length packet" "$log" '^bulk ep=0x01 len=0$'
+has "a transfer that fills a packet is sent" "$log" '^bulk ep=0x01 len=512$'
 has "a partial transfer is still sent" "$log" '^bulk ep=0x01 len=100$'
 
-echo "== each opt-in still turns its own extra traffic back on =="
-log=$tmp/clear.log
-run "$log" SPDHOST_CLEAR_HALT=1
-has "SPDHOST_CLEAR_HALT=1 sends CLEAR_FEATURE on the IN endpoint" "$log" 'clear_halt ep=0x81'
-has "SPDHOST_CLEAR_HALT=1 sends CLEAR_FEATURE on the OUT endpoint" "$log" 'clear_halt ep=0x01'
-hasnt "SPDHOST_CLEAR_HALT=1 does not also turn the ZLP back on" "$log" '^bulk ep=0x01 len=0$'
-
+echo "== each kill switch turns off exactly its own traffic =="
 log=$tmp/no.clear.log
-run "$log" SPDHOST_CLEAR_HALT=1 SPDHOST_NO_CLEAR_HALT=1
-hasnt "SPDHOST_NO_CLEAR_HALT=1 wins over a global SPDHOST_CLEAR_HALT=1" "$log" 'clear_halt'
+run "$log" SPDHOST_NO_CLEAR_HALT=1
+hasnt "SPDHOST_NO_CLEAR_HALT=1 drops CLEAR_FEATURE" "$log" 'clear_halt'
+has "…and leaves the configuration read alone" "$log" 'get_config'
+has "…and leaves the ZLP alone" "$log" '^bulk ep=0x01 len=0$'
 
-log=$tmp/zlp.log
-run "$log" SPDHOST_SEND_ZLP=1
-has "SPDHOST_SEND_ZLP=1 sends the zero-length packet" "$log" '^bulk ep=0x01 len=0$'
-has "…right after the packet that filled the 512-byte pipe" "$log" '^bulk ep=0x01 len=512$'
-hasnt "SPDHOST_SEND_ZLP=1 does not also turn CLEAR_FEATURE back on" "$log" 'clear_halt'
+log=$tmp/no.setcfg.log
+run "$log" SPDHOST_NO_SET_CONFIG=1
+hasnt "SPDHOST_NO_SET_CONFIG=1 drops GET_CONFIGURATION" "$log" 'get_config'
+hasnt "SPDHOST_NO_SET_CONFIG=1 drops SET_CONFIGURATION" "$log" 'set_config'
+has "…and leaves CLEAR_FEATURE alone" "$log" 'clear_halt ep=0x01'
+has "…and leaves the ZLP alone" "$log" '^bulk ep=0x01 len=0$'
 
-log=$tmp/setcfg.log
-run "$log" SPDHOST_SET_CONFIG=1
-has "SPDHOST_SET_CONFIG=1 reads the configuration" "$log" 'get_config'
-has "SPDHOST_SET_CONFIG=1 writes configuration 1 when it reads 0" "$log" 'set_config 1'
-hasnt "SPDHOST_SET_CONFIG=1 does not also turn CLEAR_FEATURE back on" "$log" 'clear_halt'
+log=$tmp/no.zlp.log
+run "$log" SPDHOST_NO_SEND_ZLP=1
+hasnt "SPDHOST_NO_SEND_ZLP=1 drops the zero-length packet" "$log" '^bulk ep=0x01 len=0$'
+has "…and still sends the packet that filled the pipe" "$log" '^bulk ep=0x01 len=512$'
+has "…and leaves CLEAR_FEATURE alone" "$log" 'clear_halt ep=0x01'
+has "…and leaves the configuration read alone" "$log" 'get_config'
 
-log=$tmp/off.log
-run "$log" SPDHOST_CLEAR_HALT=0 SPDHOST_SEND_ZLP=0 SPDHOST_SET_CONFIG=0
-hasnt "=0 means off, like unset" "$log" 'clear_halt'
-hasnt "=0 means off for the ZLP too" "$log" '^bulk ep=0x01 len=0$'
+log=$tmp/zero.log
+run "$log" SPDHOST_NO_CLEAR_HALT=0 SPDHOST_NO_SET_CONFIG=0 SPDHOST_NO_SEND_ZLP=0
+has "=0 does not count as a kill switch" "$log" 'clear_halt ep=0x01'
+has "…for the configuration either" "$log" '^set_config 1$'
+has "…or for the ZLP" "$log" '^bulk ep=0x01 len=0$'
 
 echo "== and the hooks are on the BootROM path only =="
 # If the extra traffic is reached from anywhere but spd_brom_after_line_state()
-# (the one hook this test drives), the default-off gate protects a path the
-# test never exercised.
+# (the one hook this test drives), the switch protects a path the test never
+# exercised.
 n=$(grep -c 'spd_usb_clear_halts(&io->usb)' "$root/src/proto.c" || true)
 check "clear_halts is called from exactly one place, in proto.c" test "${n:-0}" = 1
 check "and not from the FDL1/FDL2 code in main.c" \

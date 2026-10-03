@@ -7,20 +7,22 @@ suffix (boot.img); the other slot keeps its own name (boot_b.img) and is
 only read when you ask for it by name or with `all`.
 
 On a phone the folder the menu uses is
-    /sdcard/spdhost/backup
+    /sdcard/Download
 once termux-setup-storage has been run and allowed, so the dumps are visible
-to other apps instead of hidden inside Termux. This folder is the fallback:
-when the phone has not granted storage access, the menu uses the backup/
-folder inside the folder the tool was unzipped into. Extra menu [15] shows
-which one is in use and switches between them.
+to other apps instead of hidden inside Termux -- and it is the same folder
+menu [6] flashes from, so a partition you dumped is already where a flash
+looks. This folder is the fallback: when the phone has not granted storage
+access, the menu uses the backup/ folder inside the folder the tool was
+unzipped into, with input/ beside it for images to flash. Extra menu [15]
+shows which one is in use and switches between them.
 
 Menu [7] (restore a backup) writes the images in this folder back to the
-phone. Menu [9] copies the partition images from here into the flash folder
-(input/, or /sdcard/spdhost/input), which is the folder menu [6] flashes
-from, so a partition you dumped can be the partition you flash without moving
-files by hand.
+phone. In the fallback layout menu [9] copies the partition images from here
+into the flash folder (input/); in the default layout both names are the same
+folder and menu [9] says there is nothing to copy.
 
 The folder is created by the menu if it is missing. Nothing here is needed
 for the tool to run: an empty backup/ is the normal state on a fresh copy.
 Keep the dumps. The last misc image (misc-before-<time>.img) is the one to
-write back if a misc write ever goes wrong.
+write back if a misc write ever goes wrong; a persist-before-<time>.img is
+the FRP backup, written before persist is erased.

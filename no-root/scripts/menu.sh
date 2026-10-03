@@ -10,10 +10,12 @@ CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
 DUMP_DIR_FROM_ENV="${SPDHOST_DUMP_DIR:-${DUMP_DIR:-}}"
 DUMP_DIR="$DUMP_DIR_FROM_ENV"
 INPUT_DIR_FROM_ENV="${SPDHOST_INPUT_DIR:-}"
-# Where the images live, when shared storage is in play: <base>/spdhost/.
-# auto = shared storage if Termux can see it, package folders otherwise.
-# SPDHOST_STORAGE= overrides the saved config, the way the other SPDHOST_
-# variables do; the config is only consulted when it is unset.
+# Where the images live, when shared storage is in play: <base>/Download,
+# the phone's own download folder -- so a file a browser saved or a file
+# manager copied is already where the tool reads, and a dump is already where
+# the user looks for it. auto = shared storage if Termux can see it, package
+# folders otherwise. SPDHOST_STORAGE= overrides the saved config, the way the
+# other SPDHOST_ variables do; the config is only consulted when it is unset.
 STORAGE_MODE=${SPDHOST_STORAGE:-auto}
 case $STORAGE_MODE in
 	auto|shared|package) ;;
@@ -23,7 +25,9 @@ case $STORAGE_MODE in
 		;;
 esac
 STORAGE_MODE_FROM_ENV=${SPDHOST_STORAGE:-}
-SPDHOST_SHARED_NAME=spdhost
+# The folder under the shared-storage base. Android's own download folder is
+# "Download" (no s); the menu reads images from it and writes dumps to it.
+SPDHOST_SHARED_NAME=Download
 STORAGE_USED=""
 # Set once apply_storage_mode has run and the folders were created; the menu
 # prints it so the paths on screen are never a guess.
@@ -159,13 +163,15 @@ cls() {
 #
 #   SPDHOST_INPUT_DIR / SPDHOST_DUMP_DIR   wins outright (tests, power users)
 #   STORAGE=package                        the folders beside fdl/ in the package
-#   STORAGE=auto (default)                 <shared>/spdhost/{input,backup} when
-#                                          shared storage is visible and
-#                                          writable, the package folders when
-#                                          it is not
+#   STORAGE=auto (default)                 <shared>/Download when shared
+#                                          storage is visible and writable, the
+#                                          package folders when it is not
 #   STORAGE=shared                         shared storage, and say so when it
 #                                          is missing instead of silently
 #                                          using the package
+#
+# One folder, both directions: dumps are written to Download and flashes read
+# from it, so the file menu [1] just wrote is the file menu [6] will flash.
 #
 # Nothing here is required: a phone with no storage permission keeps working
 # out of the package, which is the only layout that needs no Android grant.
@@ -195,16 +201,17 @@ shared_storage_base() {
 	return 1
 }
 
-# <base>/spdhost, where the folders live. One name, so everything this tool
-# writes to shared storage sits under one directory a file manager can find.
+# <base>/Download, the one folder this tool reads images from and writes dumps
+# to. A file manager can find it, and a browser download already lands in it.
 shared_storage_root() {
 	local base
 	base=$(shared_storage_base) || return 1
 	printf '%s/%s\n' "${base%/}" "$SPDHOST_SHARED_NAME"
 }
 
-# Recompute INPUT_DIR/DUMP_DIR from STORAGE_MODE and create the folders.
+# Recompute INPUT_DIR/DUMP_DIR from STORAGE_MODE and create the folder.
 # Called at startup, and again when the storage switch changes the mode.
+# Both point at the same folder unless the caller overrode one of them.
 apply_storage_mode() {
 	local root
 	INPUT_DIR=${INPUT_DIR_FROM_ENV:-$INPUT_DIR_PKG}
@@ -220,12 +227,12 @@ apply_storage_mode() {
 		fi
 		return 0
 	fi
-	if ! mkdir -p "$root/input" "$root/backup" 2>/dev/null; then
+	if ! mkdir -p "$root" 2>/dev/null; then
 		echo "note: could not create $root; using the package folders." >&2
 		return 0
 	fi
-	[[ -n $INPUT_DIR_FROM_ENV ]] || INPUT_DIR=$root/input
-	[[ -n $DUMP_DIR_FROM_ENV ]] || DUMP_DIR=$root/backup
+	[[ -n $INPUT_DIR_FROM_ENV ]] || INPUT_DIR=$root
+	[[ -n $DUMP_DIR_FROM_ENV ]] || DUMP_DIR=$root
 	STORAGE_USED=$root
 	return 0
 }
@@ -258,7 +265,7 @@ storage_switch_menu() {
 	echo
 	root=$(shared_storage_root) || root=""
 	if [[ -n $root ]]; then
-		echo "[1] Shared storage: $root/{input,backup}  (what you put there with a file manager)"
+		echo "[1] Shared storage: $root  (dumps land here; flashes read here)"
 	else
 		echo "[1] Shared storage: not visible. Run termux-setup-storage and allow it."
 	fi
@@ -487,7 +494,10 @@ config_chip_check() {
 
 soc_brands() {
 	case $1 in
-		ums9230) printf '%s\n' infinix itel realme tecno ;;
+		# universal is appended LAST on purpose: the numeric brand index is
+		# what select_shipped_model maps a choice back to, and tests (and
+		# muscle memory) depend on 1=infinix staying 1=infinix.
+		ums9230) printf '%s\n' infinix itel realme tecno universal ;;
 		sc9863a) printf '%s\n' itel realme ;;
 		ums512) printf '%s\n' infinix realme ;;
 		*) return 1 ;;
@@ -604,6 +614,84 @@ apply_ums9230_infinix_defaults() {
 	CONFIG_CHIP_ERROR=""
 }
 
+# Apply the shipped "universal" set: the generic ums9230 loaders, for a phone
+# whose model the user does not know. Same guard rails as select_shipped_model:
+# the addresses are a function of the chip, so all five fields move together.
+wizard_apply_universal() {
+	local root pair=()
+	root=$(pkg_fdl_root) || { echo "No fdl/ directory next to this menu." >&2; return 1; }
+	mapfile -t pair < <(shipped_fdl_pair "$root" ums9230 universal || true)
+	if ((${#pair[@]} != 2)); then
+		echo "The universal ums9230 loaders are missing from fdl/ums9230/universal/." >&2
+		return 1
+	fi
+	soc_profile ums9230 || return 1
+	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
+	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
+	echo "  exec stub $EXEC_ADDR_DEFAULT"
+	echo "A wrong chip or address can brick the phone."
+	if ! confirm_action "type yes to use the universal loaders: "; then
+		return 1
+	fi
+	FDL1=${pair[0]}
+	FDL2=${pair[1]}
+	FDL1_ADDR=$SOC_FDL1_ADDR
+	FDL2_ADDR=$SOC_FDL2_ADDR
+	SOC=ums9230
+	DEVICE=universal
+	EXEC_ADDR=$EXEC_ADDR_DEFAULT
+	CONFIG_CHIP_ERROR=""
+	save_config
+	echo "Saved $SOC $DEVICE to $CONFIG"
+}
+
+# Asked once at startup, before the menu, when no loaders are configured yet.
+# The user's own words: the menu starts by asking for the phone details and
+# the FDLs, with the generic set offered as "universal".
+#
+# Silent when it must be:
+#   - a complete config is already saved, so this is a first-run question only;
+#   - SPDHOST_ALLOW_DEFAULT_FDL=1 asks for the old non-interactive default;
+#   - stdin is not a terminal, so a piped or </dev/null run reaches the menu
+#     and its "Input closed" exit instead of blocking on a prompt.
+setup_wizard() {
+	local choice
+	if [[ -n ${FDL1:-} && -f $FDL1 && -n ${FDL1_ADDR:-} &&
+	      -n ${FDL2:-} && -f $FDL2 && -n ${FDL2_ADDR:-} ]]; then
+		return 0
+	fi
+	if [[ ${SPDHOST_ALLOW_DEFAULT_FDL:-} == 1 ]]; then
+		apply_ums9230_infinix_defaults
+		return 0
+	fi
+	[[ -t 0 ]] || return 0
+	echo "Phone setup. Which loaders does this phone use?"
+	if [[ -n ${FDL1:-} || -n ${FDL2:-} ]]; then
+		echo "  now: FDL1=${FDL1:-unset} FDL2=${FDL2:-unset} chip=${SOC:-unset} (${DEVICE:-no model})"
+	else
+		echo "  now: no loaders set"
+	fi
+	echo "[1] universal (generic ums9230; try this if you do not know the model)"
+	echo "[2] pick a shipped model by chip and brand"
+	echo "[3] type my own loader paths and addresses"
+	echo "[0] skip for now (it asks again next time; menu [3] also sets this)"
+	echo "Until a loader pair is saved, every session that needs one will ask"
+	echo "for it. Set SPDHOST_ALLOW_DEFAULT_FDL=1 to apply the shipped Infinix"
+	echo "pair silently instead of asking at all."
+	if ! read -r -p "Choice [1]: " choice; then
+		echo "Skipped (no input)."
+		return 0
+	fi
+	case ${choice:-1} in
+		1) wizard_apply_universal ;;
+		2) select_shipped_model ;;
+		3) configure_loaders_manual ;;
+		0) echo "Skipped. Menu [3] sets the loaders later." ;;
+		*) echo "Not a choice. Skipped; menu [3] sets the loaders later." ;;
+	esac
+	return 0
+}
+
 # Both askers return 1 on EOF (Ctrl-D, or stdin that is not a terminal) instead
 # of re-prompting: read leaves the variable empty at EOF, so the old loop treated
 # a closed stdin as an endless run of invalid answers and spun forever.
@@ -638,7 +726,7 @@ ask_file() {
 }
 
 configure_loaders_manual() {
-	local choice ea nf1 na1 nf2 na2 ps1 ps2 cur
+	local choice ea nf1 na1 nf2 na2 ps1 ps2 cur who
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
 	# Collect into locals and commit only once all four answers are in: an
@@ -764,7 +852,11 @@ select_shipped_model() {
 	echo "Pick the brand. Uses that brand's fdl1-dl.bin and fdl2-dl.bin."
 	n=1
 	for brand in "${brands[@]}"; do
-		echo "[$n] $brand"
+		if [[ $brand == universal ]]; then
+			echo "[$n] universal (generic; try this if you do not know the model)"
+		else
+			echo "[$n] $brand"
+		fi
 		n=$((n + 1))
 	done
 	echo "[0] Back"
@@ -1862,6 +1954,10 @@ smoke_test() {
 	echo "  SPDHOST_BROM_WALL_MS is set explicitly."
 	echo "  clear_halt on bulk IN+OUT now runs after line-state, on the BootROM-hello"
 	echo "  path only (SPDHOST_NO_CLEAR_HALT=1 to disable)."
+	echo "  SET_CONFIGURATION(1) on a device reading as config 0, and a zero-length"
+	echo "  OUT packet after a full 512-byte write, are on by default too — they are"
+	echo "  what the build that worked sends. SPDHOST_NO_SET_CONFIG=1 and"
+	echo "  SPDHOST_NO_SEND_ZLP=1 turn each off for A/B testing on a hostile host."
 	echo "  Ctrl-C during a hello, read-part, write-part or erase-part now stops"
 	echo "  cleanly and releases the USB interface for the next run, instead of"
 	echo "  leaving it claimed until a replug."
@@ -2191,29 +2287,48 @@ part_image_candidate() {
 	name=${base%.*}
 	[[ $base == "$name" ]] && name=$base
 	case $name in
-		*_bak|misc-slotinfo|misc-before-*) return 1 ;;
+		*_bak|misc-slotinfo|misc-before-*|persist-before-*) return 1 ;;
 	esac
 	return 0
 }
 
 # Release menu option 2: every input/<partition>.img, then BOOT_AFTER.
+#
+# A .bin is used under its stripped name (boot.bin as boot.img) WITHOUT
+# renaming it. The flash folder used to be a dedicated input/ folder, but it is
+# the phone's Download folder now, so renaming every *.bin in it would rename
+# files that have nothing to do with this tool. Instead the chosen files are
+# gathered into a temporary staging folder as NAME.img -- symlinked when the
+# filesystem allows it, copied when it does not -- and that is what is passed
+# to write-files. Nothing in $INPUT_DIR is ever modified.
 flash_input_menu() {
-	local -a names=() skipped=()
-	local f base
+	# Parallel arrays, not "src:dst" strings: a file name is allowed to contain
+	# a colon, and splitting on the first one would then cut the path in half.
+	local -a names=() skipped=() stage_src=() stage_dst=()
+	local f base stage="" i
 	need_loaders || return
 	mkdir -p "$INPUT_DIR"
 	shopt -s nullglob
-	for f in "$INPUT_DIR"/*.bin; do
-		if [[ -e ${f%.bin}.img ]]; then
-			echo "Left $(basename "$f"): $(basename "${f%.bin}.img") is already there."
-			continue
-		fi
-		mv -n "$f" "${f%.bin}.img" || echo "Could not rename $(basename "$f")" >&2
-	done
 	for f in "$INPUT_DIR"/*.img; do
 		base=$(basename "$f")
 		if part_image_candidate "$base"; then
 			names+=("${base%.img}")
+			stage_src+=("$f")
+			stage_dst+=("$base")
+		else
+			skipped+=("$base")
+		fi
+	done
+	for f in "$INPUT_DIR"/*.bin; do
+		base=$(basename "$f")
+		if [[ -e ${f%.bin}.img ]]; then
+			echo "Not using $base: ${base%.bin}.img is also there."
+			continue
+		fi
+		if part_image_candidate "${base%.bin}.img"; then
+			names+=("${base%.bin}")
+			stage_src+=("$f")
+			stage_dst+=("${base%.bin}.img")
 		else
 			skipped+=("$base")
 		fi
@@ -2222,7 +2337,7 @@ flash_input_menu() {
 	if (( ${#names[@]} == 0 )); then
 		echo "No partition images in $INPUT_DIR."
 		echo "That folder is there now. Copy images into it, then choose this again."
-		echo "If you just dumped from this phone, menu [9] copies those dumps here."
+		echo "If you just dumped from this phone, they are already here (it is the same folder)."
 		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
 		return 1
 	fi
@@ -2233,7 +2348,22 @@ flash_input_menu() {
 	if (( ${#skipped[@]} )); then
 		echo "Not flashed: ${skipped[*]}"
 	fi
+	# Nothing below writes to $INPUT_DIR; the stage is a private view of it.
+	stage=$(mktemp -d "${TMPDIR:-/tmp}/spdhost-flash.XXXXXX") || {
+		echo "Could not create a staging folder." >&2
+		return 1
+	}
+	for (( i = 0; i < ${#stage_src[@]}; i++ )); do
+		if ! ln -s "${stage_src[i]}" "$stage/${stage_dst[i]}" 2>/dev/null; then
+			cp "${stage_src[i]}" "$stage/${stage_dst[i]}" || {
+				echo "Could not stage ${stage_dst[i]}" >&2
+				rm -rf "$stage"
+				return 1
+			}
+		fi
+	done
 	echo "Each file is written under its own name, including an inactive _a or _b image."
+	echo "A .bin is flashed under its stripped name; the file itself is not renamed."
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "An empty image, or one larger than its partition, aborts the flash before anything is sent."
 	echo "misc.img, if present, is backed up and verified. Writing it also restores the"
@@ -2244,12 +2374,19 @@ flash_input_menu() {
 	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
 	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
 	if ! confirm_action "type yes to flash these partitions: "; then
+		rm -rf "$stage"
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
-	ready || return 1
+	if ! ready; then
+		rm -rf "$stage"
+		return 1
+	fi
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-files "$INPUT_DIR" "$BOOT_AFTER"
+		parts "$(parts_cache_path)" write-files "$stage" "$BOOT_AFTER"
+	local rc=$?
+	rm -rf "$stage"
+	return $rc
 }
 
 # A dump lands in DUMP_DIR; a flash reads INPUT_DIR. The release menu leaves
@@ -2271,6 +2408,18 @@ promote_dump_action() {
 	echo "Only partition images are copied (the same names menu [7] restores)."
 	echo "A file already in the flash folder with the same size is left alone;"
 	echo "one with a different size is skipped, never overwritten."
+	# In the default layout there is one folder, so menu [6] already reads
+	# every dump. Say that plainly rather than reporting a no-op copy as if
+	# it had done something.
+	if [[ -n $INPUT_DIR && -n $DUMP_DIR ]] &&
+	   [[ $(cd "$INPUT_DIR" 2>/dev/null && pwd -P) == "$(cd "$DUMP_DIR" 2>/dev/null && pwd -P)" ]]; then
+		echo "The flash folder and the dump folder are the same folder:"
+		echo "  $INPUT_DIR"
+		echo "Menu [6] flashes the images here directly; there is nothing to copy."
+		echo "This step is only needed when the two differ (STORAGE=package, or"
+		echo "separate SPDHOST_INPUT_DIR / SPDHOST_DUMP_DIR)."
+		return 0
+	fi
 	if [[ ! -d $DUMP_DIR ]]; then
 		echo "No dump folder yet: $DUMP_DIR"
 		return 1
@@ -2281,8 +2430,9 @@ promote_dump_action() {
 		[[ -f $f ]] || continue
 		base=$(basename "$f")
 		part_image_candidate "$base" || continue
-		# A dump is NAME.img; anything else in the dump folder (a .bin kept
-		# from elsewhere) is renamed by the flash menu itself, so leave it.
+		# A dump is NAME.img. A .bin kept in the dump folder is left where it
+		# is: menu [6] reads .bin in either folder, so copying it here would
+		# only create a second name for the same bytes.
 		[[ $base == *.img ]] || continue
 		names+=("$base")
 	done
@@ -2390,7 +2540,10 @@ restore_backup_menu() {
 	fi
 	echo "Restore these images from $DUMP_DIR, then $BOOT_AFTER:"
 	printf '  %s\n' "${names[@]}"
-	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, *_bak.img."
+	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, *_bak.img."
+	if [[ $INPUT_DIR == "$DUMP_DIR" ]]; then
+		echo "This is the same folder menu [6] flashes from, so images you put there to flash are listed here too."
+	fi
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "A broken l_fixnv1 image is skipped. An empty or oversized image aborts the restore before anything is sent."
 	echo "splloader.img is written up to the live table size (a dump of it is still 256 KiB)."
@@ -2436,13 +2589,20 @@ repartition_xml_preview() {
 		echo "XML needs one <Partitions>...</Partitions> list."
 		return 1
 	}
-	n=$(grep -E '<Partition[[:space:]>]' "$xml" | grep 'id="' | grep -c 'size="' || true)
+	# Count and list Partitions by looking at whole tags, not at lines: a
+	# hand-written XML may put id="..." and size="..." on separate lines inside
+	# one <Partition> tag, and that is legal. Flattening the whitespace first
+	# keeps the preview in step with the C parser, which reads the tag as text.
+	local flat tags
+	flat=$(tr '\n\r\t' '   ' < "$xml")
+	tags=$(printf '%s' "$flat" | grep -oE '<Partition[^>]*>' || true)
+	n=$(printf '%s' "$tags" | grep -cE 'id="[^"]*"[^>]*size="|size="[^"]*"[^>]*id="' || true)
 	if (( n < 1 )); then
 		echo "No <Partition id=\"...\" size=\"...\"> entries."
 		return 1
 	fi
 	echo "Repartition replaces the on-device partition map ($n entries). A wrong XML can brick the phone."
-	grep -E '<Partition[[:space:]>]' "$xml" | grep 'id="' | grep 'size="' || true
+	printf '%s\n' "$tags" | grep -E 'id="[^"]*"[^>]*size="|size="[^"]*"[^>]*id="' || true
 }
 
 repartition_menu() {
@@ -2744,7 +2904,15 @@ unlock_bootloader_menu() {
 	work=$PWD/backup_spl
 	mkdir -p "$work"
 	spl=$work/splloader.img
-	if [[ ! -s $spl ]] || ! uboot=$(unlock_pick_uboot "$work"); then
+	# Only a whole 256 KiB read is a usable restore point. The release menu reads
+	# splloader with `r splloader`, which is 262144 bytes; a shorter file left by
+	# an interrupted run would be written back over the erased loader and leave
+	# the phone unbootable, so anything that size gets dumped again.
+	if [[ -s $spl && $(stat -c %s "$spl" 2>/dev/null || echo -1) != 262144 ]]; then
+		echo "Ignoring $spl: $(stat -c %s "$spl" 2>/dev/null || echo '?') bytes, not 262144."
+	fi
+	if [[ ! -s $spl || $(stat -c %s "$spl" 2>/dev/null || echo -1) != 262144 ]] \
+		|| ! uboot=$(unlock_pick_uboot "$work"); then
 		echo "Backing up splloader and uboot into $work. Nothing is erased in this session."
 		echo "splloader is read as 256 KiB, the size the release menu's r splloader uses."
 		ready || return 1
@@ -2915,6 +3083,14 @@ frp_reset_menu() {
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" frp-reset "$out" reset
+	local rc=$?
+	# spdhost only erases persist after the read comes back whole, so a nonzero
+	# exit means the backup is untrustworthy. A good one gets a SHA256SUMS line
+	# like every other read in this menu.
+	if (( rc == 0 )) && [[ -s $out ]]; then
+		record_sha256 "$out" || true
+	fi
+	return $rc
 }
 
 # spd_dump chip_uid, read-only: the BSL answer printed as hex. No write, no
@@ -3099,7 +3275,10 @@ if [[ ${SPDHOST_MENU_LIB:-} == 1 ]]; then
 fi
 
 load_config
-apply_ums9230_infinix_defaults
+# First run: ask for the phone details and FDLs, with the generic set offered
+# as "universal". A saved config, a non-TTY stdin, or SPDHOST_ALLOW_DEFAULT_FDL
+# all take the silent paths inside.
+setup_wizard
 # After load_config, because the saved config is what picks the layout.
 apply_storage_mode
 mkdir -p "$INPUT_DIR" || echo "Could not create $INPUT_DIR" >&2
@@ -3114,6 +3293,10 @@ while true; do
 	echo "Folders: $(storage_describe)"
 	echo "Dumps go to: $DUMP_DIR"
 	echo "Flash input: $INPUT_DIR"
+	if [[ $INPUT_DIR == "$DUMP_DIR" ]]; then
+		echo "  (one folder: menu [1] writes here, menu [6] reads here)"
+	fi
+	echo "Device: ${DEVICE:-unset} ${SOC:+($SOC)}"
 	echo "After flash/restore: $BOOT_AFTER"
 	echo
 	echo "[1] Dump partitions (one name, several names, all, all_lite, or imei)"

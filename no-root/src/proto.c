@@ -528,20 +528,16 @@ static int reopen_if_gone(struct spd *io)
 
 /* Per-try receive timeout for BootROM hello try i (0-based) of `tries`.
  * Ramps from hello_to_min up to hello_to_max over the first `ramp` tries,
- * then stays at hello_to_max. The device can't tell you which situation
- * you're in, so the ramp reaches the full patient timeout after a few tries
- * have already failed, rather than spending it on the first one.
- *
- * The floor matters more than it looks. Each try sends a fresh 0x7e, and a
- * BootROM that answers the previous one while we are already sending the next
- * emits two VER frames — we read the first as this try's answer and the second
- * then sits in the buffer until FDL1's CONNECT reads it and aborts with
- * "unexpected response 0x0081", which is exactly the "dies just after the
- * device is detected" failure. So the floor must be at least as long as the
- * slowest realistic VER, and the vendor reference (spd_dump/common.c) uses a
- * flat 1000 ms for every hello try. It was 250 ms here, which is below a
- * plausible reply time; 1000 now, with the ramp still climbing to the ceiling
- * above it. SPDHOST_BROM_NO_RAMP=1 goes flat at the ceiling instead. */
+ * then stays at hello_to_max. Below hello_to_min, LIBUSB_ERROR_TIMEOUT is
+ * indistinguishable from "BootROM not listening yet"; above hello_to_max,
+ * the ceiling exists because some phones genuinely take that long to answer
+ * once they are listening. The device can't tell you which situation you're
+ * in, so the ramp buys more attempts at cheap timeouts early — when "not
+ * listening yet" is the likelier explanation — while still reaching the full
+ * patient timeout by the time enough short tries have failed to make that
+ * less likely. Rationale, not a guarantee: on some phones the narrow window
+ * really does need a near-hello_to_max wait from the very first try, which
+ * is what SPDHOST_BROM_NO_RAMP=1 is for. */
 static int ramp_hello_to(int i, int lo, int hi, int ramp)
 {
 	if (ramp <= 1 || lo >= hi)
@@ -571,10 +567,11 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 	 * global --timeout / usb.timeout_ms (that still applies to CONNECT/bulk/loader).
 	 *
 	 * Each try's own receive timeout ramps from SPDHOST_BROM_TIMEOUT_MIN
-	 * (default 1000, the vendor reference's flat value) up to
-	 * SPDHOST_BROM_TIMEOUT over SPDHOST_BROM_TIMEOUT_RAMP tries (default 6),
-	 * then holds at the ceiling. The floor is what keeps a slow first reply
-	 * from being answered by a second 0x7e — see ramp_hello_to().
+	 * (default 250) up to SPDHOST_BROM_TIMEOUT over SPDHOST_BROM_TIMEOUT_RAMP
+	 * tries (default 6), then holds at the ceiling. A timed-out try that used
+	 * a short timeout costs little wall budget, so more of them fit before
+	 * SPDHOST_BROM_WALL_MS runs out — which matters because the BootROM's
+	 * listen window is often shorter than one try at the old fixed 3000ms.
 	 * SPDHOST_BROM_NO_RAMP=1 disables this and every try uses the ceiling,
 	 * matching the previous fixed-timeout behaviour.
 	 *
@@ -586,7 +583,7 @@ int spd_check_baud(struct spd *io, int nbytes, int tries)
 		tries = env_int("SPDHOST_BROM_TRIES", 15, 1, 100);
 		pause = env_int("SPDHOST_BROM_PAUSE_MS", 500, 0, 5000);
 		hello_to = env_int("SPDHOST_BROM_TIMEOUT", 3000, 1, 600000);
-		hello_to_min = env_int("SPDHOST_BROM_TIMEOUT_MIN", 1000, 1, hello_to);
+		hello_to_min = env_int("SPDHOST_BROM_TIMEOUT_MIN", 250, 1, hello_to);
 		ramp_tries = env_int("SPDHOST_BROM_TIMEOUT_RAMP", 6, 1, tries);
 		if (env_int("SPDHOST_BROM_NO_RAMP", 0, 0, 1))
 			hello_to_min = hello_to; /* ramp_hello_to() then returns hello_to for every i */
@@ -760,18 +757,10 @@ reacq_restart:
 int spd_check_baud_loader(struct spd *io)
 {
 	int i;
-	/* One 0x7e per try, like the reference (spd_dump.c: "nbytes=1" on every
-	 * one of its five loader-stage tries). This used to send four on tries
-	 * 7-10 as a hedge for an "older dumper" that no longer exists anywhere in
-	 * the tree — and four back-to-back marks into a just-started FDL1 can
-	 * desync its HDLC parser or draw a duplicate VER, which then trips the
-	 * next stage's check ("unexpected response 0x0081"). The hedge is still
-	 * available as SPDHOST_LOADER_BAUD4=1 for a phone that turns out to want
-	 * it, but it is off by default: by the time those tries run, six 1x7e
-	 * attempts have already failed, so they only fire when the handshake is
-	 * already broken. */
+	/* sfd_tool sends one 0x7e after FDL1 on phones. The older dumper
+	 * sends four. Try the phone form first, then the older one. */
 	for (i = 0; i < 10; i++) {
-		int nbytes = (i >= 6 && env_int("SPDHOST_LOADER_BAUD4", 0, 0, 1)) ? 4 : 1;
+		int nbytes = i < 6 ? 1 : 4;
 		int n;
 		if (i)
 			pause_ms(500);

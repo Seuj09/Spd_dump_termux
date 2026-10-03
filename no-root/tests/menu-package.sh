@@ -114,6 +114,32 @@ c=$(find_user_file fdl2-cboot.bin || true)
 [[ -n $c && -f $c ]]
 ck "[8] fdl2-cboot.bin is reachable from the default ums9230/infinix loaders" $?
 
+# The startup wizard's [1] answer, and the vendor set it comes from.
+echo
+echo "universal, the startup wizard's generic ums9230 set"
+uni=$(pkg_fdl_root)/ums9230/universal
+for f in fdl1-dl.bin fdl2-dl.bin fdl2-cboot.bin; do
+	[[ -f $uni/$f ]]
+	ck "[wizard] fdl/ums9230/universal/$f ships" $?
+done
+# unlock_bootloader_menu finds fdl2-cboot.bin beside the loaders, so the
+# universal set has to carry it too; the vendor zip ships the same bytes under
+# both names.
+cmp -s "$uni/fdl2-cboot.bin" "$uni/fdl2-dl.bin"
+ck "[wizard] universal fdl2-cboot.bin is the fdl2 the pair ships" $?
+[[ $(grep -c '^universal$' < <(soc_brands ums9230)) == 1 ]]
+ck "[wizard] ums9230 offers exactly one universal entry" $?
+[[ $(soc_brands ums9230 | tail -1) == universal ]]
+ck "[wizard] universal is offered last, so the brand indices do not move" $?
+# The pair must be the one the release menu's UMS9230 choice uses, at the
+# addresses soc_profile derives, or the wizard would save a mismatched config.
+mapfile -t upair < <(shipped_fdl_pair "$(pkg_fdl_root)" ums9230 universal || true)
+[[ ${#upair[@]} == 2 && ${upair[0]} == "$uni/fdl1-dl.bin" && ${upair[1]} == "$uni/fdl2-dl.bin" ]]
+ck "[wizard] shipped_fdl_pair resolves the universal set" $?
+soc_profile ums9230
+[[ $EXEC_ADDR_DEFAULT == 0x65015f08 ]]
+ck "[wizard] ums9230 exec stub is the one the universal fdl2 needs" $?
+
 # The offline image tools the menu calls instead of the release's x86-64 ones.
 echo
 echo "spdhost image tools (unlock [8], extra [14], unpac)"

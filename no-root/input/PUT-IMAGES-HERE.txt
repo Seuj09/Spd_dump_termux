@@ -2,21 +2,25 @@ Put the images you want to flash in this folder, or in the shared-storage
 folder the menu actually reads.
 
 Menu [6] flashes every partition image in the flash folder. Name each file
-after the partition: boot.img, vbmeta.img, l_fixnv1.img. A .bin name is
-renamed to .img when the flash menu runs. Files the menu ignores: *.txt,
-*.xml, SHA256SUMS, *_bak.img, misc-slotinfo.img, misc-before-*.img.
+after the partition: boot.img, vbmeta.img, l_fixnv1.img. A .bin is accepted
+too and is flashed under its stripped name (boot.bin as boot) -- the file
+itself is never renamed. Files the menu ignores: *.txt, *.xml, SHA256SUMS,
+*_bak.img, misc-slotinfo.img, misc-before-*.img, persist-before-*.img.
 
 On a phone the folder the menu reads is
-    /sdcard/spdhost/input
+    /sdcard/Download
 once termux-setup-storage has been run and allowed -- that is where a browser
-download or a file manager copy can reach. This folder is the fallback: when
-the phone has not granted storage access, the menu uses the input/ folder
-inside the folder the tool was unzipped into. Extra menu [15] shows which one
-is in use and switches between them.
+download or a file manager copy can reach, and it is the same folder menu [1]
+dumps into, so an image you just dumped is already here. This folder is the
+fallback: when the phone has not granted storage access, the menu uses the
+input/ folder inside the folder the tool was unzipped into, and dumps go to
+backup/ beside it. Extra menu [15] shows which one is in use and switches
+between them.
 
-Dumps land in backup/ (or /sdcard/spdhost/backup). Menu [9] copies a dump
-into the flash folder so a partition you just read off the phone can be the
-one you write back, without moving files by hand.
+In the fallback layout menu [9] copies a dump from backup/ into this folder,
+so a partition you just read off the phone can be the one you write back,
+without moving files by hand. In the default layout there is one folder and
+nothing to copy, which is what menu [9] tells you.
 
 This folder is created by the menu if it is missing. An empty input/ is the
 normal state on a fresh copy.

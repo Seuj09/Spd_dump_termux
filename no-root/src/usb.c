@@ -57,16 +57,22 @@ static int brom_trace_on(void)
 	return e && e[0] && e[0] != '0';
 }
 
-/* Opt-in switch for extra control/bulk traffic the vendor reference does not
- * send. Each of these was added by a diagnostics experiment to work around a
- * symptom that was never reproduced here, and each was then folded into the
- * branch as if it were a fix — so all three shipped on by default, and a phone
- * saw a byte stream and two control transfers that the known-good client
- * (spd_dump/common.c) never sends. Default off now; the env var turns one back
- * on for A/B testing against a real phone. */
-static int extra_on(const char *name)
+/* Kill switch for the three pieces of extra control/bulk traffic below.
+ *
+ * All three are ON by default. That is deliberate: it is the configuration of
+ * spdhost-exp-write-a6cb72d, the build a real phone was detected and flashed
+ * with. An earlier change turned them off on the theory that the vendor
+ * reference (spd_dump/common.c) never sends them, and every release after that
+ * detected the device and then timed out — so the reference is not the last
+ * word here, and matching the known-good build is.
+ *
+ * SPDHOST_NO_CLEAR_HALT=1, SPDHOST_NO_SET_CONFIG=1 and SPDHOST_NO_SEND_ZLP=1
+ * each turn one back off for A/B testing on a host that dislikes it. Nothing
+ * turns them off by accident: only a var set to a non-empty, non-"0" value
+ * counts, exactly as SPDHOST_NO_CLEAR_HALT always has. */
+static int extra_off(const char *no_name)
 {
-	const char *e = getenv(name);
+	const char *e = getenv(no_name);
 	return e && e[0] && e[0] != '0';
 }
 
@@ -107,15 +113,10 @@ static void trace_device(struct spd_usb *u)
  * spd_brom_after_line_state() — i.e. only on the BootROM-hello path, after
  * line-state, never from every open/reacquire.
  *
- * OFF BY DEFAULT. The vendor reference sends no CLEAR_FEATURE at all: after
- * line-state it goes straight to the CHECK_BAUD bulk send. This was added as
- * an unproven mitigation for a toggle desync no one has reproduced, and it
- * puts two control transfers between the phone being detected and the hello —
- * on a BootROM that stalls the request, that is a wedge at the worst possible
- * moment. SPDHOST_CLEAR_HALT=1 opts back in; SPDHOST_NO_CLEAR_HALT=1 is the
- * explicit opt-out and wins over it, so a global export cannot re-enable this
- * by accident. Errors are not fatal (some BootROMs stall the request) but are
- * always printed when the feature is on. */
+ * Also resets the data toggle on both sides, which rules out a toggle mismatch
+ * after an earlier cancelled transfer. Errors are not fatal (some BootROMs
+ * stall the request) but are always printed, trace or not.
+ * Disable for A/B testing with SPDHOST_NO_CLEAR_HALT=1. */
 void spd_usb_clear_halts(struct spd_usb *u)
 {
 	const char *off = getenv("SPDHOST_NO_CLEAR_HALT");
@@ -123,9 +124,9 @@ void spd_usb_clear_halts(struct spd_usb *u)
 
 	if (!u || !u->handle)
 		return;
-	if ((off && off[0] && off[0] != '0') || !extra_on("SPDHOST_CLEAR_HALT")) {
+	if (off && off[0] && off[0] != '0') {
 		if (brom_trace_on())
-			fprintf(stderr, "brom: clear_halt skipped (off by default; SPDHOST_CLEAR_HALT=1 to send it)\n");
+			fprintf(stderr, "brom: clear_halt skipped (SPDHOST_NO_CLEAR_HALT)\n");
 		return;
 	}
 	ei = libusb_clear_halt(u->handle, (unsigned char)u->ep_in);
@@ -255,13 +256,10 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 	int err, cfg = 0;
 	u->handle = h;
 	u->gone = 0;
-	/* OFF BY DEFAULT. The vendor reference never issues GET_CONFIGURATION or
-	 * SET_CONFIGURATION — it detaches and claims. On a phone the kernel has
-	 * already configured the device, so a SET_CONFIGURATION here is at best
-	 * noise and at worst a re-enumeration, i.e. the device disappearing right
-	 * after it was detected. SPDHOST_SET_CONFIG=1 restores it for hosts where
-	 * the device really does arrive unconfigured. */
-	if (extra_on("SPDHOST_SET_CONFIG")) {
+	/* A device that arrives unconfigured cannot be claimed; this is what
+	 * fixes it. On by default since a6cb72d. SPDHOST_NO_SET_CONFIG=1 skips it
+	 * for a host that dislikes the re-enumeration. */
+	if (!extra_off("SPDHOST_NO_SET_CONFIG")) {
 		err = libusb_get_configuration(h, &cfg);
 		if (err == 0 && cfg == 0) {
 			err = libusb_set_configuration(h, 1);
@@ -413,14 +411,10 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		fprintf(stderr, "usb send short: %d/%d\n", sent, len);
 		return -2;
 	}
-	/* OFF BY DEFAULT. A zero-length packet is a real URB on the wire, not a
-	 * no-op, and the vendor reference never sends one — it sends exactly len
-	 * bytes for an encoded message and for a raw loader chunk alike. On an
-	 * HDLC-framed loader an extra empty OUT packet at a 512-byte boundary
-	 * desyncs the stream, and every receive after it times out, which is one
-	 * of the two failure shapes being chased on a real phone. Set
-	 * SPDHOST_SEND_ZLP=1 to send it again. */
-	if (extra_on("SPDHOST_SEND_ZLP") && u->out_mps == 512 && (len % 512) == 0) {
+	/* Match the known-good clients: a zero-length packet only for a
+	 * 512-byte high-speed bulk pipe, and only when the transfer fills it.
+	 * On by default since a6cb72d; SPDHOST_NO_SEND_ZLP=1 turns it off. */
+	if (!extra_off("SPDHOST_NO_SEND_ZLP") && u->out_mps == 512 && (len % 512) == 0) {
 		int dummy = 0;
 		libusb_bulk_transfer(u->handle, u->ep_out, NULL, 0, &dummy, u->timeout_ms);
 	}

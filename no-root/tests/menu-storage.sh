@@ -48,9 +48,9 @@ probe() {
 # ---------------------------------------------------------------- resolution
 echo "== which layout each setting picks =="
 out=$(cd "$pkg" && probe SPDHOST_SHARED_DIR="$share")
-line_eq "shared storage visible -> input under <share>/spdhost" "$out" 1 "$share/spdhost/input"
-line_eq "shared storage visible -> dump under <share>/spdhost" "$out" 2 "$share/spdhost/backup"
-line_eq "the header says which layout is in use" "$out" 3 "shared storage ($share/spdhost)"
+line_eq "shared storage visible -> flash folder is <share>/Download" "$out" 1 "$share/Download"
+line_eq "shared storage visible -> dump folder is the same <share>/Download" "$out" 2 "$share/Download"
+line_eq "the header says which layout is in use" "$out" 3 "shared storage ($share/Download)"
 
 out=$(cd "$pkg" && probe SPDHOST_SHARED_DIR=/nonexistent)
 line_eq "no shared storage -> package input/" "$out" 1 "$pkg/input"
@@ -79,7 +79,7 @@ out=$(cd "$pkg" && probe SPDHOST_SHARED_DIR="$share")
 line_eq "STORAGE=package from the config is honoured" "$out" 1 "$pkg/input"
 printf 'STORAGE=/etc\n' >"$tmp/conf"
 out=$(cd "$pkg" && probe SPDHOST_SHARED_DIR="$share")
-line_eq "an unknown STORAGE value is ignored (not used as a path)" "$out" 1 "$share/spdhost/input"
+line_eq "an unknown STORAGE value is ignored (not used as a path)" "$out" 1 "$share/Download"
 printf 'STORAGE=auto\n' >"$tmp/conf"
 out=$(cd "$pkg" && probe SPDHOST_STORAGE=package SPDHOST_SHARED_DIR="$share")
 line_eq "SPDHOST_STORAGE wins over the saved config" "$out" 1 "$pkg/input"
@@ -90,10 +90,12 @@ rm -f "$tmp/conf"
 cd "$pkg" || exit 1
 env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_SHARED_DIR="$share" \
 	bash "$bin/menu.sh" </dev/null >"$tmp/menu.out" 2>&1
-check "starting the menu creates <share>/spdhost/input" test -d "$share/spdhost/input"
-check "starting the menu creates <share>/spdhost/backup" test -d "$share/spdhost/backup"
+check "starting the menu creates <share>/Download" test -d "$share/Download"
+check "starting the menu creates no <share>/spdhost subtree" test ! -e "$share/spdhost"
 check "the menu header names the folder layout" bash -c '[[ $1 == *"Folders: shared storage"* ]]' _ "$(cat "$tmp/menu.out")"
-check "the menu header names the flash folder it will read" bash -c '[[ $1 == *"Flash input: $2/spdhost/input"* ]]' _ "$(cat "$tmp/menu.out")" "$share"
+check "the menu header names the flash folder it will read" bash -c '[[ $1 == *"Flash input: $2/Download"* ]]' _ "$(cat "$tmp/menu.out")" "$share"
+check "the menu header says it is one folder for both directions" \
+	bash -c '[[ $1 == *"one folder:"* ]]' _ "$(cat "$tmp/menu.out")"
 
 # ------------------------------------------------------------- extra [15]
 # The switch has to change the paths in this session and record the choice.
@@ -123,7 +125,9 @@ check "[15] the switch created the package folders" test -d "$pkg/input"
 
 out=$(run_switch '1\r')
 check "[15] switching back to shared storage saves STORAGE=shared" grep -q '^STORAGE=shared$' "$tmp/conf"
-check "[15] the switch prints the shared flash folder" bash -c '[[ $1 == *"Flash folder: $2/spdhost/input"* ]]' _ "$out" "$share"
+check "[15] the switch prints the shared flash folder" bash -c '[[ $1 == *"Flash folder: $2/Download"* ]]' _ "$out" "$share"
+check "[15] the switch prints the same folder for dumps" bash -c '[[ $1 == *"Dump folder:  $2/Download"* ]]' _ "$out" "$share"
+check "[15] the switch offers the Download folder by name" bash -c '[[ $1 == *"Shared storage: $2/Download"* ]]' _ "$out" "$share"
 
 # On a phone with no storage permission, [1] must say what to run, not offer
 # a folder that cannot be created.
@@ -142,6 +146,68 @@ env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_SHARED_DIR=/nonexis
 	"bash $tmp/fn2.sh" </dev/null
 out=$(cat "$tmp/switch2.pty")
 check "[15] with no shared storage it says to run termux-setup-storage" bash -c '[[ $1 == *"termux-setup-storage"* ]]' _ "$out"
+
+# ------------------------------------- one folder means the copy step is a no-op
+# With INPUT_DIR == DUMP_DIR, menu [9] has nothing to do: every file it would
+# copy is already at the destination. It must say so instead of reporting
+# "nothing new", and it must not touch the folder.
+rm -rf "$share/Download"; mkdir -p "$share/Download"
+printf 'dump\n' >"$share/Download/boot.img"
+cat >"$tmp/promote.sh" <<R
+#!/usr/bin/env bash
+source "$root/scripts/menu.sh" >/dev/null 2>&1
+load_config; apply_storage_mode
+promote_dump_action
+R
+out=$(env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_SHARED_DIR="$share" \
+	SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash "$tmp/promote.sh" 2>&1)
+check "[9] in one folder it says the flash and dump folders are the same" \
+	bash -c '[[ $1 == *"same folder"* ]]' _ "$out"
+check "[9] in one folder it says there is nothing to copy" \
+	bash -c '[[ $1 == *"nothing to copy"* ]]' _ "$out"
+check "[9] in one folder it leaves the file alone" test -f "$share/Download/boot.img"
+check "[9] in one folder it writes no second copy" test "$(ls "$share/Download" | wc -l)" = 1
+
+# ------------------------------------ menu [6] must not rename anything it reads
+# The flash folder is now the user's own Download folder. The old code renamed
+# every *.bin to *.img before filtering, which would rename unrelated files a
+# user had put there. Nothing in the folder may change.
+rm -rf "$share/Download"; mkdir -p "$share/Download"
+printf 'image\n' >"$share/Download/boot.bin"
+printf 'vendor blob\n' >"$share/Download/lk.bin"
+printf 'notes\n' >"$share/Download/notes.txt"
+cat >"$tmp/flash.sh" <<R
+#!/usr/bin/env bash
+source "$root/scripts/menu.sh" >/dev/null 2>&1
+load_config; apply_storage_mode
+need_loaders() { return 0; }
+ready() { return 0; }
+confirm_action() { return 0; }
+run_session() {
+	local a staged=
+	for a in "\$@"; do
+		case \$a in */spdhost-flash.*) staged=\$a ;; esac
+	done
+	[[ -n \$staged ]] || { echo "NO-STAGE"; return 0; }
+	echo "STAGE=\$staged"
+	ls "\$staged"
+}
+flash_input_menu
+R
+out=$(env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_SHARED_DIR="$share" \
+	SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash "$tmp/flash.sh" 2>&1 </dev/null)
+staged=$(sed -n 's/^STAGE=//p' <<<"$out")
+check "[6] boot.bin is offered as boot" bash -c '[[ $1 == *"  boot"* ]]' _ "$out"
+check "[6] lk.bin is not treated as a partition image" bash -c '[[ $1 == *"Not flashed: lk.bin"* ]]' _ "$out"
+check "[6] the staged folder holds boot.img under the stripped name" \
+	bash -c 'grep -qx boot.img <<<"$1"' _ "$out"
+check "[6] and does not hold boot.bin" bash -c '! grep -qx boot.bin <<<"$1"' _ "$out"
+check "[6] nothing in the flash folder was renamed" test -f "$share/Download/boot.bin"
+check "[6] and no boot.img appeared beside it" test ! -e "$share/Download/boot.img"
+check "[6] an unrelated lk.bin is untouched" test -f "$share/Download/lk.bin"
+check "[6] and was not turned into lk.img" test ! -e "$share/Download/lk.img"
+check "[6] a staging folder was passed to write-files" test -n "$staged"
+check "[6] the staging folder is cleaned up" test ! -e "$staged"
 
 echo
 echo "menu-storage: $pass passed, $fail failed"

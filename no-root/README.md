@@ -376,7 +376,7 @@ is labeled dangerous. Use only on a sacrificial device.
 [3] Change loader files (shipped models, or your own paths)
 [4] List partitions only
 [5] Smoke test (safe checks, no writes)
-[6] Flash images from input/
+[6] Flash images from the flash folder (Download/, or input/ in the package)
 [7] Restore a backup folder
 [8] Repartition from XML
 [9] Copy dumped images into the flash folder
@@ -384,64 +384,84 @@ is labeled dangerous. Use only on a sacrificial device.
 [0] Quit
 ```
 
-It will not silently pick the shipped ums9230 Infinix loaders
-(`fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @ `0x9efffe00`): you type `yes`
-to confirm that chip/model, or set `SPDHOST_ALLOW_DEFAULT_FDL=1`, or use
-`[3]` / a saved `~/.spdhost-menu.conf`. Those files match the release menu's
-UMS9230/Infinix choice.
+**On the first run the menu asks which loaders the phone uses**, before it
+prints anything else:
+
+```
+Phone setup. Which loaders does this phone use?
+[1] universal (generic ums9230; try this if you do not know the model)
+[2] pick a shipped model by chip and brand
+[3] type my own loader paths and addresses
+[0] skip for now (menu [3] sets this later)
+```
+
+`[1]` is the answer when the model is unknown: `fdl/ums9230/universal/` holds
+the generic ums9230 pair (`fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @
+`0x9efffe00`, exec stub `0x65015f08`). It still asks for `yes` before saving,
+because a wrong chip or address can brick the phone. The prompt is skipped
+when a complete loader config is already saved, when stdin is not a terminal
+(so a script or a piped run is never blocked), and when
+`SPDHOST_ALLOW_DEFAULT_FDL=1` applies the shipped ums9230 Infinix pair without
+asking.
 
 `[3]` selects a chip and sets its FDL and exec addresses. The shipped pairs
-cover ums9230 (Infinix, Itel, Realme, Tecno and the alternatif models),
-ums512 (Infinix, Realme) and sc9863a (Itel, Realme), each with its primary
-exec stub and hex-mode alternate. The addresses are a function of the chip,
+cover ums9230 (Infinix, Itel, Realme, Tecno, **universal** and the alternatif
+models), ums512 (Infinix, Realme) and sc9863a (Itel, Realme), each with its
+primary exec stub and hex-mode alternate. The addresses are a function of the chip,
 so the saved config is checked against itself on every launch: a config
 whose loaders are one chip's and whose addresses are another's is refused
 with both names. Stale addresses are repaired from the chip, and an empty
 `SOC` beside a loader path is filled in from the path rather than used as a
 way around the check.
 
-Two folders hold the images: `backup/` is what `[1]` writes into and `[7]`
-restores from, and `input/` is what `[6]` flashes. `SHA256SUMS`,
-`dump-manifest.txt` and `partition_list.txt` land in `backup/` too.
+The dump folder is what `[1]` writes into and `[7]` restores from; the flash
+folder is what `[6]` reads. `SHA256SUMS`, `dump-manifest.txt` and
+`partition_list.txt` land in the dump folder too. `[9]` copies images from the
+dump folder into the flash folder when the two are different folders.
 
-**Where those folders are depends on the phone.** On Termux, after
-`termux-setup-storage` has been run and allowed, they are
+**By default they are the same folder, and it is the phone's own Download
+folder.** On Termux, after `termux-setup-storage` has been run and allowed:
 
 ```
-/sdcard/spdhost/input    images to flash  (menu [6] reads this)
-/sdcard/spdhost/backup   dumps            (menu [1] writes this)
+/sdcard/Download    dumps land here (menu [1]); flashes read here (menu [6])
 ```
 
-so a file you downloaded in a browser or copied with a file manager is one
-move away from being flashed, and a dump is visible to other apps instead of
-hidden inside Termux's private directory. The tool creates both on first run.
-Without storage permission it falls back to `input/` and `backup/` inside the
-folder it was unzipped into, and says which one it is using in the header.
+A dump is therefore immediately visible to a file manager or a browser
+download, and the image you downloaded is already in the folder `[6]` flashes
+from — there is nothing to move. Because one folder serves both directions,
+`[9]` says so and does nothing rather than reporting an empty copy, `[6]`
+never renames anything it finds there (a `boot.bin` is flashed as `boot`, the
+file itself is untouched), and `[7]` will list any partition image you dropped
+there to flash, which is expected.
 
-Extra `[15]` shows the folders in use and switches between the two layouts.
-Three settings control it, in order of precedence:
+The tool creates the folder on first run. Without storage permission it falls
+back to `input/` and `backup/` inside the folder it was unzipped into — two
+separate folders, where `[9]` still does the copying — and says which layout it
+is using in the header. Extra `[15]` shows the folders in use and switches
+between the two layouts. These settings control it, in order of precedence:
 
 | Setting | Effect |
 | --- | --- |
 | `SPDHOST_INPUT_DIR` / `SPDHOST_DUMP_DIR` | names one folder outright; the layout below is ignored |
 | `SPDHOST_STORAGE=auto\|shared\|package` | this run only; beats the saved config |
 | `STORAGE=` in `~/.spdhost-menu.conf` | what `[15]` saves; `auto` means shared storage when it is visible, the package folders when it is not |
-| `SPDHOST_SHARED_DIR=/some/dir` | the only shared path searched, under which `spdhost/` is created (used by the tests, and by anyone who wants the images somewhere else) |
+| `SPDHOST_SHARED_DIR=/some/dir` | the only shared path searched, under which `Download/` is created (used by the tests, and by anyone who wants the images somewhere else) |
 
-The release menu leaves you to move files between the two folders by hand;
-`[9]` does it for you, copying the partition images from the dump folder into
-the flash folder. It only adds files: an image already there at the same size
-is left alone, and one of a different size is reported and skipped rather
-than replaced, because the flash folder also holds the images you actually
-meant to flash.
+When the two folders differ (the `package` layout, or an explicit
+`SPDHOST_INPUT_DIR` / `SPDHOST_DUMP_DIR`), `[9]` copies the partition images
+from the dump folder into the flash folder. It only adds files: an image
+already there at the same size is left alone, and one of a different size is
+reported and skipped rather than replaced, because the flash folder also holds
+the images you actually meant to flash.
 
-Dump `[1]` fetches the live table into `./backup/partition_list.txt`, prints
-it like the rooted menu's LIST PARTISI, then resolves what you type to the
-closest name (`boot.img` or `boot` → `boot_a` when that slot exists) and
-uses that row's size. Flash `[6]` reads `input/` beside `fdl/` (or
-`$PWD/input`); name each file after the partition (`boot.img`,
-`vbmeta.img`). Restore `[7]` offers to force the other slot
-(`write-parts-a` / `write-parts-b`). `[4]` only refreshes the list.
+Dump `[1]` fetches the live table into `partition_list.txt` in the dump folder,
+prints it like the rooted menu's LIST PARTISI, then resolves what you type to
+the closest name (`boot.img` or `boot` → `boot_a` when that slot exists) and
+uses that row's size. Flash `[6]` reads the flash folder — `Download/`, or
+`input/` beside `fdl/` in the package layout — and accepts `.img` or `.bin`;
+name each file after the partition (`boot.img`, `vbmeta.img`). Restore `[7]`
+offers to force the other slot (`write-parts-a` / `write-parts-b`). `[4]` only
+refreshes the list.
 
 After a flash, restore, repartition, slot change or dump, the menu runs the
 ending the release menu does: system (`reset`), recovery, fastbootd, or
@@ -502,16 +522,19 @@ The BootROM window is short and the first permission dialog usually outlasts
 it. Cold-unplug the target ≥5 s between sessions; success once does not make
 later tries stickier without a replug.
 
-Nothing that talks to Termux:API runs between "the device was found" and
+Nothing that talks to Termux:API *blocks* between "the device was found" and
 `termux-usb` being spawned. That gap is the whole window, and every API call
 is a broadcast round trip through the same app that has to raise the
 permission dialog. Detection is a poll (`termux-usb -l`, then 0.3 s), so
 "found" already lands up to a poll interval after the device appeared;
 `usb: listed … @Xms` and `usb: child start fd=N @Zms` in the wrapper output
 are the two timestamps to compare when a session dies right after detection.
-The wake lock is taken before the wait rather than after detection for the
-same reason, and `termux-toast`/`termux-vibrate` no longer fire on the found
-path.
+
+The wake lock is taken *after* detection, not before the wait — that is the
+known-good build's order, and the wrapper's job while waiting is to be ready
+to spawn `termux-usb` the moment the device appears. The device-found toast
+and buzz still fire there, but backgrounded (`&`), so they never sit on that
+path; `SPD_USB_NOTIFY=0` turns both off.
 
 Stay in the package root so `scripts/spdhost-usb` finds `./spdhost`. Set
 `SPDHOST_BROM_TRACE=1` for claim→try breadcrumbs (`brom: open/claim`,
@@ -523,15 +546,18 @@ BootROM hello send/recv uses `SPDHOST_BROM_TIMEOUT` only, not
 `SPDHOST_BROM_TIMEOUT_MIN` up to that ceiling over
 `SPDHOST_BROM_TIMEOUT_RAMP` tries, so more tries land inside the window.
 Each BootROM start prints a line like
-`brom: hello hello_to=1000..3000(x6) wall=46000(auto) tries=15`.
+`brom: hello hello_to=250..3000(x6) wall=46000(auto) tries=15`.
 
-The floor of that ramp (`SPDHOST_BROM_TIMEOUT_MIN`, default 1000 ms) is the
-part that has to stay at least as long as a real reply. Every try sends a
-fresh `0x7e`, so a BootROM that answers try 1 *while* try 2 is being sent
-emits two VER frames: the first is read as try 2's answer and the second sits
-in the buffer until the next command reads it and aborts with
-`unexpected response 0x0081`. A 250 ms floor — below a plausible reply time —
-made that race reachable; 1000 ms is the reference's flat per-try value.
+The floor of that ramp is `SPDHOST_BROM_TIMEOUT_MIN`, default **250 ms** —
+the value the known-good build (`spdhost-exp-write-a6cb72d`, the one a real
+phone was detected and flashed with) ships, and what this menu's own smoke
+test text has always said. It was raised to 1000 ms for a while, on the
+theory that a 250 ms floor lets a BootROM that answers try 1 *while* try 2 is
+being sent emit two VER frames, the second of which the next command reads as
+`unexpected response 0x0081`. That theory did not survive contact with
+hardware: every release with the 1000 ms floor detected the device and then
+timed out. If you are chasing that frame race on your own host, raise it
+yourself with `SPDHOST_BROM_TIMEOUT_MIN=1000`.
 
 A mid-hello USB reacquire was removed: it hit `LIBUSB_ERROR_BUSY` and a
 second Allow dialog. `SPDHOST_BROM_REACQ` therefore defaults to **0**, and
@@ -550,7 +576,7 @@ binary directly; the command words after that are the same.
 |---|---|---|
 | `SPDHOST_BROM_TRIES` | 15 | hello attempts |
 | `SPDHOST_BROM_TIMEOUT` | 3000 | per-try ceiling (ms), hello only |
-| `SPDHOST_BROM_TIMEOUT_MIN` | 1000 | ramp floor (the reference's flat value) |
+| `SPDHOST_BROM_TIMEOUT_MIN` | 250 | ramp floor (the known-good build's value) |
 | `SPDHOST_BROM_TIMEOUT_RAMP` | 6 | tries spent reaching the ceiling |
 | `SPDHOST_BROM_NO_RAMP` | 0 | `1` = every try uses the ceiling |
 | `SPDHOST_BROM_WALL_MS` | auto | overall wall; explicit wins, capped at 120000 |
@@ -558,11 +584,9 @@ binary directly; the command words after that are the same.
 | `SPDHOST_BROM_SETTLE_MS` | 100 | pause after line-state, before hello |
 | `SPDHOST_BROM_DRAIN` | 0 | `1` = short bulk-IN drain after settle |
 | `SPDHOST_BROM_REACQ` | 0 | soft same-handle settle+retry after a miss (`1`/`2`) |
-| `SPDHOST_LOADER_BAUD4` | 0 | `1` = send 4x`0x7e` on loader check-baud tries 7-10 |
-| `SPDHOST_CLEAR_HALT` | 0 | `1` = send `libusb_clear_halt` on both bulk endpoints before the hello |
-| `SPDHOST_NO_CLEAR_HALT` | 0 | `1` = force that off even with `SPDHOST_CLEAR_HALT=1` |
-| `SPDHOST_SET_CONFIG` | 0 | `1` = `SET_CONFIGURATION(1)` when the device reads as config 0 |
-| `SPDHOST_SEND_ZLP` | 0 | `1` = zero-length OUT packet after a 512-byte-multiple bulk write |
+| `SPDHOST_NO_CLEAR_HALT` | 0 | `1` = omit `libusb_clear_halt` on the bulk endpoints before the hello |
+| `SPDHOST_NO_SET_CONFIG` | 0 | `1` = omit `SET_CONFIGURATION(1)` when the device reads as config 0 |
+| `SPDHOST_NO_SEND_ZLP` | 0 | `1` = omit the zero-length OUT packet after a 512-byte-multiple bulk write |
 | `SPDHOST_BROM_TRACE` | 0 | `1` = breadcrumb timestamps without `--verbose` |
 | `SPD_USB_ATTACHED_GRACE` | 0 | wrapper grace before it gives up on the device |
 | `SPD_USB_SKIP_REQUEST` | 0 | `1` = omit `-r` on a warm, already-authorized run |
@@ -571,16 +595,23 @@ binary directly; the command words after that are the same.
 (permission denied / never started). Keep the default `-r` for a cold first
 plug, and do not export it as a global default in menus.
 
-The last four rows before `SPDHOST_BROM_TRACE` are all **off by default**, and
-that is deliberate. Between the device being detected and the first `0x7e`,
-the reference client (`spd_dump/common.c`) sends exactly one control transfer
-— the line-state one. Anything else is traffic a phone never sees from the
-client that works, and all four of these were once on. A BootROM that stalls
-`CLEAR_FEATURE(ENDPOINT_HALT)`, or a USB stack that re-enumerates on
-`SET_CONFIGURATION`, drops the device right there — which is what
-"device exited immediately after being detected" and the blanket
-`LIBUSB_ERROR_TIMEOUT` that follows look like. Turn one back on to A/B a
-specific phone, not to fix a general failure.
+The three `SPDHOST_NO_*` rows before `SPDHOST_BROM_TRACE` each turn **off**
+one piece of traffic that is **on by default**:
+
+- `CLEAR_FEATURE(ENDPOINT_HALT)` on both bulk endpoints, right after
+  line-state and before the first `0x7e`;
+- `SET_CONFIGURATION(1)` when the device reports configuration 0;
+- a zero-length OUT packet after any bulk write that exactly fills a 512-byte
+  high-speed packet.
+
+That default is the known-good build's. The vendor reference
+(`spd_dump/common.c`) sends none of them, and a release was cut that followed
+the reference and turned all three off — after which every phone was detected
+and then died, with `device exited immediately after being detected` and a
+blanket `LIBUSB_ERROR_TIMEOUT`. Matching the build that worked is therefore
+the rule, and the reference is not the last word. Keep all three on; use the
+`SPDHOST_NO_*` switches only to A/B a specific host that dislikes one, not to
+fix a general failure.
 
 ## Command order
 
