@@ -1819,19 +1819,36 @@ confirm_dangerous() {
 # Release-menu file. Not shipped in this tree. The rooted package keeps
 # fdl2-cboot.bin next to fdl1-dl.bin (ums9230/infinix/) and gen_spl-unlock
 # two directories above that, beside menu.sh. spl-unlock.bin is generated.
+#
+# The selected model's own loader directory is searched FIRST. This file is
+# what unlock_bootloader_menu writes to uboot just after erasing splloader, so
+# picking up another model's copy is a brick: the old order tried the
+# hardcoded ums9230/infinix directory before the model's own, and a phone
+# configured as ums9230/itel (we ship no itel cboot) therefore got infinix's
+# uboot. That directory is now a last resort, and only while the selection
+# really is that same ums9230/infinix pair.
 find_user_file() {
-	local name=$1 d base
+	local name=$1 d base soc dev
 	local -a places=()
 	base=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-	places+=(
-		"$PWD/$name"
-		"$PWD/ums9230/infinix/$name"
-		"$base/$name"
-		"$base/../$name"
-	)
+	soc=${SOC:-}
+	dev=${DEVICE:-}
+	# The model's own loader directory, then its package root.
 	if [[ -n ${FDL1:-} ]]; then
 		places+=("$(dirname "$FDL1")/$name")
 		places+=("$(dirname "$FDL1")/../../$name")
+	fi
+	places+=(
+		"$PWD/$name"
+		"$base/$name"
+		"$base/../$name"
+	)
+	# Legacy release layout: menu at the package root, loaders under
+	# ums9230/infinix/. Only when no model has been chosen yet, or the chosen
+	# one is that very pair — otherwise this is a different phone's file.
+	# ${dev%%/*} compares a sub-model (DEVICE=realme/model) by brand.
+	if [[ -z $dev || ( $soc == ums9230 && ${dev%%/*} == infinix ) ]]; then
+		places+=("$PWD/ums9230/infinix/$name" "$base/ums9230/infinix/$name")
 	fi
 	for d in "${places[@]}"; do
 		if [[ -f $d ]]; then
@@ -3195,6 +3212,91 @@ pack_slot_action() {
 	record_sha256 "$out" || true
 }
 
+# True when the resolved spdhost has the built-in PAC reader. Probed the same
+# way as spdhost_has_image_tools: run it with no arguments and look for its
+# usage line, so an older spdhost degrades to a clear message instead of
+# failing in the middle of an extract.
+spdhost_has_unpac() {
+	local bin out
+	bin=$(resolve_spdhost_bin 2>/dev/null) || return 1
+	[[ -n $bin ]] || return 1
+	out=$("$bin" unpac 2>&1 || true)
+	[[ $out == *"unpac [-d dir]"* ]]
+}
+
+# Offline: list, verify, and extract a PAC firmware. The release ships
+# extrac.sh plus an x86-64 pacextractor, which only runs on a PC; this is the
+# same job built into spdhost, so it also works on the phone. Nothing is sent
+# over USB and no phone is needed.
+pac_extract_action() {
+	local bin pac mode dir e pick want out rc
+	bin=$(resolve_spdhost_bin) || { echo "spdhost binary not found (make)." >&2; return 1; }
+	if ! spdhost_has_unpac; then
+		echo "This spdhost has no built-in PAC reader (unpac)." >&2
+		echo "Rebuild it (make), or use the release's extrac.sh on a PC." >&2
+		return 1
+	fi
+	# The usual case is one .pac in the flash folder: offer it as the default.
+	pac=""
+	for e in "$INPUT_DIR"/*.pac; do
+		[[ -f $e ]] || continue
+		pac=$e
+		break
+	done
+	read -r -p "PAC file${pac:+ [$pac]}: " want
+	pac=${want:-$pac}
+	[[ -n $pac ]] || { echo "No .pac given and none in $INPUT_DIR." >&2; return 1; }
+	[[ -f $pac ]] || { echo "No such file: $pac" >&2; return 1; }
+	echo
+	echo "== $pac =="
+	"$bin" unpac list "$pac" || { echo "unpac list failed: not a PAC?" >&2; return 1; }
+	echo
+	echo "[1] Verify the CRCs (check)"
+	echo "[2] Extract every entry"
+	echo "[3] Extract chosen entries"
+	echo "[0] Back"
+	read -r -p "Choice: " mode
+	case ${mode:-} in
+		0) echo "Back to the menu."; return ;;
+		1)
+			out=$("$bin" unpac check "$pac" 2>&1)
+			rc=$?
+			printf '%s\n' "$out"
+			if (( rc != 0 )); then
+				echo "unpac check failed (exit $rc)." >&2
+				return 1
+			fi
+			# The exit status is the vendor's, and it is 0 even when the
+			# stored CRC and the computed one differ, so the text is what
+			# reports a bad pac. Saying so here is the whole point of
+			# offering check: a silent 0 would read as "verified".
+			if [[ $out == *"(expected"* ]]; then
+				echo "MISMATCH: this pac is corrupt or truncated." >&2
+				return 1
+			fi
+			echo "CRCs match."
+			return
+			;;
+		2) pick= ;;
+		3)
+			read -r -p "Entries (space separated; * and ? work): " pick
+			[[ -n ${pick:-} ]] || { echo "No entries given." >&2; return 1; }
+			;;
+		*) echo "Unchanged."; return ;;
+	esac
+	read -r -p "Output folder [$INPUT_DIR/extract]: " dir
+	dir=${dir:-$INPUT_DIR/extract}
+	mkdir -p "$dir" || { echo "Cannot create $dir." >&2; return 1; }
+	# shellcheck disable=SC2086 -- the word split IS the entry list.
+	if "$bin" unpac -d "$dir" extract "$pac" $pick; then
+		echo "Extracted into $dir"
+		echo "Flash one from menu [6], or move it into $INPUT_DIR."
+	else
+		echo "unpac extract failed; $dir may hold a partial set." >&2
+		return 1
+	fi
+}
+
 extra_menu() {
 	local choice
 	echo "Extra"
@@ -3213,6 +3315,7 @@ extra_menu() {
 	echo "[13] DANGEROUS: erase one partition (type the word dangerous)"
 	echo "[14] Build a slot a/b misc image from a dump (offline, no phone)"
 	echo "[15] Storage folders: shared storage (/sdcard) or the package"
+	echo "[16] Extract a PAC firmware (offline, no phone)"
 	echo "[0] Back"
 	read -r -p "Choice: " choice
 	case $choice in
@@ -3232,6 +3335,7 @@ extra_menu() {
 		13) continue_choice "erase a partition" || return ;;
 		14) continue_choice "build a slot image" || return ;;
 		15) continue_choice "storage folders" || return ;;
+		16) continue_choice "extract a PAC" || return ;;
 		*) echo "Unchanged."; return ;;
 	esac
 	case $choice in
@@ -3266,6 +3370,7 @@ extra_menu() {
 		13) erase_part_action ;;
 		14) pack_slot_action ;;
 		15) storage_switch_menu ;;
+		16) pac_extract_action ;;
 	esac
 }
 

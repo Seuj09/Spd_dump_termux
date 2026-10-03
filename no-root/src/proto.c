@@ -371,13 +371,25 @@ restart:
 		}
 		a = io->recv[pos++];
 		if (io->flags & SPD_F_TRANSCODE) {
+			/* Outside a frame, every byte is noise. This test has to
+			 * come BEFORE the escape branch: HDLC escaping is
+			 * per-frame, so a 0x7d out here escapes nothing and must
+			 * not set esc, because the next byte is the next frame's
+			 * opening 0x7e -- which would then fail the escaped-byte
+			 * test below and make die() kill the whole session on one
+			 * glitch in the line noise. (Clearing esc after the
+			 * escape branch still missed the stray 0x7d that is
+			 * *immediately* followed by the mark.) */
+			if (!head) {
+				esc = 0;
+				if (a != HDLC_MARK)
+					continue;
+				head = 1;
+				continue;
+			}
 			if (esc && a != (HDLC_MARK ^ 0x20) && a != (HDLC_ESC ^ 0x20))
 				die("bad escaped byte");
 			if (a == HDLC_MARK) {
-				if (!head) {
-					head = 1;
-					continue;
-				}
 				if (!n)
 					continue;
 				if (n < need)
@@ -388,8 +400,6 @@ restart:
 				esc = 0x20;
 				continue;
 			}
-			if (!head)
-				continue;
 			if (n >= RAW_CAP)
 				die("frame too long");
 			io->raw[n++] = (uint8_t)(a ^ esc);
@@ -1628,6 +1638,17 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		fprintf(stderr, "parts: %u entries, units << %d = bytes (spd_dump divisor %d)\n",
 			count, io->ptab_shift, divisor);
 	}
+	/* The index printed here is the index spd_lookup_part() accepts, which is
+	 * spd_dump's scheme: the first table entry is 1 -> ptab[0] (and 0, which
+	 * has no table row, is splloader). Printing the raw 0-based loop index
+	 * made every displayed index off by one, so feeding one back into
+	 * read-part/write-part targeted the wrong partition.
+	 *
+	 * Both columns are RAW table units, as the README documents them
+	 * ("index name units") and as the menu parses them: it applies the shift
+	 * itself (parts_units_to_bytes) and writes partition_bytes.txt from this
+	 * file. Printing bytes here made the menu shift twice, so every dump came
+	 * out at unit << 2*shift and every size check failed. */
 	for (i = 0; i < count; i++) {
 		const uint8_t *rec = p + i * 0x4c;
 		char name[37];
@@ -1642,7 +1663,7 @@ int spd_list_parts(struct spd *io, const char *out_path)
 				break;
 		}
 		name[k] = 0;
-		printf("%u %s %" PRIu64 "\n", i, name, sz);
+		printf("%u %s %" PRIu64 "\n", i + 1, name, sz);
 		if (fo)
 			fprintf(fo, "%s %" PRIu64 "\n", name, sz);
 	}

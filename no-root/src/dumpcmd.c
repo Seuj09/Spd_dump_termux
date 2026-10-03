@@ -18,7 +18,7 @@
 #include <errno.h>
 #include <unistd.h>
 
-#define SPLLOADER_BYTES (256u * 1024u)
+/* SPLLOADER_BYTES lives in proto.h: spd_list_parts() prints the same id. */
 #define MISC_SLOT_BYTES 1048576u
 /* spd_dump select_ab reads 0x20 bytes at misc+0x800, not the whole partition. */
 #define SLOT_ABC_OFF 0x800u
@@ -183,8 +183,16 @@ int spd_lookup_part(struct spd *io, const char *name, int slot,
 			*size = SPLLOADER_BYTES;
 			return 0;
 		}
-		if (io->nparts <= 0)
+		if (io->nparts <= 0) {
+			/* -2 is "no table yet". Fill out and *size exactly as the
+			 * non-numeric -2 below does: the caller compares the
+			 * resolved name, so returning here with out untouched
+			 * made `write-part 5 FILE` (or `read-part 5`) strcmp an
+			 * uninitialised buffer. */
+			snprintf(out, cap, "%s", name);
+			*size = 0;
 			return -2;
+		}
 		if (id < 1 || id > io->nparts)
 			return -1;
 		snprintf(out, cap, "%s", io->ptab[id - 1].name);

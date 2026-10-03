@@ -112,6 +112,16 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	}
 	if (lk == -2)
 		fprintf(stderr, "write %s: no partition table yet; sending this name as given\n", name);
+	/* The literal check above is not enough: a numeric id is expanded by
+	 * spd_lookup_part() to the table row's real name, so `write-part 5 FILE`
+	 * reaches here with resolved="misc" and would write raw bytes to misc with
+	 * none of the size/backup/read-back guards write_misc_image() enforces.
+	 * (write-parts already compares the resolved name this way.) */
+	if (!strcmp(resolved, "misc")) {
+		fprintf(stderr, "write %s: resolves to misc, which goes through the backup path\n",
+			name);
+		return -1;
+	}
 	if (!strcmp(resolved, "calinv")) {
 		fprintf(stderr, "write calinv: skipped (spd_dump does not restore calinv)\n");
 		return 0;

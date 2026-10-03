@@ -9,6 +9,11 @@
 #define SPD_F_CRC16 1
 #define SPD_F_TRANSCODE 2
 
+/* spd_dump get_partition_info: id 0 is splloader, 256 KiB, even on a device
+ * whose table has no such row. The id spd_list_parts() prints is the id
+ * spd_lookup_part() accepts, so both live in one place. */
+#define SPLLOADER_BYTES (256u * 1024u)
+
 struct spd {
 	struct spd_usb usb;
 	int flags;

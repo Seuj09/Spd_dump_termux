@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The menu items that expose spdhost commands the rest of the menu never
 # reached: write-parts-a/-b (restore to a forced slot), check-part, erase-part,
-# and pack-slot. Driven on a pty, the way termux-usb -e runs the menu, because
+# pack-slot, and the offline PAC reader. Driven on a pty, the way termux-usb -e
+# runs the menu, because
 # every one of these confirms through confirm_action/confirm_dangerous and both
 # refuse without a terminal.
 #
@@ -218,6 +219,59 @@ rm -f "$tmp/ran/log"
 python3 "$drive" "$pd_tr3" "type yes to copy" 'no\r' -- \
 	"SPDHOST_DUMP_DIR=$pd2 SPDHOST_INPUT_DIR=$pi2 $tmp/fn.sh promote_dump_action" </dev/null
 check "promote: answering no copies nothing" test ! -e "$pi2/boot.img"
+
+# ----------------------------------------------------------- PAC (offline)
+# The release ships extrac.sh for this; here it is built into spdhost and
+# reached from extra_menu [16]. Offline: the runner must never be called.
+python3 "$root/tests/pac_fixture.py" --suite "$tmp/pacfx" >/dev/null || exit 1
+cp "$tmp/pacfx/payloads.pac" "$tmp/input/"
+rm -f "$tmp/ran/log"
+
+# Enter accepts the only .pac in the flash folder; [1] is check.
+tr=$(menu pac_extract_action \
+	"PAC file" '\r' \
+	"Choice" '1\r')
+check "pac check: a good pac reports matching CRCs" pty_has "$tr" "CRCs match."
+check "pac check: sends nothing over USB" test ! -s "$tmp/ran/log"
+
+# A corrupt pac exits 0 (the vendor tool does too), so the menu has to read
+# the text to say so -- otherwise [1] would report success on a bad pac.
+cp "$tmp/pacfx/bad.pac" "$tmp/input/"
+tr=$(menu pac_extract_action \
+	"PAC file" "$tmp/input/bad.pac\r" \
+	"Choice" '1\r')
+check "pac check: a bad data CRC is reported as a mismatch" pty_has "$tr" "MISMATCH"
+check "pac check: a bad pac sends nothing over USB" test ! -s "$tmp/ran/log"
+
+# [2] extract everything into the default folder, <input>/extract.
+tr=$(menu pac_extract_action \
+	"PAC file" "$tmp/input/payloads.pac\r" \
+	"Choice" '2\r' \
+	"Output folder" '\r')
+check "pac extract: writes the entries into <input>/extract" \
+	test -s "$tmp/input/extract/system.img"
+check "pac extract: the payload is the pac's bytes, not truncated" \
+	test "$(stat -c %s "$tmp/input/extract/system.img")" = 8000
+check "pac extract: offline, no runner session" test ! -s "$tmp/ran/log"
+
+# [3] only the named entry.
+rm -rf "$tmp/input/extract"
+tr=$(menu pac_extract_action \
+	"PAC file" "$tmp/input/payloads.pac\r" \
+	"Choice" '3\r' \
+	"Entries" 'system.img\r' \
+	"Output folder" "$tmp/pac_only\r")
+check "pac extract one: writes the named entry" test -s "$tmp/pac_only/system.img"
+check "pac extract one: writes nothing else" \
+	bash -c '[ "$(ls "$1" | tr "\n" " ")" = "system.img " ]' _ "$tmp/pac_only"
+
+# A folder with no .pac and no answer must not fall through to an extract.
+mkdir -p "$tmp/no-pac"
+tr=$tmp/no-pac.pty
+python3 "$drive" "$tr" "PAC file" '\r' -- \
+	"SPDHOST_INPUT_DIR=$tmp/no-pac $tmp/fn.sh pac_extract_action" </dev/null
+check "pac: no pac anywhere is refused before anything runs" \
+	bash -c '[[ $1 == *"none in"* ]]' _ "$(cat "$tr")"
 
 echo
 echo "menu-extra: $pass passed, $fail failed"

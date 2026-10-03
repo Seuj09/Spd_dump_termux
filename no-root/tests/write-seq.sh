@@ -130,6 +130,26 @@ sh nvone parts pt.txt write-part l_fixnv1 nvbad/l_fixnv1.img; rc=$?
 check "single broken fixnv1 sends nothing (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_nvone.log && ! grep -q '6c005f006600690078006e0076003100' sh_nvone.seq"
 
+# A numeric partition id is expanded to the table row's real name, so the
+# literal-name checks in spd_write_named have to run on the resolved name:
+# id 1 is misc here (0 is splloader, the first row is 1), and writing it as a
+# raw partition would skip every size/backup/read-back guard that the misc
+# path enforces. The neighbouring id must still write normally, so this is
+# not just "id 1 is always refused".
+sh idmisc parts pt.txt write-part 1 boot.img; rc=$?
+check "numeric id resolving to misc is sent to the backup path, not written raw (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'resolves to misc' sh_idmisc.log && ! grep -qE '^SEQ 01 .*6d00690073006300' sh_idmisc.seq"
+sh iduboot parts pt.txt write-part 2 boot.img; rc=$?
+check "the next numeric id (uboot_a) still writes (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'write uboot_a' sh_iduboot.log"
+
+# With no `parts` in the session, a numeric id takes the -2 path: the name is
+# sent as given. The lookup must fill the resolved name there too, or the
+# misc/calinv comparisons in spd_write_named read an uninitialised buffer.
+sh nonpt write-part 5 boot.img; rc=$?
+check "a numeric id with no table is sent as given and read no stale name (rc $rc)" \
+	bash -c "grep -q 'no partition table yet' sh_nonpt.log && ! grep -q 'resolves to misc' sh_nonpt.log && ! grep -q 'restore calinv' sh_nonpt.log"
+
 # No splloader row: a file past the 256 KiB dump size is offered. This mock's
 # unlisted splloader is still 256 KiB, so the device NACKs, but the client
 # must not refuse before START.

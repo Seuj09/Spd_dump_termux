@@ -3,6 +3,7 @@
 #include "dhtb.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,8 +70,10 @@ int spd_dhtb_size(const uint8_t *buf, size_t len, size_t *size, int *short_image
 	}
 	/* The release tools give up here and write nothing. That test is also
 	 * what keeps the patch loops below inside the file, so it must stay
-	 * exactly this comparison. */
-	if (h + 0x260 >= len) {
+	 * exactly this comparison -- but widened: h is a size_t, so on the
+	 * 32-bit build `h + 0x260` wraps for an h near 2^32 and the guard goes
+	 * false, after which the reads below run at a wrapped offset. */
+	if ((uint64_t)h + 0x260 >= (uint64_t)len) {
 		*size = len;
 		*short_image = 1;
 		return 0;
@@ -80,11 +83,17 @@ int spd_dhtb_size(const uint8_t *buf, size_t len, size_t *size, int *short_image
 		uint32_t a = rd32(buf + h + 0x200 + off[i]);
 		uint32_t b = rd32(buf + h + 0x200 + off[i] + 8);
 		if (a && b) {
-			*size = (size_t)a + (size_t)b;
+			/* Sum in 64 bits: on the 32-bit build the size_t sum
+			 * wraps to a small value, which slips past the caller's
+			 * "past the end" clamp and writes a truncated image. A
+			 * value that does not fit stays large so the caller
+			 * clamps it to the real file length, as on 64-bit. */
+			uint64_t sz = (uint64_t)a + (uint64_t)b;
+			*size = sz > SIZE_MAX ? SIZE_MAX : (size_t)sz;
 			return 0;
 		}
 	}
-	*size = h + 0x200;
+	*size = (size_t)h + 0x200;
 	return 0;
 }
 

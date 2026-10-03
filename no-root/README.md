@@ -182,7 +182,10 @@ Handshake and loaders:
 
 Partition table and reads:
 
-- `parts [FILE]` — print `index name units`. The unit is whatever that
+- `parts [FILE]` — print `index name units`. `index` is the number
+  `read-part` / `write-part` / `erase-part` accept: **0 is `splloader`** (256
+  KiB, it has no table row) and the first table row is `1`, as in spd_dump.
+  The unit is whatever that
   loader reports (often sectors). On eMMC (ums9230) the units are KiB;
   convert with `bytes = units << (20 - divisor)`, where `divisor` starts at
   10 and drops while any non-zero entry is smaller than `1 << divisor`. The
@@ -485,17 +488,29 @@ Extra:
 [13] DANGEROUS: erase one partition
 [14] Build a slot a/b misc image from a dump (offline, no phone)
 [15] Storage folders: shared storage (/sdcard) or the package
+[16] Extract a PAC firmware (offline, no phone)
 ```
 
 `[13]` refuses `persist`, `splloader` and `all` outright. `[14]` runs
 `pack-slot` with no phone attached and records the output in `SHA256SUMS`.
+`[16]` lists a `.pac`, verifies its CRCs and extracts it, all through the
+built-in `unpac` — the release only ships `extrac.sh` plus an x86-64
+`pacextractor`, which cannot run on the phone. It writes into
+`INPUT_DIR/extract` by default so it cannot overwrite a file you put in the
+flash folder. `unpac check` exits 0 even on a CRC mismatch, the same as the
+vendor tool, so `[16]` reports the mismatch itself instead of trusting the
+status.
 
 Unlock `[8]` sends nothing until it can see `fdl2-cboot.bin` and some way to
 build `spl-unlock.bin`: the built-in `gen-spl-unlock`, or the release's
-x86-64 binary as a fallback. It looks in the current directory, in
-`ums9230/infinix/` (where the release keeps `fdl2-cboot.bin` next to
-`fdl1-dl.bin`), and in the package root (beside the release's
-`gen_spl-unlock`). `fdl2-cboot.bin` is a vendor blob and is not derivable
+x86-64 binary as a fallback. `fdl2-cboot.bin` is searched for next to the
+loaders of the model you selected, then in the current directory and the
+package root, and only last in `ums9230/infinix/` (where the release keeps it
+beside `fdl1-dl.bin`) — and that last place only while the selected model
+really is that ums9230/Infinix pair. Another model's `fdl2-cboot.bin` must
+never be picked up: this file is written to `uboot` right after `splloader`
+is erased, so the wrong phone's image is a brick. `fdl2-cboot.bin` is a
+vendor blob and is not derivable
 from anything else in the tree, so one copy ships for ums9230/Infinix and
 other models have to supply their own. `spl-unlock.bin` is generated from
 your own splloader dump. The unlock is several sessions: it reads splloader
@@ -644,7 +659,8 @@ and every following transfer timed out.
 
 Not a replacement for the full `sfd_tool` GUI, PAC flashing, or raw-data
 mode. `unpac` lists, checks and extracts a PAC; it does not flash one, and
-the menu does not take a PAC as an input. Reopen covers a USB reset between
+neither the CLI nor Extra `[16]` will take a PAC as a flash input — extract
+it first, then flash the image. Reopen covers a USB reset between
 loader stages; it does not resume a partition read or write that was cut in
 half.
 
