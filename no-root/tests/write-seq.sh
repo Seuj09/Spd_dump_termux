@@ -611,14 +611,19 @@ while time.time() < deadline and p.poll() is None:
         try:
             os.read(master, 4096)
         except OSError:
-            break
+            # EOF: the child closed the pty on its way out. poll() can still
+            # report None for a moment after that, so wait for the exit instead
+            # of calling a finished menu hung (it did hang CI once).
+            time.sleep(0.05)
+            continue
     else:
         try:
             os.write(master, b"\n")
         except OSError:
-            break
+            time.sleep(0.05)
 if p.poll() is None:
     p.kill()
+    p.wait()
     raise SystemExit("unlock menu hung")
 rc = p.wait()
 text = rec.read_text() if rec.exists() else ""
@@ -676,22 +681,38 @@ p = subprocess.Popen(["bash", "-c", script], stdin=slave, stdout=slave,
 os.close(slave)
 os.write(master, b"new\n")
 out = b""
-deadline = time.time() + 20
+stall = time.time()
+deadline = time.time() + 30
 while time.time() < deadline and p.poll() is None:
     r, _, _ = select.select([master], [], [], 0.2)
-    if r:
-        try:
-            out += os.read(master, 4096)
-        except OSError:
-            break
-        # Any later prompt (ready's pause) just gets an empty line.
-        try:
-            os.write(master, b"\n")
-        except OSError:
-            break
+    if not r:
+        # A prompt that printed nothing would otherwise wait forever: this menu
+        # answers every question with a pause, so an empty line is always a
+        # legal answer here.
+        if time.time() - stall > 1.5:
+            stall = time.time()
+            try:
+                os.write(master, b"\n")
+            except OSError:
+                pass
+        continue
+    stall = time.time()
+    try:
+        out += os.read(master, 4096)
+    except OSError:
+        # EOF while the child exits: poll() can lag that by a moment, so wait
+        # for the exit rather than declaring a finished menu hung.
+        time.sleep(0.05)
+        continue
+    # Any later prompt (ready's pause) just gets an empty line.
+    try:
+        os.write(master, b"\n")
+    except OSError:
+        pass
 if p.poll() is None:
     p.kill()
-    raise SystemExit("repartition menu hung")
+    p.wait()
+    raise SystemExit("repartition menu hung\n" + out.decode("utf-8", "replace"))
 rc = p.wait()
 text = out.decode("utf-8", "replace")
 ran = rec.read_text() if rec.exists() else ""
