@@ -275,6 +275,9 @@ jobs:
             echo "  menu [1] dumps. Put \`boot.img\`, \`vbmeta.img\`, \`l_fixnv1.img\`"
             echo "  there from any file manager or browser download and flash them"
             echo "  straight away; a partition you just dumped is already there."
+            echo "- \`partition_<unixtime>.xml\` -- every time the tool reads the"
+            echo "  phone's partition table it leaves the same table here as the XML"
+            echo "  menu [8] repartitions from, so there is always a copy to edit."
             echo
             echo "The folder is created on first run, and it is one folder for both"
             echo "directions. If the permission was denied, the tool says so and uses"
