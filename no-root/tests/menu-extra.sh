@@ -310,6 +310,39 @@ check "chip-uid: one read-only session, no write, no erase, no --yes" \
 	bash -c "grep -q 'chip-uid' $tmp/ran/log &&
 		! grep -qE -- 'write-part|erase|repartition|reset|--yes' $tmp/ran/log"
 
+# ------------------------------------- a reset that does not happen
+# reboot_mode [1] (system), [4] (power off) and extra [3] used to drop the
+# session's exit code. A failed reset then read as success: the user unplugged
+# a phone still sitting in download mode, with nothing on screen saying so.
+cat >"$tmp/failrunner" <<R
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$tmp/ran/log"
+echo "runner: \$*"
+case "\$*" in
+	*reset*|*power-off*) exit 4 ;;
+esac
+exit 0
+R
+chmod +x "$tmp/failrunner"
+
+tr=$(SPDHOST_MENU_RUNNER=$tmp/failrunner python3 "$drive" "$tmp/rb1.pty" \
+	"Choice:" '1\r' "y = continue" 'y\r' "type yes to reboot to system" 'yes\r' \
+	"Press Enter to continue" '\r' -- "$tmp/fn.sh reboot_mode" </dev/null)
+check "reboot [1]: a failed reset says the phone is still in download mode" \
+	bash -c "grep -q 'The reset command failed' $tmp/rb1.pty"
+
+tr=$(SPDHOST_MENU_RUNNER=$tmp/failrunner python3 "$drive" "$tmp/rb4.pty" \
+	"Choice:" '4\r' "y = continue" 'y\r' "type yes to power off" 'yes\r' \
+	"Press Enter to continue" '\r' -- "$tmp/fn.sh reboot_mode" </dev/null)
+check "reboot [4]: a failed power-off says the phone is still on" \
+	bash -c "grep -q 'The power-off command failed' $tmp/rb4.pty"
+
+tr=$(SPDHOST_MENU_RUNNER=$tmp/failrunner python3 "$drive" "$tmp/ex3.pty" \
+	"Choice:" '3\r' "y = continue" 'y\r' "type yes to power off" 'yes\r' \
+	"Press Enter to continue" '\r' -- "$tmp/fn.sh extra_menu" </dev/null)
+check "extra [3]: a failed power-off is reported there too" \
+	bash -c "grep -q 'The power-off command failed' $tmp/ex3.pty"
+
 echo
 echo "menu-extra: $pass passed, $fail failed"
 (( fail == 0 ))

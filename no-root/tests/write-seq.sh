@@ -309,6 +309,38 @@ sys.exit(0 if ok else 1)
 PY
 check "set-active a: both tools leave spd_dump's 32-byte slot block (rc $sdrc/$shrc)" test $? -eq 0
 
+# unlock_make_spl_unlock builds the image the unlock sends as FDL1. It is the
+# one step between the erase and the phone booting again, and it had no test of
+# its own: only the "no TTY" refusal was covered.
+mkdir -p "$tmp/unlockwork" "$tmp/unlockwork2"
+python3 "$root/tests/dhtb_fixture.py" "$tmp/fx" >/dev/null 2>&1
+# SPDHOST_MENU_RUNNER only satisfies menu.sh's source-time "is there a
+# wrapper?" check: this path is offline and never runs a session.
+( cd "$tmp" && SPDHOST_MENU_LIB=1 SPDHOST_BIN="$tmp/sh" SPDHOST_MENU_RUNNER=/bin/true \
+	bash -c "source '$root/scripts/menu.sh'; unlock_make_spl_unlock '$tmp/unlockwork' '$tmp/fx/full.bin'" \
+	</dev/null >unlock_build.log 2>&1 )
+rc=$?
+check "spl-unlock is built from the dump (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ -s '$tmp/unlockwork/spl-unlock.bin' ]"
+check "the build says what it patched" \
+	bash -c "grep -q 'patched 1 signature site' unlock_build.log"
+( cd "$tmp" && SPDHOST_MENU_LIB=1 SPDHOST_BIN="$tmp/sh" SPDHOST_MENU_RUNNER=/bin/true \
+	bash -c "source '$root/scripts/menu.sh'; unlock_make_spl_unlock '$tmp/unlockwork2' '$tmp/fx/badmagic.bin'" \
+	</dev/null >unlock_bad.log 2>&1 )
+rc=$?
+check "a splloader that is not sprd firmware is refused, not erased (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'was not erased' unlock_bad.log"
+
+# spd_dump spells it set_active (spd_dump.c:1220) and the port used to accept
+# only set-active, so a line copied out of the reference's usage text died with
+# "unknown command: set_active" (rc 2) before it wrote anything.
+MOCK_MISC_OUT=$tmp/misc_sh_slotus.bin sh slotus parts pt.txt set_active a >sh_slotus.log 2>&1; shrc=$?
+check "set_active (the reference's underscore) is accepted too (rc $shrc)" \
+	bash -c "[ $shrc = 0 ] && ! grep -q 'unknown command' sh_slotus.log && cmp -s misc_sh_slotus.bin misc_sh_slot.bin"
+sh badcmd parts pt.txt not_a_command a; shrc=$?
+check "a genuinely unknown command is still refused (rc $shrc)" \
+	bash -c "[ $shrc != 0 ] && grep -q 'unknown command: not_a_command' sh_badcmd.log"
+
 # The slot a bare name resolves to is read from misc, so a command sequence that
 # changes the slot and then resolves again has to see the NEW one. Caching the
 # slot per connection answered the second resolve with the first slot's row,
@@ -731,6 +763,87 @@ if any(i < 0 for i in order) or order != sorted(order):
 if bad:
     raise SystemExit("; ".join(bad))
 PY
+# The last session writes the erased splloader back. Its failure is the one
+# that leaves the phone unbootable, and it used to land in a `case` arm nobody
+# read: the menu returned quietly and the user had no idea. The runner above
+# always exits 0, so this needs its own run where only that session fails.
+check "menu says so loudly when the final restore fails" python3 - "$root" "$tmp" << 'PY'
+import os, pty, select, subprocess, sys, time, pathlib
+root = pathlib.Path(sys.argv[1])
+work = pathlib.Path(sys.argv[2]) / "ublfail"
+work.mkdir()
+(work / "fdl2-cboot.bin").write_bytes(b"cboot")
+(work / "spl-unlock.bin").write_bytes(b"unlock")
+rec = work / "ran"
+out = work / "out"
+runner = work / "run"
+runner.write_text("""#!/bin/sh
+printf '%%s\\n' "$*" >> "%s"
+case "$*" in
+  *read-part" "splloader" "0" "262144*)
+    mkdir -p "%s/backup_spl"
+    printf spl > "%s/backup_spl/splloader.img"
+    printf ub > "%s/backup_spl/uboot_a.img"
+    printf 'slot a\\nok uboot_a\\n' > "%s/backup_spl/dump-manifest.txt"
+    ;;
+  *write-part" "splloader*uboot_a.img*)
+    exit 3
+    ;;
+esac
+exit 0
+""" % (rec, work, work, work, work))
+runner.chmod(0o755)
+fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
+fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
+script = """
+source "%s/scripts/menu.sh"
+FDL1="%s"
+FDL1_ADDR=0x65000800
+FDL2="%s"
+FDL2_ADDR=0x9efffe00
+unlock_bootloader_menu
+""" % (root, fdl1, fdl2)
+env = os.environ.copy()
+env.update(SPDHOST_MENU_LIB="1", SPDHOST_MENU_RUNNER=str(runner), SPDHOST_DUMP_DIR=str(work / "backup"))
+master, slave = pty.openpty()
+# stdin stays a pty (every menu prompt gates on `-t 0`); stdout goes to a file
+# so the wording is assertable.
+with open(out, "wb") as fh:
+    p = subprocess.Popen(["bash", "-c", script], stdin=slave, stdout=fh,
+                         stderr=subprocess.STDOUT, cwd=work, env=env)
+    os.close(slave)
+    os.write(master, b"dangerous\n")
+    deadline = time.time() + 20
+    while time.time() < deadline and p.poll() is None:
+        r, _, _ = select.select([master], [], [], 0.2)
+        if r:
+            # The pty echoes what we type, so a readable master does not mean
+            # the child is waiting: drain it or the loop never sends another
+            # Enter and every later prompt waits out the deadline.
+            try:
+                os.read(master, 4096)
+            except OSError:
+                time.sleep(0.05)
+            continue
+        try:
+            os.write(master, b"\n")
+        except OSError:
+            time.sleep(0.05)
+    if p.poll() is None:
+        p.kill()
+        p.wait()
+        raise SystemExit("unlock menu hung\n" + out.read_text())
+    rc = p.wait()
+text = out.read_text()
+bad = []
+if rc == 0:
+    bad.append("rc 0: the menu reported success with the loader still erased")
+for want in ("RESTORE FAILED", "backup_spl/splloader.img", "backup_spl/uboot_a.img"):
+    if want not in text:
+        bad.append("no %r in output:\n%s" % (want, text))
+if bad:
+    raise SystemExit("; ".join(bad))
+PY
 bash -n "$root/scripts/menu.sh"
 check "menu.sh syntax" test $? -eq 0
 
@@ -807,8 +920,82 @@ if "partition-list" not in ran or ".xml" not in ran:
     bad.append("no partition-list dump: %r" % ran)
 if "repartition" in ran:
     bad.append("sent a repartition: %r" % ran)
-if "Nothing was sent to the phone" not in text:
-    bad.append("did not say it only read: %r" % text)
+if "the partition map is unchanged" not in text:
+    bad.append("did not say the map was only read: %r" % text)
+if "BCB" in text:
+    bad.append("claimed a BCB write on the default reset ending: %r" % text)
+if bad:
+    raise SystemExit("; ".join(bad))
+PY
+# Same read, but with a recovery ending: the release menu appends its bootmode
+# to the dump line, so the BCB write really happens and the menu must not say
+# the step sent nothing.
+check "menu 'new' admits the BCB write when the ending is reboot-recovery" python3 - "$root" "$tmp" << 'PY'
+import os, pty, select, subprocess, sys, time, pathlib
+root = pathlib.Path(sys.argv[1])
+work = pathlib.Path(sys.argv[2]) / "rep2"
+work.mkdir()
+(work / "backup").mkdir()
+rec = work / "ran"
+runner = work / "run"
+runner.write_text("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> \"%s\"\nexit 0\n" % rec)
+runner.chmod(0o755)
+script = """
+source "%s/scripts/menu.sh"
+BOOT_AFTER=reboot-recovery
+FDL1="%s"
+FDL1_ADDR=0x65000800
+FDL2="%s"
+FDL2_ADDR=0x9efffe00
+repartition_menu
+""" % (root, root / "fdl/ums9230/infinix/fdl1-dl.bin", root / "fdl/ums9230/infinix/fdl2-dl.bin")
+env = os.environ.copy()
+env.update(SPDHOST_MENU_LIB="1", SPDHOST_MENU_RUNNER=str(runner),
+           SPDHOST_DUMP_DIR=str(work / "backup"))
+master, slave = pty.openpty()
+p = subprocess.Popen(["bash", "-c", script], stdin=slave, stdout=slave,
+                     stderr=slave, cwd=work, env=env)
+os.close(slave)
+os.write(master, b"new\n")
+out = b""
+stall = time.time()
+deadline = time.time() + 30
+while time.time() < deadline and p.poll() is None:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if not r:
+        if time.time() - stall > 1.5:
+            stall = time.time()
+            try:
+                os.write(master, b"\n")
+            except OSError:
+                pass
+        continue
+    stall = time.time()
+    try:
+        out += os.read(master, 4096)
+    except OSError:
+        time.sleep(0.05)
+        continue
+    try:
+        os.write(master, b"\n")
+    except OSError:
+        pass
+if p.poll() is None:
+    p.kill()
+    p.wait()
+    raise SystemExit("repartition menu hung\n" + out.decode("utf-8", "replace"))
+rc = p.wait()
+text = out.decode("utf-8", "replace")
+ran = rec.read_text() if rec.exists() else ""
+bad = []
+if rc != 0:
+    bad.append("rc %s" % rc)
+if "repartition" in ran:
+    bad.append("sent a repartition: %r" % ran)
+if "reboot-recovery" not in ran:
+    bad.append("the ending was not passed to partition-list: %r" % ran)
+if "BCB" not in text or "the partition map is unchanged" not in text:
+    bad.append("did not own up to the BCB write: %r" % text)
 if bad:
     raise SystemExit("; ".join(bad))
 PY

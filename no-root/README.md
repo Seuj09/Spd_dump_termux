@@ -146,7 +146,7 @@ Three levels of gate, in increasing order:
 |---|---|---|
 | typed `yes` (or `--yes`) | `write-part`, `w-force`, `write-files`, `write-parts*`, `repartition`, `set-active`, `reboot-*`, `reset`, `power-off` | `--yes` is for CLI automation |
 | the word `dangerous` (or `--dangerous`) | `verity`, `frp-reset`, `danger-erase` | `--yes` is **not** enough; without a terminal they send nothing unless `--dangerous` is passed |
-| `--confirm-token SHA256` | every misc write | authorizes one misc write whose exact bytes hash to that value |
+| `--confirm-token SHA256` | the misc write it is passed with | authorizes one misc write whose exact bytes hash to that value; a second misc write in the same session is refused |
 
 `erase-part` refuses `persist`, `persist_a`, `persist_b`, `all`, `splloader`
 and `splloader_bak` outright, even with `--yes` or `--dangerous`.
@@ -157,6 +157,13 @@ takes them one at a time.
 typed confirm, shows the sha256 of the bytes it is about to write, and
 passes `--confirm-token`; spdhost then writes misc only if the bytes it is
 about to send hash to exactly that value, once per session.
+
+Not every misc write goes through that token. A misc write that is part of a
+larger confirmed batch — `misc.img` inside `write-files`/`write-parts`, or the
+`reboot-recovery`/`reboot-fastboot` ending the release menu appends to a flash
+or a dump — is covered by that batch's own typed `yes` instead, and spdhost asks
+for it in the session, not through a token. Both gates are typed and per-session;
+the token adds the exact-bytes check on top.
 
 ## Run
 

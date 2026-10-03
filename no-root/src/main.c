@@ -87,8 +87,9 @@ static void usage(void)
 		"                               ADDR (START/MIDST, no END, no EXEC) so the\n"
 		"                               no-verify stub starts FDL1 (spd_dump's\n"
 		"                               exec_addr). FILE defaults to\n"
-		"                               fdl/ums9230/custom_exec_no_verify_<hex>.bin\n"
-		"                               next to spdhost. ADDR 0 disables.\n"
+		"                               fdl/<soc>/custom_exec_no_verify_<hex>.bin\n"
+		"                               next to spdhost (ums9230, ums512,\n"
+		"                               sc9863a). ADDR 0 disables.\n"
 		"  exec_addr2 ADDR [FILE]       the same, with the stub appended to FDL1's\n"
 		"                               own download (zero filler, then the stub,\n"
 		"                               one START, no END) for a BootROM that takes\n"
@@ -502,14 +503,14 @@ static void need_fdl1(struct spd *io, const char *cmd)
 	}
 }
 
-/* The reference spells five verbs with an underscore where spdhost uses a
+/* The reference spells six verbs with an underscore where spdhost uses a
  * hyphen (`read_part`, `check_part`, `write_part`, `write_parts`,
- * `erase_part`). Both spellings are accepted so a command line copied out of
- * spd_dump's own documentation runs unchanged; the rest of the reference's
- * underscore names (read_parts, partition_list, size_part/part_size, w_force,
- * keep_charge, read_flash, read_mem, erase_flash) are already spelled that way
- * in the dispatch chain. Returns the canonical name, or NULL when S is
- * already one. */
+ * `erase_part`, `set_active`). Both spellings are accepted so a command line
+ * copied out of spd_dump's own documentation runs unchanged; the rest of the
+ * reference's underscore names (read_parts, partition_list,
+ * size_part/part_size, w_force, keep_charge, read_flash, read_mem,
+ * erase_flash) are already spelled that way in the dispatch chain. Returns
+ * the canonical name, or NULL when S is already one. */
 static const char *cmd_alias(const char *s)
 {
 	static const struct { const char *ref, *ours; } tab[] = {
@@ -518,6 +519,10 @@ static const char *cmd_alias(const char *s)
 		{ "write_part", "write-part" },
 		{ "write_parts", "write-parts" },
 		{ "erase_part", "erase-part" },
+		/* spd_dump.c:1220 spells the A/B slot switch with an underscore; the
+		 * line above it in its own usage text is `set_active {a,b}`. A command
+		 * line copied out of spd_dump's documentation has to run unchanged. */
+		{ "set_active", "set-active" },
 	};
 	size_t k;
 	for (k = 0; k < sizeof(tab) / sizeof(tab[0]); k++)
@@ -1050,9 +1055,19 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 	static char out[1024];
 	char name[64], dir[512];
 	const char *slash;
+	/* Every chip the tool ships loaders for, package-relative and from the
+	 * working directory. The stub is named after its address, so the same
+	 * name never appears under two chips. It used to be ums9230 only, which
+	 * made a line that named just the address abort on sc9863a and ums512:
+	 * the menu now passes the path it resolved, and this is the fallback for
+	 * a hand-typed command line. */
 	const char *rel[] = {
 		"%s/fdl/ums9230/%s",
+		"%s/fdl/ums512/%s",
+		"%s/fdl/sc9863a/%s",
 		"%s/../fdl/ums9230/%s",
+		"%s/../fdl/ums512/%s",
+		"%s/../fdl/sc9863a/%s",
 		NULL
 	};
 	int k;
@@ -1071,9 +1086,12 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 				return out;
 		}
 	}
-	snprintf(out, sizeof(out), "fdl/ums9230/%s", name);
-	if (access(out, R_OK) == 0)
-		return out;
+	for (k = 0; k < 3; k++) {
+		static const char *socs[] = { "ums9230", "ums512", "sc9863a" };
+		snprintf(out, sizeof(out), "fdl/%s/%s", socs[k], name);
+		if (access(out, R_OK) == 0)
+			return out;
+	}
 	snprintf(out, sizeof(out), "%s", name);
 	if (access(out, R_OK) == 0)
 		return out;
@@ -1399,7 +1417,7 @@ int main(int argc, char **argv)
 			if (!file || access(file, R_OK) != 0) {
 				fprintf(stderr,
 					"exec_addr 0x%x: custom_exec_no_verify_%x.bin not found%s%s\n"
-					"  expected next to spdhost in fdl/ums9230/ (or pass FILE).\n"
+					"  expected next to spdhost in fdl/<soc>/ (or pass FILE).\n"
 					"  menu.sh: SPDHOST_EXEC_ADDR=0 disables exec_addr.\n",
 					(unsigned)ea, (unsigned)ea,
 					file ? ": " : "", file ? file : "");

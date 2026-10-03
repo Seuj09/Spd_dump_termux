@@ -1021,7 +1021,16 @@ exec_addr_value() {
 
 # custom_exec_no_verify_<hex>.bin for exec_addr, same name spdhost looks up.
 # Fail here, before the plug-in wait, when the stub is not on disk.
-exec_stub_present() {
+# Resolve the exec stub for an address and print its path on stdout.
+#
+# The caller has to pass the result to spdhost as exec_addr's FILE. The file
+# is named after the address, so searching by name finds the right one for any
+# chip -- but spdhost's own default lookup only looks in fdl/ums9230/
+# (src/main.c find_exec_file), so on sc9863a and ums512 a session that named
+# only the address aborted with "custom_exec_no_verify_4ee8.bin not found"
+# before it opened the device. Every session goes through run_session, so
+# naming the file there is what makes the other two chips work.
+exec_stub_path() {
 	local ea=$1 hex name d
 	local -a places=()
 	hex=$(printf '%x' "$((ea))" 2>/dev/null) || return 1
@@ -1044,16 +1053,23 @@ exec_stub_present() {
 		places+=("$(dirname "${RUNNER[0]}")/../fdl/ums9230/$name")
 	fi
 	for d in "${places[@]}"; do
-		[[ -f $d ]] && return 0
+		if [[ -f $d ]]; then
+			printf '%s\n' "$d"
+			return 0
+		fi
 	done
 	echo "missing $name for exec_addr $ea." >&2
-	echo "Put it in fdl/ums9230/, or set SPDHOST_EXEC_ADDR=0 to use BSL EXEC." >&2
+	echo "Put it in fdl/${SOC:-ums9230}/, or set SPDHOST_EXEC_ADDR=0 to use BSL EXEC." >&2
 	return 1
 }
 
+# The check on its own, for callers that only want "is it there?" (hex mode,
+# the package test): the path goes to /dev/null, the guidance still shows.
+exec_stub_present() { exec_stub_path "$@" >/dev/null; }
+
 run_session() {
 	local -a prefix=(--timeout "${SPDHOST_TIMEOUT:-3000}")
-	local ea
+	local ea stub
 	if [[ ${SPDHOST_VERBOSE:-} == 1 ]]; then
 		prefix+=(--verbose)
 	fi
@@ -1066,12 +1082,14 @@ run_session() {
 		prefix+=("$1")
 		shift
 	done
-	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it.
+	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it,
+	# with the stub's own path. spdhost's default lookup only knows
+	# fdl/ums9230/, so naming the file is what lets sc9863a and ums512 run.
 	if [[ ${1:-} == fdl ]]; then
 		ea=$(exec_addr_value) || ea=
 		if [[ -n $ea ]]; then
-			exec_stub_present "$ea" || return 1
-			set -- exec_addr "$ea" "$@"
+			stub=$(exec_stub_path "$ea") || return 1
+			set -- exec_addr "$ea" "$stub" "$@"
 		fi
 	fi
 	# spdhost leaves partition_<unixtime>.xml behind every time it reads the
@@ -2299,7 +2317,12 @@ reboot_mode() {
 				return
 			fi
 			ready || { pause; return; }
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset
+			# An unchecked reset reads as success: the user unplugs a phone
+			# that is still sitting in download mode.
+			if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" reset; then
+				echo "The reset command failed. The phone is still in download mode."
+				echo "Unplug and re-plug it, then try again."
+			fi
 			;;
 		2)
 			echo "Writes 2048-byte recovery BCB to misc via reboot-recovery, then reset."
@@ -2325,7 +2348,10 @@ reboot_mode() {
 				return
 			fi
 			ready || { pause; return; }
-			run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
+			if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off; then
+				echo "The power-off command failed. The phone is still in download mode"
+				echo "and its battery is still draining; unplug it to leave that state."
+			fi
 			;;
 		5)
 			wipe_userdata_action || { pause; return; }
@@ -2702,7 +2728,17 @@ repartition_menu() {
 			partition-list "$out" "$BOOT_AFTER" || return 1
 		echo
 		echo "Wrote $out. Edit a copy of it, then run this option again and give"
-		echo "that path. Nothing was sent to the phone: this only read the table."
+		echo "that path. The table itself was only read; the partition map is unchanged."
+		# The ending is not a read: the release menu appends its bootmode to the
+		# dump line too, and reboot-recovery/reboot-fastboot add a 2048-byte BCB
+		# write to misc after the table is read. Saying "nothing was sent" here
+		# was simply untrue whenever the user had picked one of those endings.
+		case $BOOT_AFTER in
+			reboot-recovery|reboot-fastboot)
+				echo "The ending is $BOOT_AFTER, so spdhost also wrote the 2048-byte"
+				echo "BCB to misc and the phone is rebooting. Only the map is untouched."
+				;;
+		esac
 		return 0
 	fi
 	repartition_xml_preview "$xml" || return 1
@@ -2886,7 +2922,12 @@ hex_mode_menu() {
 # legacy algorithm is the right answer, so offer it instead of guessing which
 # SoC generation the user has.
 unlock_make_spl_unlock() {
-	local work=$1 spl=$2 out=$work/spl-unlock.bin bin err rc reply legacy
+	# `out` is built from `work` on the next line rather than on this one:
+	# bash expands every word of a `local` before it assigns any of them, so
+	# `local work=$1 out=$work/...` would read `work` while it is still unset
+	# and menu.sh runs under `set -u`. That aborted the whole unlock.
+	local work=$1 spl=$2 out bin err rc reply legacy
+	out=$work/spl-unlock.bin
 
 	if spdhost_has_image_tools; then
 		bin=$(resolve_spdhost_bin)
@@ -3079,9 +3120,23 @@ unlock_bootloader_menu() {
 	echo "spdhost asks you to type yes for each of those writes."
 	pause || return 1
 	ready || return 1
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+	# This is the write that makes the phone bootable again: splloader is still
+	# erased from the session above. Its failure used to fall out of the case
+	# arm unchecked, so the menu moved on with the phone unbootable and said
+	# nothing. Say it loudly instead, and point at the two files that fix it.
+	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" \
-		write-part splloader "$spl" write-part uboot "$uboot" reset
+		write-part splloader "$spl" write-part uboot "$uboot" reset; then
+		echo
+		echo "RESTORE FAILED. splloader is still erased and the phone will not boot."
+		echo "Do not unplug. Keep it in download mode and run this session again"
+		echo "until it succeeds; the backups are still on disk:"
+		echo "  $spl"
+		echo "  $uboot"
+		echo "spdhost writes an image only after you type yes, so a lost USB"
+		echo "connection or an aborted prompt is the usual cause, not bad files."
+		return 1
+	fi
 }
 
 unlock_pick_uboot() {
@@ -3425,7 +3480,10 @@ extra_menu() {
 			need_loaders || return
 			if confirm_action "type yes to power off: "; then
 				ready || return
-				run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off
+				if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" power-off; then
+					echo "The power-off command failed. The phone is still in download mode"
+					echo "and its battery is still draining; unplug it to leave that state."
+				fi
 			fi
 			;;
 		4) verity_menu ;;
