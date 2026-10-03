@@ -41,7 +41,9 @@ FDL2_ADDR_DEFAULT=0x9efffe00
 # SPDHOST_EXEC_ADDR=0 (or off) disables; any 0x... overrides. Also EXEC_ADDR=
 # in the menu config. Environment wins over config.
 EXEC_ADDR_DEFAULT=0x65015f08
-# Release menu "hex mode 2" for ums9230. The stub is not shipped here.
+# Release menu "hex mode 2" for ums9230. Both stubs ship (fdl/ums9230/
+# custom_exec_no_verify_65015f08.bin and _65015f48.bin, byte-identical to the
+# release package's copies); menu [9] switches between them.
 EXEC_ADDR_ALT=0x65015f48
 EXEC_ADDR=""
 # Images named <partition>.img (release menu "Pasang Partisi" / input/).

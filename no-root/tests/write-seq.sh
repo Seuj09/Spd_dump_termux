@@ -164,6 +164,22 @@ MOCK_PTABLE=$tmp/pt-spl sh splok parts ptspl-out.txt write-part splloader bigspl
 check "splloader write uses the live row, not the 256KiB dump size (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q '730070006c006c006f006100640065007200' sh_splok.seq && ! grep -q 'nothing sent' sh_splok.log"
 
+# A mid-partition refusal: the loader takes the first chunk and NACKs the
+# second. spd_dump's load_partition breaks out of its loop and STILL sends
+# END_DATA; stopping without it leaves the loader waiting for the rest of a
+# partition we have abandoned. The loader lets go after the refused chunk, so
+# the only frame after it may be that END_DATA.
+dd if=/dev/zero bs=9000 count=1 status=none | tr '\0' 'M' > mid.img
+sd wmid skip_confirm 1 partition_list p.xml w boot_a mid.img
+MOCK_FAIL_WRITE_MID=boot_a sh wmid parts pt.txt write-part boot_a mid.img; shrc=$?
+wtail() { awk -v p="$2" '$1=="SEQ"&&$2=="01"&&index($4,p){on=1} on' "$1"; }
+wtail sd_wmid.seq 62006f006f0074005f006100 | tail -1 > a_wmid
+wtail sh_wmid.seq 62006f006f0074005f006100 > b_wmid
+check "mid-write refusal: END_DATA still sent, nothing after it (rc $shrc)" \
+	bash -c "[ $shrc != 0 ] && grep -q 'write response 0x0082 at offset 4096' sh_wmid.log &&
+		tail -1 b_wmid | grep -q '^SEQ 03 ' && [ \$(grep -c '^SEQ 02 ' b_wmid) = 2 ] &&
+		[ -s a_wmid ] && [ \"\$(cut -d' ' -f1-2 a_wmid)\" = \"\$(cut -d' ' -f1-2 <(tail -1 b_wmid))\" ]"
+
 # super without a metadata row must not erase after the super write.
 grep -v '^metadata ' pt > pt-nometa
 mkdir -p nometa

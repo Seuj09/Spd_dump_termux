@@ -9,6 +9,9 @@
  *   MOCK_FAIL_START=P READ_START of P is NACKed.
  *   MOCK_ZERO=P       partition P reads as zeros (fast >4 GiB test).
  *   MOCK_FAIL_WRITE=P START_DATA of partition P is NACKed.
+ *   MOCK_FAIL_WRITE_MID=P  2nd write MIDST_DATA of partition P is NACKed
+ *                     (the transfer is abandoned mid-partition, like a real
+ *                     loader that refuses the rest).
  *   MOCK_MISC_DROPWRITE=1  misc writes are ACKed but not stored (read-back test).
  *   MOCK_MISC_OUT=F   (misc is always a live 1 MiB buffer) (partition writes land in it,
  *                     later reads see them); written to F after each END_DATA
@@ -36,7 +39,7 @@ static uint64_t cur_size;
 static int connects;
 static int midst_count;
 static uint8_t *miscmem; static uint64_t misclen;
-static char wr_part[40]; static uint64_t wr_off, wr_size; static int wr_on;
+static char wr_part[40]; static uint64_t wr_off, wr_size; static int wr_on; static int wmid_count;
 static void misc_init(void);
 static void misc_save(void)
 { const char *f = getenv("MOCK_MISC_OUT"); FILE *o; if (!f || !miscmem) return;
@@ -166,14 +169,19 @@ static void log_out(const uint8_t *buf, int len)
 	case 0x12: if (!strcmp(cur_part, "misc")) misc_save(); make_reply(0x80, NULL, 0, crc); return;
 	case 0x01: if (plen >= 76) { /* partition START_DATA: name[36]wchar + size lo (+hi) */
 		char nm[40]; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;
-		strcpy(wr_part, nm); wr_off = 0; wr_size = le32(raw + 4 + 72); wr_on = 1;
+		strcpy(wr_part, nm); wr_off = 0; wr_size = le32(raw + 4 + 72); wr_on = 1; wmid_count = 0;
 		/* 88-byte START is a 64-bit size. 80-byte START is an NV write:
 		 * size plus a checksum, not a high size word. */
 		if (plen >= 88) wr_size |= (uint64_t)le32(raw + 4 + 76) << 32;
 		if (streq_env("MOCK_FAIL_WRITE", nm) || !part_size(nm) || wr_size > part_size(nm)) { wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
 		}
 		make_reply(0x80, NULL, 0, crc); return;
-	case 0x02: if (wr_on && !strcmp(wr_part, "misc") && !getenv("MOCK_MISC_DROPWRITE")) { misc_init();
+	case 0x02: if (wr_on && ++wmid_count == 2 && streq_env("MOCK_FAIL_WRITE_MID", wr_part)) {
+			/* Mid-partition refusal: the loader takes no more data. The
+			 * client must abandon the transfer the way spd_dump's
+			 * load_partition does, END_DATA included. */
+			wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
+		if (wr_on && !strcmp(wr_part, "misc") && !getenv("MOCK_MISC_DROPWRITE")) { misc_init();
 		if (miscmem && wr_off + plen <= misclen) memcpy(miscmem + wr_off, raw + 4, plen); }
 		if (wr_on) wr_off += plen;
 		make_reply(0x80, NULL, 0, crc); return;

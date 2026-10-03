@@ -1155,8 +1155,14 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	fprintf(stderr, "write %s: %llu bytes from %s\n", name, (unsigned long long)len, path);
 
 	select_part(io, name, len, BSL_CMD_START_DATA);
-	if (spd_check_ok(io))
-		exit(1);
+	if (spd_check_ok(io)) {
+		/* spd_dump's load_partition closes the file and returns on a
+		 * refused START -- no END_DATA, since the loader never entered
+		 * the transfer. Returning instead of exiting lets the caller
+		 * report this partition and stop cleanly. */
+		fclose(fi);
+		return -1;
+	}
 	for (off = 0; off < len; ) {
 		uint64_t left = len - off;
 		size_t n = left > (uint64_t)step ? (size_t)step : (size_t)left;
@@ -1180,16 +1186,29 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 				die("device reset during write; this write was not resumed");
 		}
 		if (spd_type(io) != BSL_REP_ACK) {
+			/* spd_dump's load_partition breaks out of the loop here
+			 * and still sends END_DATA, so the loader is not left
+			 * mid-transfer waiting for the rest of a partition we
+			 * have abandoned. Match that traffic, then report the
+			 * failure instead of ending the process: the caller
+			 * decides, and the loader is left in a clean state. */
 			fprintf(stderr, "write response 0x%04x at offset %llu\n",
 				spd_type(io), (unsigned long long)off);
-			exit(1);
+			fclose(fi);
+			spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+			(void)spd_check_ok(io);
+			return -1;
 		}
 		off += n;
 	}
 	fclose(fi);
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
-	if (spd_check_ok(io))
-		exit(1);
+	if (spd_check_ok(io)) {
+		/* spd_dump only omits its "Write Part Done" line here and carries
+		 * on. Report the failure (every byte did get sent, so the caller
+		 * may still want to verify) without killing the process. */
+		return -1;
+	}
 	return 0;
 }
 
@@ -1211,8 +1230,11 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 	fprintf(stderr, "write %s: %zu bytes from buffer\n", name, len);
 
 	select_part(io, name, (uint64_t)len, BSL_CMD_START_DATA);
-	if (spd_check_ok(io))
-		exit(1);
+	if (spd_check_ok(io)) {
+		/* As in spd_write_part: the reference returns without END_DATA
+		 * when the loader refuses the START. */
+		return -1;
+	}
 	for (off = 0; off < (uint64_t)len; ) {
 		uint64_t left = (uint64_t)len - off;
 		size_t n = left > (uint64_t)step ? (size_t)step : (size_t)left;
@@ -1233,15 +1255,21 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 				die("device reset during write; this write was not resumed");
 		}
 		if (spd_type(io) != BSL_REP_ACK) {
+			/* As in spd_write_part: break like spd_dump's
+			 * load_partition, still send END_DATA, then fail. */
 			fprintf(stderr, "write response 0x%04x at offset %llu\n",
 				spd_type(io), (unsigned long long)off);
-			exit(1);
+			spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+			(void)spd_check_ok(io);
+			return -1;
 		}
 		off += n;
 	}
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
-	if (spd_check_ok(io))
-		exit(1);
+	if (spd_check_ok(io)) {
+		/* Same as spd_write_part: fail, but let the caller decide. */
+		return -1;
+	}
 	return 0;
 }
 
@@ -1413,8 +1441,13 @@ int spd_write_nv(struct spd *io, const char *name, const char *path)
 				die("device reset during write; this write was not resumed");
 		}
 		if (spd_type(io) != BSL_REP_ACK) {
+			/* spd_dump's load_nv_partition breaks and still sends
+			 * END_DATA after a non-ACK; returning here without it
+			 * left the loader mid-transfer for the next command. */
 			fprintf(stderr, "write nv response 0x%04x at offset %zu\n", spd_type(io), off);
 			free(mem);
+			spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+			(void)spd_check_ok(io);
 			return -1;
 		}
 		off += n;
