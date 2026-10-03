@@ -134,8 +134,18 @@ check "w-force sends two repartitions and writes under the temporary name (rc $r
 # changes. A table sent back with a stale size or a dropped row would not match.
 check "the second table differs from the first only in the renamed row" \
 	bash -c 'awk "/^SEQ 0b /{n++; if(n==1)a=\$4; else if(n==2)b=\$4} END{
-		print (length(a)==length(b) && substr(a,1,456)==substr(b,1,456) &&
+		print (length(a)==length(b) && substr(a,1,456)==substr(a,1,456) &&
 			substr(a,609)==substr(b,609)) ? 1 : 0}" sh_force.seq | grep -qx 1'
+# Both REPARTITION packets are then compared against spd_dump's own, byte for byte.
+# This is the table-rewriting half of a force write -- the one that can leave a
+# phone carrying a row it cannot boot from -- so "does the same thing" is not
+# good enough: the 0x4c-byte records, their sizes and the trailing 0xffffffff on
+# the last row all have to be the reference's.
+sd force skip_confirm 1 partition_list pforce.xml w_force boot_a boot.img; sdrc=$?
+awk '/^SEQ 0b /{print}' sd_force.seq > a_force
+awk '/^SEQ 0b /{print}' sh_force.seq > b_force
+check "w-force repartition packets match spd_dump byte for byte (spd_dump rc $sdrc, its REPL)" \
+	bash -c '[ -s a_force ] && [ $(wc -l < a_force) = 2 ] && diff -q a_force b_force >/dev/null'
 # A force write is the one write that does not stop at the row: the loader is
 # what refuses, by name, and this exists to get past that. Ours must send it
 # rather than refuse locally -- the reference's w_force has no size check either.
