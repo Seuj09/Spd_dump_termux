@@ -340,17 +340,14 @@ static const char *const preset_resign[] = {
  * NAME_b for the live slot (so `boot` finds `boot_a` on a slot-a phone). OUT
  * (>= 40 bytes) gets the canonical table name, *SIZE the byte size.
  * 0 = found, -1 = not in the table, -2 = no table yet.
- * The slot is read from misc once per connection and cached: a script calling
- * this in a loop should not pay a misc read per call. */
+ * The slot is read from misc on every call, as the reference does. Caching it
+ * per connection was wrong as soon as anything in the same process rewrote
+ * misc -- `parts set-active b check-part boot` answered with the old slot's
+ * row -- and there is nothing to save: read-part and check-part each resolve
+ * once, so no caller resolves in a loop. */
 int spd_resolve_part(struct spd *io, const char *name, char *out, size_t cap, uint64_t *size)
 {
-	static struct spd *slot_io;
-	static int slot;
-	if (slot_io != io) {
-		slot_io = io;
-		slot = spd_active_slot(io);
-	}
-	return spd_lookup_part(io, name, slot, out, cap, size);
+	return spd_lookup_part(io, name, spd_active_slot(io), out, cap, size);
 }
 
 /* check-part NAME: size in bytes, 0 when the name is not in the live table.

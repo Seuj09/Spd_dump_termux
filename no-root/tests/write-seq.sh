@@ -83,6 +83,18 @@ sys.exit(0 if ok else 1)
 PY
 check "set-active a: both tools leave spd_dump's 32-byte slot block (rc $sdrc/$shrc)" test $? -eq 0
 
+# The slot a bare name resolves to is read from misc, so a command sequence that
+# changes the slot and then resolves again has to see the NEW one. Caching the
+# slot per connection answered the second resolve with the first slot's row,
+# which is the wrong partition for a read -- and would be for a write.
+sh slotflip parts pt.txt read-part boot 0 0x100 fa.bin set-active b read-part boot 0 0x100 fb.bin
+rc=$?
+# The resolved name is what spdhost logs for the read; the READ_PARTITION frame
+# carries it too, but the log states the resolution without unpacking a frame.
+grep -o 'read boot_[ab]:' sh_slotflip.log > slotflip.names
+check "slot change mid-session: boot resolves boot_a then boot_b (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \"\$(tr '\n' ' ' < slotflip.names)\" = 'read boot_a: read boot_b: ' ]"
+
 # write-parts: slot a image is sent, slot b is not, metadata erased when super is present.
 mkdir -p imgs
 printf 'A' > imgs/boot_a.img
