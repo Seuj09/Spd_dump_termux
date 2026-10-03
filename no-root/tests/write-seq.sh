@@ -75,24 +75,30 @@ check "repartition packet matches spd_dump (rc $sdrc/$shrc)" \
 python3 - << 'PY'
 open('grow.xml','w').write(
 '''<Partitions>
-    <Partition id="metadata" size="8"/>
+    <Partition id="metadata" size="2048"/>
     <Partition id="userdata" size="0xffffffff"/>
     <Partition id="newpart" size="2048"/>
 </Partitions>
 ''')
 PY
 printf 'N' > newpart.img
-# metadata is 1 MiB in pt; the XML grows it to 8 MiB, so a 2 MiB file only fits
-# under the new table. The mock refuses the START (its table still says 1 MiB),
-# but the frame has to be sent -- with the stale table it never was.
+# metadata is 1 MiB in pt; the XML grows it to 2048 units (2 MiB), the size of
+# grow.img. The mock applies the repartition it is sent, so the write has to
+# complete -- the frame and the device's table both have to agree. The same file
+# under the stale table is refused here, which is what makes the growth the thing
+# that allows it and not some other difference.
 head -c 2097152 /dev/zero | tr '\0' 'G' > grow.img
+sh old parts pt.txt write-part metadata grow.img; rc=$?
+check "the same file is refused before the repartition, so the growth is what fits it (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_old.log &&
+		! grep -q 'write metadata: 2097152 bytes from' sh_old.log"
 sh grow parts pt.txt repartition grow.xml write-part metadata grow.img; rc=$?
 check "a write after a repartition uses the new size, not the old one (rc $rc)" \
-	bash -c "[ $rc != 0 ] && grep -q 'write metadata: 2097152 bytes' sh_grow.log &&
-		! grep -q 'nothing sent' sh_grow.log"
+	bash -c "[ $rc = 0 ] && grep -q 'write metadata: 2097152 bytes' sh_grow.log &&
+		grep -qE '^SEQ 01 len=76 ' sh_grow.seq"
 sh add parts pt.txt repartition grow.xml write-part newpart newpart.img; rc=$?
 check "a partition added by the repartition resolves in the same session (rc $rc)" \
-	bash -c "[ $rc != 0 ] && grep -q 'write newpart: ' sh_add.log &&
+	bash -c "[ $rc = 0 ] && grep -q 'write newpart: ' sh_add.log &&
 		! grep -q 'not in the live partition table' sh_add.log"
 
 # spd_dump hands scan_xml_partitions 0xffff as a BYTE budget and then overruns
@@ -112,18 +118,95 @@ check "863 entries: refused before sending anything, at the frame limit (rc $rc)
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_n863.seq &&
 		grep -q 'more than 862' sh_n863.log"
 
+# spd_dump's w_force (spd_dump.c ~1126, load_partition_force common.c ~1302):
+# rename the target row to "w_force" in a temporary table, write to that name,
+# then send the original table back. Two repartitions around one write, and the
+# row has to come back -- a phone left with a "w_force" row has no name to write
+# its own partition with. The mock applies each table it is sent, so the write
+# only reaches the device if the temporary table really was sent first.
+sh force parts pt.txt w-force boot_a boot.img; rc=$?
+check "w-force sends two repartitions and writes under the temporary name (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(grep -cE '^SEQ 0b ' sh_force.seq) = 2 ] &&
+		grep -qE '^SEQ 01 len=76 77005f0066006f00720063006500' sh_force.seq &&
+		grep -q 'w-force boot_a: done, table restored' sh_force.log"
+# The rename is the only difference between the two tables: the 0x4c-byte record
+# for boot_a (row 4, so hex chars 457..608 of the payload) is the one field that
+# changes. A table sent back with a stale size or a dropped row would not match.
+check "the second table differs from the first only in the renamed row" \
+	bash -c 'awk "/^SEQ 0b /{n++; if(n==1)a=\$4; else if(n==2)b=\$4} END{
+		print (length(a)==length(b) && substr(a,1,456)==substr(b,1,456) &&
+			substr(a,609)==substr(b,609)) ? 1 : 0}" sh_force.seq | grep -qx 1'
+# A force write is the one write that does not stop at the row: the loader is
+# what refuses, by name, and this exists to get past that. Ours must send it
+# rather than refuse locally -- the reference's w_force has no size check either.
+head -c 8388608 /dev/zero | tr '\0' 'F' > over.img
+# boot_a is 1 unit here, and the 1 drags spd_dump's divisor to 0, so the unit is
+# MiB and the row is 1 MiB. An 8 MiB image is past it.
+printf '%s\n' 'boot_a 1' 'big 8192' > overpt
+MOCK_PTABLE=$tmp/overpt sh over parts overpt w-force boot_a over.img; rc=$?
+check "w-force sends a file past the row's size instead of refusing it (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'w-force boot_a: WARNING the file is 8388608 bytes' sh_over.log &&
+		[ \$(grep -cE '^SEQ 0b ' sh_over.seq) = 2 ] && grep -q 'table is back to normal' sh_over.log"
+MOCK_PTABLE=$tmp/overpt sh over2 parts overpt write-part boot_a over.img; rc=$?
+check "the same file through write-part is refused before anything is sent (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_over2.log &&
+		! grep -q 'write boot_a: 8388608 bytes from' sh_over2.log"
+# splloader is the reference's own blacklist (spd_dump.c ~1139) and misc keeps our
+# backup-path rule. Both must refuse before the first repartition.
+printf '%s\n' 'splloader 256' 'boot_a 4096' > splpt
+MOCK_PTABLE=$tmp/splpt sh fspl parts splpt w-force splloader boot.img; rc=$?
+check "w-force refuses splloader before sending anything (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_fspl.seq &&
+		grep -q 'splloader (the reference blacklists it)' sh_fspl.log"
+sh fmisc parts pt.txt w-force misc boot.img; rc=$?
+check "w-force refuses misc before sending anything (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_fmisc.seq &&
+		grep -q 'never force-written' sh_fmisc.log"
+sh fmiss parts pt.txt w-force nosuch boot.img; rc=$?
+check "w-force on a name that is not in the table sends nothing (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_fmiss.seq &&
+		grep -q 'not in the live partition table' sh_fmiss.log"
+
 # The XML repartition reads is the XML spd_dump's partition_list writes, and now
 # the XML partition-list writes too: dumping the table gives a starting point
 # that is accepted back. The two writers must agree byte for byte, so this
 # compares ours against the vendored tool on the same device table.
-sh xml parts pt.txt partition-list ours.xml; shrc=$?
-sd xml2 skip_confirm 1 partition_list theirs.xml reset; sdrc=$?
+#
+# The table is a phone's own shape: 1 MiB rows like misc and sml_a, a 64 MiB
+# boot, a 5 GiB super. Those 1s are what make spd_dump's divisor land on 0, so
+# the wire unit is MiB and the XML carries each row's number unchanged. That is
+# the case the format exists for, and the one a 5 GB -> 10 GB super edit is
+# written against.
+printf '%s\n' 'prodnv 64' 'misc 1' 'sml_a 1' 'boot_a 64' 'super 5120' 'userdata 6144' > phonept
+MOCK_PTABLE=$tmp/phonept sh phone partition-list ours.xml; shrc=$?
+MOCK_PTABLE=$tmp/phonept sd xml2 skip_confirm 1 partition_list theirs.xml reset; sdrc=$?
 check "partition-list is byte-identical to spd_dump partition_list (rc $shrc/$sdrc)" \
 	bash -c '[ '"$shrc"' = 0 ] && [ '"$sdrc"' = 0 ] && cmp -s ours.xml theirs.xml'
-# And what we wrote must be accepted back by our own parser -- the round trip.
+check "a phone's MiB row is dumped as its own number, not shifted (super=5120)" \
+	bash -c 'grep -q "Partition id=\"super\" size=\"5120\"" ours.xml &&
+		grep -q "Partition id=\"misc\" size=\"1\"" ours.xml'
+# And what we wrote must be accepted back by our own parser -- the round trip,
+# with the numbers the device would see unchanged.
 sh round repartition ours.xml; rc=$?
-check "the dumped XML is accepted back by repartition (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q 'SEQ 0b len=' sh_round.seq"
+check "the dumped XML is accepted back by repartition, super still 5120 (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'SEQ 0b len=456 ' sh_round.seq &&
+		grep -q 'repartition: \[5\] super size=5120' sh_round.log"
+# spd_dump writes a fixed size >> 20 in its XML. On a table with no 1-unit row
+# the divisor is 10 instead, so that fixed shift reports every row a thousand
+# times too small -- a dump edited and fed back would shrink the whole layout.
+# Ours writes the unit the table was read in, so it is right on both.
+printf '%s\n' 'boot_a 4096' 'super 8192' 'userdata 6144' > unitspt
+MOCK_PTABLE=$tmp/unitspt sh unit partition-list ours10.xml; shrc=$?
+MOCK_PTABLE=$tmp/unitspt sd unit2 skip_confirm 1 partition_list theirs10.xml reset; sdrc=$?
+check "a table with no 1-unit row dumps in its own unit (rc $shrc/$sdrc)" \
+	bash -c "[ $shrc = 0 ] && grep -q 'Partition id=\"super\" size=\"8192\"' ours10.xml &&
+		grep -q 'Partition id=\"boot_a\" size=\"4096\"' ours10.xml"
+check "spd_dump's fixed shift shrinks the same table 1024x, which is why we do not copy it" \
+	bash -c "[ $sdrc = 0 ] && grep -q 'Partition id=\"super\" size=\"8\"' theirs10.xml &&
+		grep -q 'Partition id=\"boot_a\" size=\"4\"' theirs10.xml"
+sh unitrt repartition ours10.xml; rc=$?
+check "the same dump fed back keeps super at 8192, not 8 (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'repartition: \[2\] super size=8192' sh_unitrt.log"
 # A table whose unit is not KiB, and one holding a zero-size row. fetch_ptab's
 # divisor loop skips zero entries; spd_dump's own loop spins on one, which is
 # why ours is written to survive the table that would hang the reference.
@@ -135,6 +218,18 @@ printf '%s\n' 'zero 0' 'boot_a 4096' > zeropt
 MOCK_PTABLE=$tmp/zeropt sh zero partition-list zero.xml; rc=$?
 check "a zero-size row dumps as size=\"0\" instead of hanging (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"zero\" size=\"0\"' zero.xml"
+
+# The real table this feature exists for: a 73-row ums9230 layout whose super is
+# grown from the stock 5 GiB to 10 GiB (size 10000), the edit people actually
+# make. It is the shape a phone reports -- 1 MiB rows all over, ~0 on the last --
+# and it has to parse whole: 73 entries is 5548 bytes, well inside the 862 the
+# 16-bit frame allows, and none of its names or sizes may be dropped.
+cp "$root/tests/repart-super10g.xml" .
+sh real repartition repart-super10g.xml; rc=$?
+check "the real 5 GB -> 10 GB super table is sent whole (73 entries, rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -qE '^SEQ 0b len=5548 ' sh_real.seq &&
+		grep -q 'repartition: \[46\] super size=10000' sh_real.log &&
+		grep -q 'repartition: sent 73 entries' sh_real.log"
 
 rm -f misc.out
 MOCK_MISC_OUT=$tmp/misc_sd_slot.bin sd slot set_active a; sdrc=$?

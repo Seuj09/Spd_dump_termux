@@ -130,7 +130,7 @@ Three levels of gate, in increasing order:
 
 | Gate | Covers | Notes |
 |---|---|---|
-| typed `yes` (or `--yes`) | `write-part`, `write-files`, `write-parts*`, `repartition`, `set-active`, `reboot-*`, `reset`, `power-off` | `--yes` is for CLI automation |
+| typed `yes` (or `--yes`) | `write-part`, `w-force`, `write-files`, `write-parts*`, `repartition`, `set-active`, `reboot-*`, `reset`, `power-off` | `--yes` is for CLI automation |
 | the word `dangerous` (or `--dangerous`) | `verity`, `frp-reset`, `danger-erase` | `--yes` is **not** enough; without a terminal they send nothing unless `--dangerous` is passed |
 | `--confirm-token SHA256` | every misc write | authorizes one misc write whose exact bytes hash to that value |
 
@@ -192,9 +192,11 @@ Partition table and reads:
   menu does this and writes `backup/partition_bytes.txt`.
 - `partition-list [FILE]` — the same table as the XML `repartition` reads,
   byte for byte what spd_dump's `partition_list` writes for it: one
-  `<Partitions>` list, size in whole MiB, last row `0xffffffff` ("take the
-  rest"). This is how you get an XML to edit: dump the phone's own table and
-  change the rows you need. Dumping a table is not a write — no `yes`.
+  `<Partitions>` list, `size` in the table's own unit, last row `0xffffffff`
+  ("take the rest"). This is how you get an XML to edit: dump the phone's own
+  table and change the rows you need. On a phone those units are MiB — a 5 GiB
+  `super` reads `size="5120"`, and growing it to 10 GB means `size="10000"`.
+  Dumping a table is not a write — no `yes`.
 - `check-part NAME` — print the byte size from the live table (0 when the
   name is absent). Needs `parts`.
 - `read-part NAME OFF SIZE OUT` — `SIZE` may be `-` or `full` for the whole
@@ -217,7 +219,15 @@ Writes:
   `fixnv1` uses spd_dump's NV framing (checksum in the start packet);
   `calinv` is skipped; `runtimenv` is written where spd_dump erases it. On a
   non-A/B phone a same-size `NAME_bak` is written too. vbmeta flags are left
-  as they are in the file. There is no `w_force`.
+  as they are in the file.
+- `w-force NAME FILE` — spd_dump's `w_force`, CLI only: rename the target row
+  to `w_force` in a temporary table, write the image under that name, then
+  send the original table back. The write that gets through where a plain one
+  is refused, and the only write that does not stop at the row's size — the
+  loader checks a write against the partition names it knows, and a name it
+  has never seen is not checked. Refuses `splloader` (the reference's own
+  blacklist) and `misc`. Takes the same `yes` as `write-part`; the menu does
+  not offer it.
 - `write-parts DIR` — restore path: write `DIR/<name>.img` after `parts`,
   skip the inactive slot, then set the active slot when the device is A/B.
   `super.img` without `metadata.img` erases `metadata` when that row exists.

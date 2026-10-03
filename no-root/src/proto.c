@@ -1632,9 +1632,68 @@ int spd_repartition_xml(struct spd *io, const char *path)
 		io->ptab[i].name[k] = 0;
 		io->ptab[i].size = (uint64_t)rd32le(rec + 0x48) << 20;
 	}
+	/* The XML is MiB and so is the shift that turns it back into bytes, so an
+	 * echo of this table later (spd_repartition_echo, for a force write) uses
+	 * the same unit the XML did. fetch_ptab sets it from the wire instead. */
+	io->ptab_shift = 20;
 	free(buf);
 	fprintf(stderr, "repartition: sent %d entries; this session now resolves names and sizes against the new layout. `parts` re-reads the table from the device, which need not match it until the phone restarts.\n", n);
 	return 0;
+}
+
+/* Send the live table back to the device, with row IDX renamed to NEWNAME
+ * (IDX < 0 = send it unchanged). spd_dump load_partition_force() (common.c
+ * ~1302) does exactly this twice around a write: rename the target to
+ * "w_force", write to that name, send the original table again. The loader
+ * refuses a direct write to a name it knows -- its own list of partition
+ * names and sizes -- and a name it has never heard of is not checked.
+ *
+ * The unit is io->ptab_shift -- the shift the table was read with -- so a
+ * table the device gave us goes back exactly as it came. spd_dump writes a
+ * fixed size >> 20 there, which is only the same number when the shift the
+ * device's units produced was 20; on an ordinary table it is 10 (units are
+ * KiB), and the fixed >> 20 would send every row back a thousand times too
+ * small. Echoing with the read shift is the same number as the reference's in
+ * the one case they agree and the right number in the rest.
+ * 0 = accepted, -1 = refused. io->ptab is left alone either way. */
+int spd_repartition_echo(struct spd *io, int idx, const char *newname)
+{
+	uint8_t *buf, *w;
+	int i;
+	unsigned shift = io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u;
+
+	if (io->nparts < 1 || !io->ptab)
+		return -1;
+	if (idx >= io->nparts) {
+		fprintf(stderr, "repartition: row %d is past the %d-entry table\n", idx + 1, io->nparts);
+		return -1;
+	}
+	buf = calloc((size_t)io->nparts, 0x4c);
+	if (!buf)
+		die("out of memory");
+	w = buf;
+	for (i = 0; i < io->nparts; i++) {
+		const char *nm = (i == idx) ? newname : io->ptab[i].name;
+		unsigned k;
+		if (strlen(nm) > 35) {
+			fprintf(stderr, "repartition: name '%s' does not fit a table entry\n", nm);
+			free(buf);
+			return -1;
+		}
+		for (k = 0; nm[k]; k++)
+			w[k * 2] = (uint8_t)nm[k];
+		/* The last row is ~0, "take the rest", exactly as the XML path and
+		 * spd_dump's partition_list write it. A real byte size there would
+		 * cut the last partition to that value. */
+		if (i + 1 == io->nparts)
+			wr32le(w + 0x48, ~0u);
+		else
+			wr32le(w + 0x48, (uint32_t)(io->ptab[i].size >> shift));
+		w += 0x4c;
+	}
+	spd_encode(io, BSL_CMD_REPARTITION, buf, (size_t)io->nparts * 0x4c);
+	free(buf);
+	return spd_check_ok(io) ? -1 : 0;
 }
 
 /* Ask the device for its partition table and rebuild io->ptab from it.
@@ -1700,14 +1759,30 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 	return 0;
 }
 
-/* The table as the XML `repartition` accepts, byte-for-byte the format
- * spd_dump's partition_list writes for the same table: one <Partitions> list,
- * size in MiB, and the last row 0xffffffff. That last row is why a dumped
- * table can be fed straight back -- the device reads ~0 as "take the rest". */
+/* The table as the XML `repartition` accepts: one <Partitions> list, the size
+ * column in the table's own unit, and the last row 0xffffffff. That last row is
+ * why a dumped table can be fed straight back -- the device reads ~0 as "take
+ * the rest" -- and the size column is why the round trip is exact.
+ *
+ * The size column is the WIRE unit, not a byte count: spd_dump's repartition
+ * writes the XML value straight into the table without converting it
+ * (common.c scan_xml_partitions: WRITE32_LE(buf + 0x48, size)), so a row the
+ * user enlarged to 10000 arrives as 10000. On a phone whose rows are MiB -- a
+ * 5 GiB super is 5120 -- that is the number the XML has to carry.
+ *
+ * The divisor fetch_ptab read the table with is what turns bytes back into that
+ * unit. spd_dump writes a fixed size >> 20 here instead, which is the same
+ * number only when the divisor landed on 0. That is the usual case, because one
+ * 1 MiB partition anywhere (misc, sml_a, vbmeta_a) drags it there, and it is
+ * what this phone's own table does. Not every table has one: where it has none
+ * the divisor is 10 and the fixed shift writes every row a thousand times too
+ * small, so dumping a table and feeding it back would shrink the whole layout.
+ * The read shift is the same number in the usual case and the right one in the
+ * rest. A row the device reports as 0 is written as 0, as it read. */
 int spd_part_xml(struct spd *io, const char *out_path)
 {
 	const uint8_t *p;
-	unsigned count = 0, i;
+	unsigned count = 0, i, shift;
 	FILE *fo;
 
 	if (fetch_ptab(io, &p, &count))
@@ -1716,11 +1791,7 @@ int spd_part_xml(struct spd *io, const char *out_path)
 		fprintf(stderr, "partition-list: the device reported an empty table\n");
 		return -1;
 	}
-	/* The size column is whole MiB (spd_dump repartition does size << 20) and
-	 * every nonzero entry survives the round trip exactly: fetch_ptab picks
-	 * the shift so the smallest entry is >= 2^shift units, so bytes are never
-	 * under 1 MiB and never round to 0. A row the device reports as 0 is
-	 * written as 0, which is what it read -- the reference writes the same. */
+	shift = io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u;
 	fo = (!out_path || !strcmp(out_path, "-")) ? stdout : fopen(out_path, "w");
 	if (!fo) {
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
@@ -1732,7 +1803,7 @@ int spd_part_xml(struct spd *io, const char *out_path)
 		if (i + 1 == count)
 			fprintf(fo, "0x%x\"/>\n", ~0u);
 		else
-			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> 20));
+			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> shift));
 	}
 	/* No trailing newline: spd_dump writes the closing tag bare, and its
 	 * repartition reads either. Byte-identical is easier to assert. */

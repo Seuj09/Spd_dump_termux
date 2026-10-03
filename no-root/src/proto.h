@@ -80,6 +80,9 @@ int spd_nv_image_ok(const char *path);
 int spd_part_xml(struct spd *io, const char *out_path);
 /* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
 int spd_repartition_xml(struct spd *io, const char *path);
+/* Send the live table with row IDX renamed to NEWNAME (IDX < 0 = unchanged).
+ * spd_dump's load_partition_force() pair for a force write. 0 = accepted. */
+int spd_repartition_echo(struct spd *io, int idx, const char *newname);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
 /* Read [offset, offset+size) of NAME into MEM (exactly size bytes or error). */

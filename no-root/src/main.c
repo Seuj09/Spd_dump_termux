@@ -114,6 +114,11 @@ static void usage(void)
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
 		"                          the device is not A/B. Does not edit vbmeta.\n"
+		"  w-force NAME FILE       spd_dump w_force: rename the row to 'w_force'\n"
+		"                          in a temporary table, write, then send the\n"
+		"                          table back. Gets through where a plain write\n"
+		"                          is refused, and is the one write that does not\n"
+		"                          stop at the row's size. Never splloader or misc.\n"
 		"  write-parts DIR         restore: every image in DIR (NAME.img), skip\n"
 		"                          the inactive slot, then set the active slot.\n"
 		"                          write-parts-a / write-parts-b force that slot\n"
@@ -411,7 +416,8 @@ static int is_command(const char *s)
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "partition-list") == 0 || strcmp(s, "partition_list") == 0 ||
 		strcmp(s, "check-part") == 0 ||
-		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
+		strcmp(s, "write-part") == 0 || strcmp(s, "w-force") == 0 ||
+		strcmp(s, "w_force") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
 		strcmp(s, "danger-erase") == 0 ||
 		strcmp(s, "write-parts") == 0 || strcmp(s, "write-parts-a") == 0 ||
@@ -1277,6 +1283,19 @@ int main(int argc, char **argv)
 				if (spd_write_named(io, argv[i + 1], argv[i + 2], part_slot))
 					return 1;
 			}
+			i += 3;
+		} else if (strcmp(cmd, "w-force") == 0 || strcmp(cmd, "w_force") == 0) {
+			int part_slot;
+			need(argc, i, 2, "w-force");
+			need_fdl2(io, "w-force");
+			/* Same write confirm as write-part: this is still a write. It
+			 * is not in the menu (the reference menu has no w_force option
+			 * either); it is the CLI escape hatch for a write the loader
+			 * refuses by name. */
+			authorize_write(yes, "w-force", argv[i + 1], NULL, 0);
+			part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
+			if (spd_write_force(io, argv[i + 1], argv[i + 2], part_slot))
+				return 1;
 			i += 3;
 		} else if (strcmp(cmd, "write-parts") == 0 || strcmp(cmd, "write-parts-a") == 0 ||
 			strcmp(cmd, "write-parts-b") == 0 || strcmp(cmd, "write-files") == 0) {

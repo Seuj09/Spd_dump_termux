@@ -2646,6 +2646,7 @@ repartition_menu() {
 	echo "Size is MiB, and the last row is normally 0xffffffff (\"take the rest\")."
 	echo "If you do not have one, spdhost can write the phone's current table as a"
 	echo "starting point; edit that copy rather than writing one by hand."
+	echo "Any path works, e.g. $DUMP_DIR/repart.xml or one you keep in a subfolder."
 	read -r -p "Partition XML path, or 'new' to dump the current table first: " xml
 	if [[ -z ${xml:-} ]]; then
 		echo "Cancelled."

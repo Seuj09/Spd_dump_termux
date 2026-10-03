@@ -166,6 +166,23 @@ static void log_out(const uint8_t *buf, int len)
 			r[0x48] = t[k].kb; r[0x49] = t[k].kb >> 8; r[0x4a] = t[k].kb >> 16; r[0x4b] = t[k].kb >> 24; }
 		make_reply(0xba, data, k * 0x4c, crc); return; }
 		make_reply(0x80, NULL, 0, crc); return;
+	case 0x0b: { /* REPARTITION: the table the client sends becomes ours, so a
+	              * row it renamed is then known by the new name and a row it
+	              * added can be written. Without this the mock answered every
+	              * repartition with a bare ACK and kept its old names, which
+	              * is what a real loader does NOT do -- the whole reason
+	              * spd_dump's w_force renames a row before writing it. */
+		int k, j, n = plen / 0x4c;
+		if (n > 128) n = 128;
+		memset(tab, 0, sizeof(tab));
+		for (k = 0; k < n; k++) {
+			const uint8_t *r = raw + 4 + k * 0x4c;
+			for (j = 0; j < 36 && r[2 * j]; j++) tab[k].n[j] = (char)r[2 * j];
+			tab[k].n[j] = 0;
+			tab[k].kb = le32(r + 0x48);
+		}
+		ntab = n;
+		make_reply(0x80, NULL, 0, crc); return; }
 	case 0x12: if (!strcmp(cur_part, "misc")) misc_save(); make_reply(0x80, NULL, 0, crc); return;
 	case 0x01: if (plen >= 76) { /* partition START_DATA: name[36]wchar + size lo (+hi) */
 		char nm[40]; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;

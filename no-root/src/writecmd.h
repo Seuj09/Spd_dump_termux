@@ -28,6 +28,13 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
  * skipped (return 0). Does not write misc. vbmeta byte 0x7B is spd_verity. */
 int spd_write_named(struct spd *io, const char *name, const char *path, int slot);
 
+/* spd_dump w_force: rename the target row to "w_force" in a temporary table,
+ * write the image to that name, then send the original table back. The write
+ * that gets through where a plain one is refused, and the only one that does
+ * not refuse a file larger than the row. Refuses splloader and misc. The
+ * caller has already taken the write confirm. */
+int spd_write_force(struct spd *io, const char *name, const char *path, int slot);
+
 /* spd_dump dm_disable / dm_enable: one byte at offset 0x7B of the live
  * vbmeta (slot suffix when the unsuffixed name is absent). enable=0 writes
  * 0x01 (verity off). enable=1 writes 0x00 on each vbmeta_* that exists.

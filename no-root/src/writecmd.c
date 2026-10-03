@@ -166,6 +166,95 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	return spd_write_part(io, bak, path);
 }
 
+/* spd_dump's w_force: the write that gets through when a plain write does not.
+ *
+ * load_partition_force() (common.c ~1302) renames the target row to the
+ * literal "w_force" in a temporary table, sends that table, writes the image
+ * to the name "w_force", then sends the original table back. The reference
+ * does this on every `w` where a NAME_bak row exists, and exposes it directly
+ * as `w_force NAME FILE`.
+ *
+ * Why it works: the loader checks a write against the partition names it
+ * knows, so a name it has never seen is not checked. That is also why this is
+ * the one write that does not refuse a file larger than the row -- the row is
+ * not what stops it, so a file past the row's size is exactly the case this
+ * exists for. It is printed, not blocked, and never sent without a confirm.
+ *
+ * Two rows are refused outright. splloader is the reference's own blacklist
+ * (spd_dump.c ~1139); it is a raw offset rather than a table row, and a
+ * restore that fails midway would leave the phone with no row to write back.
+ * misc keeps our rule from spd_write_named(): it goes through the backup path
+ * with its own guards, rename or not.
+ *
+ * Returns 0 when the write ran and the original table was put back, -1
+ * otherwise. A failed restore is reported as such: the device is then left
+ * holding a table with a "w_force" row where the target used to be. */
+int spd_write_force(struct spd *io, const char *name, const char *path, int slot)
+{
+	char resolved[40];
+	uint64_t psz = 0, flen = 0;
+	int idx = -1, i, rc;
+
+	if (io->nparts <= 0) {
+		fprintf(stderr, "w-force %s: no partition table (run parts in this session first)\n", name);
+		return -1;
+	}
+	/* The row is looked up by name, so a numeric id has to resolve to the
+	 * row it names before the index search -- exactly as spd_write_named
+	 * does, and for the same reason: `w-force 5 FILE` must not rename row 5
+	 * when the table says row 5 is something else. SLOT is the active slot,
+	 * so `w-force boot FILE` on an A/B phone renames boot_a. */
+	if (spd_lookup_part(io, name, slot, resolved, sizeof(resolved), &psz)) {
+		fprintf(stderr, "w-force %s: not in the live partition table\n", name);
+		return -1;
+	}
+	for (i = 0; i < io->nparts; i++)
+		if (!strcmp(io->ptab[i].name, resolved)) {
+			idx = i;
+			break;
+		}
+	if (idx < 0) {
+		fprintf(stderr, "w-force %s: %s is not a table row\n", name, resolved);
+		return -1;
+	}
+	if (!strncmp(resolved, "splloader", 9) || !strcmp(resolved, "misc")) {
+		fprintf(stderr, "w-force %s: refused; splloader (the reference blacklists it) and misc"
+			" (its own backup path) are never force-written\n", resolved);
+		return -1;
+	}
+	if (file_len(path, &flen) || flen == 0) {
+		fprintf(stderr, "w-force %s: %s is missing or empty\n", resolved, path);
+		return -1;
+	}
+	fprintf(stderr, "w-force %s: renaming table row %d to 'w_force', writing %llu bytes, then"
+		" sending the table back\n", resolved, idx + 1, (unsigned long long)flen);
+	if (psz && flen > psz)
+		fprintf(stderr, "w-force %s: WARNING the file is %llu bytes and the row is %llu;"
+			" a force write does not stop at the row, so it can run into the next"
+			" partition\n", resolved, (unsigned long long)flen, (unsigned long long)psz);
+
+	if (spd_repartition_echo(io, idx, "w_force")) {
+		fprintf(stderr, "w-force %s: the device refused the temporary table; nothing written\n",
+			resolved);
+		return -1;
+	}
+	rc = spd_write_part(io, "w_force", path);
+	/* Back to the real name whether the write ran or not: the row is the
+	 * phone's, and leaving it renamed is worse than a failed write. */
+	if (spd_repartition_echo(io, idx, resolved)) {
+		fprintf(stderr, "w-force %s: FAILED to put the table back; the device now has a"
+			" 'w_force' row in place of %s. Re-send the table (repartition, or"
+			" partition-list then repartition) before using the phone.\n", resolved, resolved);
+		return -1;
+	}
+	if (rc) {
+		fprintf(stderr, "w-force %s: the write failed; the table is back to normal\n", resolved);
+		return -1;
+	}
+	fprintf(stderr, "w-force %s: done, table restored\n", resolved);
+	return 0;
+}
+
 struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n)
 {
 	DIR *dp;
