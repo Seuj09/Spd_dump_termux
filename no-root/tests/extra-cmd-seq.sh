@@ -206,6 +206,20 @@ check "loadexec after the first fdl: ignored on both, exec_addr unchanged" \
 		grep -q 'current exec_addr is 0x65015f08' sd_lx.log &&
 		grep -q 'current exec_addr is 0x65015f08' sh_lx.log"
 
+# spd_dump's `keep_charge {0,1}` (spd_dump.c:1285) turns off the KEEP_CHARGE packet
+# it otherwise sends after the FDL1 CONNECT (`keep_charge = 1` at spd_dump.c:155,
+# sent at :706). It only matters when the command precedes the `fdl` that starts
+# FDL1, which is where both tools read it. Frame type 0x13.
+ref kc0 keep_charge 0 "${F1[@]}" reset
+ours kc0 keep_charge 0 "${F1[@]}" reset
+ref kc1 "${F1[@]}" reset
+ours kc1 "${F1[@]}" reset
+check "keep_charge 0: neither tool sends the KEEP_CHARGE frame" \
+	bash -c "[ \$(grep -c '^SEQ 13 ' sd_kc0.seq) = 0 ] && [ \$(grep -c '^SEQ 13 ' sh_kc0.seq) = 0 ]"
+# The default is on, so the same run without the command must still send exactly one.
+check "keep_charge defaults on: one KEEP_CHARGE frame, on both" \
+	bash -c "[ \$(grep -c '^SEQ 13 ' sd_kc1.seq) = 1 ] && [ \$(grep -c '^SEQ 13 ' sh_kc1.seq) = 1 ]"
+
 echo
 echo "extra-cmd-seq: $pass passed, $fail failed"
 (( fail == 0 ))
