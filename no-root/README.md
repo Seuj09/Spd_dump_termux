@@ -374,6 +374,13 @@ Dangerous:
   byte spd_dump writes; it is **not** the AVB flag at `0x78`. The whole
   partition is read and written back, and a row that does not cover `0x7B`
   or is over 64MB is not written. Needs `parts`.
+  spd_dump writes it through its force-write path (`w_mem_to_part_offset` →
+  `load_partition_force`): a REPARTITION renaming the partition to `w_force`, a
+  write to that name, then the original table to put the name back. spdhost
+  writes the partition plainly — same bytes into the same partition, since the
+  image *is* that partition read back — so an interrupted run cannot leave the
+  phone carrying a `w_force` row. `w-force` is still there for an image that
+  really is larger than its table row.
 - `frp-reset OUT` — read all of `persist` (or `persist_a`/`persist_b` for
   the active slot) to OUT, check the size, then erase it. A failed or short
   read does not erase. Over 512MB is refused. Needs `parts`.
@@ -800,6 +807,17 @@ are the places where spdhost knowingly does something else:
   line 794). Transcode and the loader's raw-data mode are still *honoured* —
   they are read from `Da_Info` and acted on where the reference acts on them
   (`DISABLE_TRANSCODE` after FDL2) — they just cannot be toggled by hand.
+- **`--kick` and `--kickto N` are not ported.** spd_dump opens its diag port
+  (`boot_diag`/`cali_diag`/`dl_diag`) and writes a 10-byte mode-switch packet to
+  it (`ChangeMode`, common.c:2451) to move a phone that came up on a *diagnostic*
+  port into download mode. That is a hotplug-and-pick-a-device flow: it needs the
+  diag port's own VID/PID, which is not the BootROM's 1782:4d00, and under
+  `termux-usb` the device handed to the tool is the one the user already chose,
+  so there is no port for spdhost to switch. Put the phone in download mode by
+  hand (or with the vendor tool) and spdhost opens it as BootROM. `--wait` is
+  the same story one level up: `SPD_USB_WAIT` (default 90 s) is the wrapper's
+  wait for the device to appear, which is the whole of what `--wait` does before
+  the open loop.
 - **`erase_all` and `erase_part all` are not offered.** `spd_dump.c:1068,1088`
   send `erase_partition("all")` after a typed confirmation. spdhost refuses
   `all` in `erase-part` even with `--yes` or `--dangerous`; `danger-erase` is

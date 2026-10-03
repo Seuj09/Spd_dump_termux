@@ -457,6 +457,16 @@ check "verity 0 rewrites vbmeta byte 0x7b to 01 (rc $rc)" \
 MOCK_PTABLE=$tmp/pt-vb sh veron --dangerous parts ptv2.txt verity 1; rc=$?
 check "verity 1 writes 00 and skips missing vbmeta_* (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'DANGEROUS verity: vbmeta byte 0x7b: .* -> 00' sh_veron.log && grep -q 'skip vbmeta_system' sh_veron.log"
+# spd_dump patches byte 0x7b through its force-write path: w_mem_to_part_offset
+# calls load_partition_force, which sends a REPARTITION renaming the target to
+# `w_force`, writes THAT name, then sends the original table to put the name back
+# (verified frame by frame against the vendored build). spdhost writes the
+# partition plainly. The flash bytes are the same -- the image is the partition
+# read back, one byte changed -- and a run cut short in between cannot leave the
+# phone carrying a `w_force` row, which the reference's round trip can.
+check "verity writes plainly: a vbmeta START, no REPARTITION and no w_force row" \
+	bash -c "grep -q '^SEQ 01 .*760062006d00650074006100' sh_veron.seq &&
+		! grep -q '^SEQ 0b ' sh_veron.seq && ! grep -q '77005f0066006f0072006300' sh_veron.seq"
 sh vergate --dangerous parts pt.txt verity 0; rc=$?
 check "verity 0 with no vbmeta sends nothing (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_vergate.log && ! grep -q 'DANGEROUS verity:' sh_vergate.log"
