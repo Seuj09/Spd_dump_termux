@@ -299,9 +299,31 @@ Writes:
 - `write-part NAME FILE` — one partition, one file. `misc` accepts a
   2048-byte BCB or a file the size of the whole partition. A name containing
   `fixnv1` uses spd_dump's NV framing (checksum in the start packet);
-  `calinv` is skipped; `runtimenv` is written where spd_dump erases it. On a
-  non-A/B phone a same-size `NAME_bak` is written too. vbmeta flags are left
-  as they are in the file.
+  `calinv` is skipped; `runtimenv` is written where spd_dump erases it.
+  vbmeta flags are left as they are in the file.
+
+  On a non-A/B eMMC/UFS phone that has a `NAME_bak` row, plain `write-part`
+  is spd_dump's `load_partition_unify`, which is more than one write. It
+  reads the primary back first — the size that counts is the one the
+  **device** reports (`size0 = check_partition(io, name0, 1)`, common.c
+  2122), not the `NAME` row, which is why a table read and a burst of read
+  frames precede the write. Then it writes the primary through the same
+  rename `w-force` uses (`load_partition_force`, common.c 2126), and only if
+  the device's size and the `NAME_bak` row agree does it write the image a
+  second time under `NAME_bak`. The second copy is the one that boots when
+  the first is broken, so it is written even when the primary's write failed:
+  the reference's `load_partition_force` is `void` and its caller never looks
+  at the result (common.c 1321, 2126). spdhost keeps that behaviour and still
+  reports the failure, and the command still exits non-zero.
+
+  Two deliberate differences from the reference, both in the check that
+  decides whether to take that path at all. spd_dump's `get_partition_info`
+  scans for `NAME_bak` and then reads `ptable[i]` with `i == part_count` when
+  the name is missing (common.c 1589-1648) — an out-of-bounds read, so it
+  force-writes on garbage even with no `_bak` row. spdhost does not copy
+  that: no `_bak` row means a plain write. (The frame-level parity of the
+  path above is pinned in `tests/write-seq.sh`, including both REPARTITION
+  packets byte for byte against the vendored tool.)
 - `w-force NAME FILE` — spd_dump's `w_force`, CLI only: rename the target row
   to `w_force` in a temporary table, write the image under that name, then
   send the original table back. The write that gets through where a plain one

@@ -254,9 +254,19 @@ static void log_out(const uint8_t *buf, int len)
 		memset(tab, 0, sizeof(tab));
 		for (k = 0; k < n; k++) {
 			const uint8_t *r = raw + 4 + k * 0x4c;
+			uint32_t sz;
 			for (j = 0; j < 36 && r[2 * j]; j++) tab[k].n[j] = (char)r[2 * j];
 			tab[k].n[j] = 0;
-			tab[k].kb = le32(r + 0x48);
+			/* This size field is MiB, not KiB: load_partition_force writes
+			 * ptable[i].size >> 20 (common.c 1316), so a 4096 KiB row
+			 * arrives as 4. tab[] is KiB, like MOCK_PTABLE and the 0x2d
+			 * reply, so convert -- reading it as KiB made every renamed
+			 * row 1024x too small, and a write to it was then refused by
+			 * the size check above: the force trick could never complete.
+			 * ~0 means "the rest of the flash" and is kept as the
+			 * sentinel, which part_size turns into an unbounded size. */
+			sz = le32(r + 0x48);
+			tab[k].kb = (sz == 0xffffffffu) ? ~0ull : ((uint64_t)sz << 10);
 		}
 		ntab = n;
 		make_reply(0x80, NULL, 0, crc); return; }
