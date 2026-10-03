@@ -1064,6 +1064,13 @@ run_session() {
 			set -- exec_addr "$ea" "$@"
 		fi
 	fi
+	# spdhost leaves partition_<unixtime>.xml behind every time it reads the
+	# partition table, the way spd_dump does -- but into the folder we point it
+	# at, so it lands with the dumps instead of in whatever directory the menu
+	# ran from. That is the file a repartition edit is made from, and having it
+	# appear without asking is the point. SPDHOST_PART_XML_DIR= (empty) turns
+	# the copy off for a caller that does not want it.
+	local -x SPDHOST_PART_XML_DIR="${SPDHOST_PART_XML_DIR-$DUMP_DIR}"
 	echo "+ ${RUNNER[*]} ${prefix[*]} $*"
 	"${RUNNER[@]}" "${prefix[@]}" "$@"
 	local rc=$?
@@ -1654,6 +1661,11 @@ list_partitions_menu() {
 	fetch_parts_table || { pause; return; }
 	cls
 	show_parts_list "$(parts_bytes_path)"
+	echo
+	# The session above read the table, so spdhost also left it as the
+	# repartition XML in the dump folder -- the file option 8 edits a copy of.
+	echo "The same table was written as repartition XML to $DUMP_DIR"
+	echo "(partition_<unixtime>.xml). Copy and edit that for option 8."
 	pause
 }
 
@@ -2646,7 +2658,8 @@ repartition_menu() {
 	echo "Size is MiB, and the last row is normally 0xffffffff (\"take the rest\")."
 	echo "If you do not have one, spdhost can write the phone's current table as a"
 	echo "starting point; edit that copy rather than writing one by hand."
-	echo "Any path works, e.g. $DUMP_DIR/repart.xml or one you keep in a subfolder."
+	echo "Any path works, e.g. $DUMP_DIR/repart.xml or $DUMP_DIR/partition_<unixtime>.xml"
+	echo "(spdhost leaves that second one in the dump folder on every table read)."
 	read -r -p "Partition XML path, or 'new' to dump the current table first: " xml
 	if [[ -z ${xml:-} ]]; then
 		echo "Cancelled."

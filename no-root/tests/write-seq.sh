@@ -191,6 +191,52 @@ sh round repartition ours.xml; rc=$?
 check "the dumped XML is accepted back by repartition, super still 5120 (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'SEQ 0b len=456 ' sh_round.seq &&
 		grep -q 'repartition: \[5\] super size=5120' sh_round.log"
+# spd_dump writes partition_<unixtime>.xml (spd_dump.c:191) on every session
+# that reads the table, wherever it runs, so the XML a repartition edit starts
+# from is always there. spdhost writes the same file, but into a folder the
+# caller names -- the menu points that at the dump folder -- so the copy lands
+# with the dumps instead of in whatever directory the tool was started in.
+mkdir -p autoxml
+MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/autoxml sh auto parts pt_auto.txt; arc=$?
+autof=$(ls "$tmp"/autoxml/partition_*.xml 2>/dev/null | head -1)
+check "a table read leaves partition_<unixtime>.xml in SPDHOST_PART_XML_DIR (rc $arc)" \
+	bash -c "[ $arc = 0 ] && [ -n '$autof' ] &&
+		grep -qE '^partition xml: .*/partition_[0-9]+\.xml \(6 entries\)$' sh_auto.log"
+# The automatic copy and `partition-list` must be the same bytes, or editing
+# one and feeding it back would depend on which command produced it.
+check "the automatic copy is byte-identical to partition-list (ours.xml)" cmp -s "$autof" ours.xml
+# Two table reads in one run are one file, as in the reference: the name is
+# picked once per process, so `parts` then `partition-list` does not leave two.
+mkdir -p once
+MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/once \
+	sh once parts pt_once.txt partition-list once.xml; rc=$?
+n=$(ls "$tmp"/once/partition_*.xml 2>/dev/null | wc -l)
+check "two reads in one run leave one file, and the table was read twice (rc $rc, $n file)" \
+	bash -c "[ $rc = 0 ] && [ $n = 1 ] && [ -s once.xml ] &&
+		[ \$(grep -c '^parts: ' sh_once.log) = 2 ]"
+# Off unless asked for: an empty value means no copy, which is also what an
+# unset variable does, so no command grows a file nobody asked about.
+mkdir -p noxml
+MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR= sh offenv parts pt_off.txt
+MOCK_PTABLE=$tmp/phonept sh offunset parts pt_off2.txt
+check "no folder configured: no XML is written" \
+	bash -c "[ -z \"\$(ls noxml/partition_*.xml 2>/dev/null)\" ] &&
+		! grep -q '^partition xml:' sh_offenv.log && ! grep -q '^partition xml:' sh_offunset.log"
+# The reference does drop its copy in the working directory (the `sd` runs above
+# left one here), which is exactly why spdhost takes a folder instead: a tool
+# run from / should not write there, and the menu's dumps are in one place.
+check "spd_dump itself leaves partition_<unixtime>.xml in its cwd, as spd_dump.c:191 does" \
+	bash -c '[ -n "$(ls partition_*.xml 2>/dev/null)" ]'
+# The same folder as the flag, for a PC user driving the tool by hand. The flag
+# wins over the variable, so a caller can override what the menu exported.
+mkdir -p flagx envx
+MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/envx timeout 20 ./sh --usb-fd 7 --step 0x1000 \
+	--yes --part-xml "$tmp/flagx" exec_addr 0x65015f08 custom_exec_no_verify_65015f08.bin \
+	"${LOAD[@]}" parts pt_flag.txt 7</dev/null </dev/null >sh_flagx.log 2>&1
+frc=$?
+check "--part-xml DIR writes there and beats SPDHOST_PART_XML_DIR (rc $frc)" \
+	bash -c "[ $frc = 0 ] && [ -n \"\$(ls flagx/partition_*.xml 2>/dev/null)\" ] &&
+		[ -z \"\$(ls envx/partition_*.xml 2>/dev/null)\" ]"
 # spd_dump writes a fixed size >> 20 in its XML. On a table with no 1-unit row
 # the divisor is 10 instead, so that fixed shift reports every row a thousand
 # times too small -- a dump edited and fed back would shrink the whole layout.

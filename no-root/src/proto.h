@@ -39,6 +39,12 @@ struct spd {
 	struct spd_part { char name[37]; uint64_t size; } *ptab;
 	int nparts;
 	int ptab_shift;
+	/* spd_dump writes partition_<unixtime>.xml on every session that reads
+	 * the table (spd_dump.c:191 + the partition_list call sites), so the file
+	 * a repartition edit starts from is always there. When this names a
+	 * folder, so does spdhost; the menu points it at the dump folder.
+	 * NULL or "" turns the copy off. */
+	const char *part_xml_dir;
 };
 
 struct spd *spd_new(int verbose, int step);

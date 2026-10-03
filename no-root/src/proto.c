@@ -1696,6 +1696,82 @@ int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 	return spd_check_ok(io) ? -1 : 0;
 }
 
+/* The XML body spd_dump writes and reads back: one row per table entry, the
+ * size in the table's own unit, and the last row as 0xffffffff ("take the
+ * rest", which is what a table ends with). `partition-list` writes this to the
+ * file the user names and the automatic copy below writes the same bytes, so
+ * either one can be edited and handed to `repartition`. SHIFT turns the byte
+ * size fetch_ptab computed back into that unit (see spd_part_xml). */
+static void xml_body(FILE *fo, const struct spd *io, unsigned count, unsigned shift)
+{
+	unsigned i;
+
+	fprintf(fo, "<Partitions>\n");
+	for (i = 0; i < count; i++) {
+		fprintf(fo, "    <Partition id=\"%s\" size=\"", io->ptab[i].name);
+		if (i + 1 == count)
+			fprintf(fo, "0x%x\"/>\n", ~0u);
+		else
+			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> shift));
+	}
+	/* No trailing newline: the reference's own partition_list CLI writes the
+	 * closing tag bare (spd_dump.c ~1047), and its repartition reads either.
+	 * Byte-identical output is easier to assert. */
+	fprintf(fo, "</Partitions>");
+}
+
+/* spd_dump leaves partition_<unixtime>.xml (spd_dump.c:191) wherever it runs,
+ * on every session that reads the table, so a user always has the file a
+ * repartition edit is made from. spdhost writes the same file into
+ * io->part_xml_dir -- the menu points that at the dump folder, so it lands
+ * beside the dumps instead of in whatever directory the tool was started in.
+ *
+ * One name per process, as the reference picks its name once at startup: a
+ * session that reads the table twice (parts, then partition-list) rewrites its
+ * own copy rather than leaving two files. A failure is a warning and nothing
+ * more -- the file is a convenience, and losing it must not cost the dump or
+ * the write the user actually asked for. */
+static void part_xml_auto(struct spd *io, unsigned count)
+{
+	static char path[512];
+	static int named, warned;
+	FILE *fo;
+
+	if (!io->part_xml_dir || !io->part_xml_dir[0])
+		return;
+	if (!named) {
+		int n;
+
+		named = 1;
+		n = snprintf(path, sizeof(path), "%s/partition_%lld.xml",
+			io->part_xml_dir, (long long)time(NULL));
+		if (n < 0 || (size_t)n >= sizeof(path)) {
+			fprintf(stderr, "auto partition xml: %s/partition_<time>.xml is too long;"
+				" skipped (the session continues)\n", io->part_xml_dir);
+			path[0] = 0;
+			return;
+		}
+	}
+	if (!path[0])
+		return;
+	fo = fopen(path, "w");
+	if (!fo) {
+		if (!warned++)
+			fprintf(stderr, "auto partition xml: open %s: %s (the session continues)\n",
+				path, strerror(errno));
+		return;
+	}
+	xml_body(fo, io, count, io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u);
+	if (fclose(fo) != 0) {
+		if (!warned++)
+			fprintf(stderr, "auto partition xml: write %s: %s (the session continues)\n",
+				path, strerror(errno));
+		remove(path);
+		return;
+	}
+	fprintf(stderr, "partition xml: %s (%u entries)\n", path, count);
+}
+
 /* Ask the device for its partition table and rebuild io->ptab from it.
  * The raw payload and its entry count go back through the out-parameters.
  * 0 = ok, -1 = refused or
@@ -1756,6 +1832,10 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 		*count = n;
 	}
 	*raw = p;
+	/* Every read of the table leaves the XML behind, not just an explicit
+	 * `partition-list`: that is what the reference does, and it is the only
+	 * reason a user can edit a layout without asking for the dump first. */
+	part_xml_auto(io, *count);
 	return 0;
 }
 
@@ -1782,7 +1862,7 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 int spd_part_xml(struct spd *io, const char *out_path)
 {
 	const uint8_t *p;
-	unsigned count = 0, i, shift;
+	unsigned count = 0, shift;
 	FILE *fo;
 
 	if (fetch_ptab(io, &p, &count))
@@ -1797,17 +1877,7 @@ int spd_part_xml(struct spd *io, const char *out_path)
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
 		return -1;
 	}
-	fprintf(fo, "<Partitions>\n");
-	for (i = 0; i < count; i++) {
-		fprintf(fo, "    <Partition id=\"%s\" size=\"", io->ptab[i].name);
-		if (i + 1 == count)
-			fprintf(fo, "0x%x\"/>\n", ~0u);
-		else
-			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> shift));
-	}
-	/* No trailing newline: spd_dump writes the closing tag bare, and its
-	 * repartition reads either. Byte-identical is easier to assert. */
-	fprintf(fo, "</Partitions>");
+	xml_body(fo, io, count, shift);
 	if (fo != stdout) {
 		/* Same as the parts table file: a short write must not leave a file
 		 * the next repartition reads as the real table. */

@@ -71,6 +71,10 @@ static void usage(void)
 		"                      misc) whose exact bytes have this sha256; any\n"
 		"                      other bytes are refused before sending. For a\n"
 		"                      caller that already took a typed confirm.\n"
+		"  --part-xml DIR      leave partition_<unixtime>.xml in DIR every time the\n"
+		"                      partition table is read (spd_dump writes that file\n"
+		"                      on every session; the menu points DIR at the dump\n"
+		"                      folder). env SPDHOST_PART_XML_DIR when unset.\n"
 		"  --verbose\n"
 		"  --self-test         framing check, no device\n"
 		"  --dry-run           no USB: fake ACK/VER replies, print each packet\n"
@@ -874,6 +878,7 @@ int main(int argc, char **argv)
 		{"yes", no_argument, NULL, 'y'},
 		{"dangerous", no_argument, NULL, 'G'},
 		{"confirm-token", required_argument, NULL, 'C'},
+		{"part-xml", required_argument, NULL, 'X'},
 		{"no-line-state", no_argument, NULL, 'L'},
 		{"self-test", no_argument, NULL, 'T'},
 		{"dry-run", no_argument, NULL, 'D'},
@@ -892,7 +897,13 @@ int main(int argc, char **argv)
 	struct spd *io;
 	const char *envfd;
 	const char *emit;
+	const char *part_xml_dir = NULL;
 
+	/* --part-xml wins, but the env var is how the menu configures it for a
+	 * whole run. Both are taken verbatim, so an empty value (--part-xml ""
+	 * or SPDHOST_PART_XML_DIR=) means "do not write it" rather than falling
+	 * through to the other source. */
+	part_xml_dir = getenv("SPDHOST_PART_XML_DIR");
 	emit = getenv("SPDHOST_EMIT_SOCK");
 	if (emit && emit[0])
 		/* short helper process; no signal handling needed. argv[1] is the
@@ -970,6 +981,13 @@ int main(int argc, char **argv)
 			confirm_token = optarg;
 			break;
 		}
+		case 'X':
+			/* A folder, not a file: the name carries the timestamp, as
+			 * spd_dump's partition_<unixtime>.xml does. An empty value
+			 * turns the copy off, which is what the env fallback lets a
+			 * caller do. */
+			part_xml_dir = optarg;
+			break;
 		case 'L':
 			line = 0;
 			break;
@@ -1087,6 +1105,7 @@ int main(int argc, char **argv)
 
 	io = spd_new(verbose, step);
 	io->usb.timeout_ms = timeout;
+	io->part_xml_dir = part_xml_dir;
 	{
 		ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
 		if (n < 0)

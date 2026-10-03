@@ -197,6 +197,13 @@ Partition table and reads:
   table and change the rows you need. On a phone those units are MiB — a 5 GiB
   `super` reads `size="5120"`, and growing it to 10 GB means `size="10000"`.
   Dumping a table is not a write — no `yes`.
+  spd_dump also writes `partition_<unixtime>.xml` wherever it runs on **every**
+  session that reads the table, so the file to edit is always there. spdhost
+  writes that same file, into `--part-xml DIR` (env `SPDHOST_PART_XML_DIR`)
+  instead of the working directory; the menu points it at the dump folder, so
+  each table read leaves `/sdcard/Download/partition_<unixtime>.xml` behind and
+  option 4 (list partitions) says so. One name per run: a session that reads the
+  table twice rewrites its own copy. `--part-xml ""` turns it off.
 - `check-part NAME` — print the byte size from the live table (0 when the
   name is absent). Needs `parts`.
 - `read-part NAME OFF SIZE OUT` — `SIZE` may be `-` or `full` for the whole
@@ -243,8 +250,9 @@ Writes:
 - `repartition FILE.xml` — replace the phone's partition map with
   `<Partition id="name" size="N"/>` rows, `N` in MiB or `0xffffffff` for the
   last row ("take the rest"). Asks for `yes`; the menu never passes `--yes`
-  to it. Get the starting XML with `partition-list` above rather than writing
-  one by hand. The rest of the session resolves names and sizes against the
+  to it. Get the starting XML with `partition-list` above (or the
+  `partition_<unixtime>.xml` every table read leaves in the dump folder) rather
+  than writing one by hand. The rest of the session resolves names and sizes against the
   new table, as spd_dump does, so `repartition grow.xml write-part boot
   boot.img` in one session writes against the enlarged boot. A later `parts`
   re-reads the table from the device, which need not match until the phone
@@ -334,6 +342,9 @@ Options go before the commands, and never in front of the device path.
 --yes             skip the typed yes for write/erase/repartition/reboot-*
 --dangerous       authorize verity/frp-reset/danger-erase without a typed word
 --confirm-token SHA256   authorize one misc write whose bytes hash to it
+--part-xml DIR    leave partition_<unixtime>.xml in DIR on every table read
+                  (env SPDHOST_PART_XML_DIR; "" = off). The menu sets it to the
+                  dump folder, as spd_dump leaves that file behind itself
 --verbose
 --dry-run         no USB: fake replies, print each packet for sequence tests
 --self-test       framing check, no device
@@ -447,7 +458,8 @@ dump folder into the flash folder when the two are different folders.
 folder.** On Termux, after `termux-setup-storage` has been run and allowed:
 
 ```
-/sdcard/Download    dumps land here (menu [1]); flashes read here (menu [6])
+/sdcard/Download    dumps land here (menu [1]); flashes read here (menu [6]);
+                    partition_<unixtime>.xml lands here on every table read
 ```
 
 A dump is therefore immediately visible to a file manager or a browser

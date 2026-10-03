@@ -66,6 +66,14 @@ check "KiB table: raw units kept (boot_a 4096)" grep -qx 'boot_a 4096' "$DUMP_DI
 check "KiB table: bytes = units<<10 (boot_a 4194304, misc 1048576)" \
 	bash -c "grep -qx 'boot_a 4194304' '$DUMP_DIR/partition_bytes.txt' && grep -qx 'misc 1048576' '$DUMP_DIR/partition_bytes.txt'"
 check "KiB table: shift 10 like spd_dump" test "$PARTS_SHIFT" = 10
+# Every table read also leaves the XML a repartition edit is made from, in the
+# folder the dumps go to (spd_dump writes the same file wherever it runs).
+autox=$(ls "$DUMP_DIR"/partition_*.xml 2>/dev/null | head -1)
+check "KiB table: the parts session left partition_<unixtime>.xml in the dump folder" \
+	test -n "$autox"
+check "auto XML is the live table in the table's own unit (boot_a 4096, last row 0xffffffff)" \
+	bash -c "grep -q 'Partition id=\"boot_a\" size=\"4096\"' '$autox' &&
+		grep -q 'Partition id=\"blackbox\" size=\"0xffffffff\"' '$autox'"
 check "fmt_size 4194304=4M 1572864=1.5M 262144=256K 6442450944=6G" \
 	test "$(fmt_size 4194304) $(fmt_size 1572864) $(fmt_size 262144) $(fmt_size 6442450944)" = "4M 1.5M 256K 6G"
 sz=$(stat -c %s "$DUMP_DIR/misc-slotinfo.img" 2>/dev/null || echo 0)
