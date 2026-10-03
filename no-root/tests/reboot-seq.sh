@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Reboot paths: spdhost vs vendored spd_dump on tests/mock_fdl2.c, plus the
 # misc-backup / read-back guard. Frames after FDL2 is up are compared
-# byte-for-byte (FNV of each framed packet):
-#   spd_dump: frames after its partition-list read (SEQ 2d) = the command itself
-#   spdhost : frames after EXEC FDL2 (SEQ 04)
+# byte-for-byte (FNV of each framed packet): everything from the EXEC of FDL2
+# (SEQ 04) on -- the flash-info ask, the whole partition-list read (select_ab's
+# misc+0x800 read, the uboot_a probe, the GPT probe, the SPRD packet) and then
+# the command itself. Both windows start at the same frame so a difference
+# anywhere in that stage shows up.
 # Usage (from no-root/): tests/reboot-seq.sh
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -29,7 +31,7 @@ sd() { local L=$1; shift; MOCK_LOG=sd_$L.seq TERMUX_USB_FD=7 timeout 30 ./sd exe
 # --yes only inside this test (no TTY here). The menu never passes --yes.
 sh() { local L=$1 o=(); shift; while [[ ${1:-} == --* ]]; do o+=("$1"); shift; done
 	MOCK_LOG=sh_$L.seq timeout 30 ./sh --usb-fd 7 --yes "${o[@]}" exec_addr 0x65015f08 custom_exec_no_verify_65015f08.bin "${LOAD[@]}" "$@" 7</dev/null </dev/null >sh_$L.log 2>&1; }
-sd_tail() { awk '/^SEQ 2d /{buf=""; on=1; next} on{buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
+sd_tail() { awk '/^SEQ 04 /{buf=""; on=1; next} on{buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
 sh_tail() { awk '/^SEQ 04 /{buf=""; on=1; next} on{buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
 short() { sed -E 's/^SEQ ([0-9a-f]+) len=([0-9]+).*/\1:\2/' "$1" | tr '\n' ' '; }
 

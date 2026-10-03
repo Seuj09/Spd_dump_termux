@@ -207,6 +207,112 @@ static int write_bak_image(struct spd *io, const char *bak, const char *path,
 	return rc;
 }
 
+/* spd_dump w_mem_to_part_offset() (common.c 2073). The reference works
+ * through a file because load_partition_unify() takes a path; so does this.
+ * The file name is the name the user typed, not the resolved row -- that is
+ * what the reference builds (`snprintf(dfile, "%s.bin", name)`), and it is
+ * also the only name available when the table has not been read yet.
+ *
+ * `part too large` is the reference's own guard: its offset fields are 32-bit
+ * (dump_partition takes uint32_t), so a partition past 4 GiB cannot be read
+ * into a file to patch in the first place. */
+int spd_mem_to_part_file(struct spd *io, const char *name, uint64_t offset,
+	const uint8_t *mem, size_t len, const char *dir, int slot, char *out, size_t out_sz)
+{
+	char resolved[40];
+	char tmp[1200];
+	uint64_t psz = 0;
+	FILE *f;
+	int lk;
+
+	/* The reference blacklists these three before anything else: they are
+	 * the partitions whose contents the phone rewrites on every boot, so a
+	 * patched copy is meaningless (and on a live device, harmful). */
+	if (strstr(name, "fixnv") || strstr(name, "runtimenv") || strstr(name, "userdata")) {
+		fprintf(stderr, "wof/wov %s: blacklisted (fixnv / runtimenv / userdata),"
+			" as in spd_dump\n", name);
+		return -1;
+	}
+	lk = spd_lookup_part(io, name, slot, resolved, sizeof(resolved), &psz);
+	if (lk < 0 || !psz) {
+		/* The reference's own guard, and its words: `part not exist`. It gets
+		 * here with gPartInfo.size == 0, which its get_partition_info(io,name,1)
+		 * can only reach for a name that is not in the table -- so an
+		 * unresolved row is a refusal there too, never a write. Every menu
+		 * write path reads the table (`parts`) before it writes. */
+		fprintf(stderr, "wof/wov %s: part not exist\n", name);
+		return -1;
+	}
+	if (psz > 0xffffffffu) {
+		fprintf(stderr, "wof/wov %s: partition is %llu bytes, past the 32-bit"
+			" limit spd_dump reads it with\n", name, (unsigned long long)psz);
+		return -1;
+	}
+	if (offset > psz) {
+		fprintf(stderr, "wof/wov %s: offset %llu is past the end of the %llu-byte"
+			" partition\n", name, (unsigned long long)offset, (unsigned long long)psz);
+		return -1;
+	}
+	if (dir && dir[0])
+		snprintf(tmp, sizeof(tmp), "%s/%s.bin", dir, name);
+	else
+		snprintf(tmp, sizeof(tmp), "%s.bin", name);
+	if (strlen(tmp) + 1 > out_sz) {
+		fprintf(stderr, "wof/wov %s: path too long\n", name);
+		return -1;
+	}
+	strcpy(out, tmp);
+
+	if (offset == 0) {
+		f = fopen(out, "wb");
+		if (!f) {
+			fprintf(stderr, "wof/wov %s: open %s: %s\n", name, out, strerror(errno));
+			return -1;
+		}
+		if (len && fwrite(mem, 1, len, f) != len) {
+			fprintf(stderr, "wof/wov %s: write %s failed\n", name, out);
+			fclose(f);
+			return -1;
+		}
+		if (fclose(f) != 0) {
+			fprintf(stderr, "wof/wov %s: close %s: %s\n", name, out, strerror(errno));
+			return -1;
+		}
+		fprintf(stderr, "wof/wov %s: %zu bytes at offset 0 -> %s\n", name, len, out);
+		return 0;
+	}
+
+	/* Past offset 0: the whole partition, then the patch. A short or failed
+	 * read leaves nothing behind (the reference removes the file). */
+	if (spd_read_part(io, resolved, 0, psz, out)) {
+		remove(out);
+		fprintf(stderr, "wof/wov %s: could not read the whole partition; nothing written\n",
+			name);
+		return -1;
+	}
+	f = fopen(out, "rb+");
+	if (!f) {
+		fprintf(stderr, "wof/wov %s: reopen %s: %s\n", name, out, strerror(errno));
+		remove(out);
+		return -1;
+	}
+	if (fseeko(f, (off_t)offset, SEEK_SET) != 0 || (len && fwrite(mem, 1, len, f) != len)) {
+		fprintf(stderr, "wof/wov %s: patch at %llu in %s failed\n", name,
+			(unsigned long long)offset, out);
+		fclose(f);
+		remove(out);
+		return -1;
+	}
+	if (fclose(f) != 0) {
+		fprintf(stderr, "wof/wov %s: close %s: %s\n", name, out, strerror(errno));
+		remove(out);
+		return -1;
+	}
+	fprintf(stderr, "wof/wov %s: %zu bytes at offset %llu of %llu -> %s\n", name, len,
+		(unsigned long long)offset, (unsigned long long)psz, out);
+	return 0;
+}
+
 int spd_write_named(struct spd *io, const char *name, const char *path, int slot)
 {
 	char resolved[40], bak[48];
@@ -260,7 +366,8 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	 * NAME_bak row exists. Otherwise the primary goes through load_partition_force()
 	 * and, if the two rows are the same size, the image is written a second
 	 * time under NAME_bak. */
-	if ((slot > 0 && strcmp(resolved, "vbmeta")) || !strncmp(resolved, "splloader", 9) ||
+	if ((slot > 0 && strcmp(resolved, "vbmeta")) ||
+		io->storage == SPD_STORAGE_NAND || !strncmp(resolved, "splloader", 9) ||
 		io->nparts <= 0 || strlen(resolved) + 4 >= sizeof(bak))
 		return spd_write_part(io, resolved, path);
 	snprintf(bak, sizeof(bak), "%s_bak", resolved);
@@ -317,6 +424,15 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
 	uint64_t psz = 0, flen = 0;
 	int idx;
 
+	/* spd_dump refuses this verb outright on a NAND phone, before it even looks
+	 * for the table (spd_dump.c:1130): on UBI the layout is not the GPT one, so
+	 * a renamed row means nothing, and the force is how a phone loses its table.
+	 * IO->STORAGE is set by the flash-info exchange in the fdl2 stage, by every
+	 * table read, and by a refused 0xffffffff size probe. */
+	if (io->storage == SPD_STORAGE_NAND) {
+		fprintf(stderr, "w-force is not allowed on NAND(UBI) devices\n");
+		return -1;
+	}
 	if (io->nparts <= 0) {
 		fprintf(stderr, "w-force %s: no partition table (run parts in this session first)\n", name);
 		return -1;

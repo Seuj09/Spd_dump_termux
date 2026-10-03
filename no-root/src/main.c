@@ -89,7 +89,17 @@ static void usage(void)
 		"                               exec_addr). FILE defaults to\n"
 		"                               fdl/ums9230/custom_exec_no_verify_<hex>.bin\n"
 		"                               next to spdhost. ADDR 0 disables.\n"
+		"  exec_addr2 ADDR [FILE]       the same, with the stub appended to FDL1's\n"
+		"                               own download (zero filler, then the stub,\n"
+		"                               one START, no END) for a BootROM that takes\n"
+		"                               only one download (spd_dump's exec_addr2).\n"
+		"  loadexec FILE                exec_addr taken from FILE's own name\n"
+		"                               (custom_exec_no_verify_<hex>.bin); sends\n"
+		"                               nothing and is BootROM stage only.\n"
+		"  loadexec2 FILE               the same, in exec_addr2's one-download form.\n"
 		"  fdl FILE ADDR                send one loader and execute it\n"
+		"  loadfdl FILE                 the same, with ADDR read out of FILE's\n"
+		"                               name: the last 0X (or 0x) in it.\n"
 		"  parts [FILE]                 list partitions (FILE or '-' optional)\n"
 		"  partition-list [FILE]        the same table as the XML repartition\n"
 		"                               reads back, size in MiB, last row\n"
@@ -97,6 +107,15 @@ static void usage(void)
 		"                               edit it, feed it to repartition.\n"
 		"  read-part NAME OFF SIZE OUT  SIZE may be - or full (or 0xffffffff) for\n"
 		"                               the whole partition, like spd_dump read_part\n"
+		"  print (or p)                 the live table as read, splloader 256KB\n"
+		"                               first then one row per line in MiB, in\n"
+		"                               spd_dump's own layout\n"
+		"  read-parts FILE.xml [DIR]    spd_dump read_parts: every partition the\n"
+		"                               list names into DIR/NAME.bin, in order.\n"
+		"                               Skips userdata and names not in the table;\n"
+		"                               splloader is 256 KiB; size 0xffffffff asks\n"
+		"                               the device; the rest are MiB. DIR defaults\n"
+		"                               to `path`, then the current directory.\n"
 		"  check-part NAME              print 1 when the partition exists, 0 when\n"
 		"                               it does not (a note on stderr), like\n"
 		"                               spd_dump check_part. Needs parts.\n"
@@ -121,6 +140,22 @@ static void usage(void)
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
 		"                          the device is not A/B. Does not edit vbmeta.\n"
+		"  wof NAME OFF FILE      spd_dump wof: put FILE into the partition at\n"
+		"                         OFF. At OFF 0 the partition becomes exactly\n"
+		"                         FILE; past 0 the whole partition is read to\n"
+		"                         <NAME>.bin, patched, and written back. Not\n"
+		"                         fixnv / runtimenv / userdata (spd_dump's own\n"
+		"                         blacklist). Same confirm as write-part.\n"
+		"  wov NAME OFF VALUE     the same with 4 bytes, little-endian, max\n"
+		"                         0xffffffff (spd_dump wov).\n"
+		"  firstmode MODE_ID      spd_dump firstmode: write MODE_ID + 0x53464D00\n"
+		"                         at miscdata+0x2420 (the mode the device boots\n"
+		"                         into). Reads miscdata whole if OFFSET is not 0,\n"
+		"                         so it needs the partition table.\n"
+		"  path [DIR]             where wof / wov / firstmode put the <NAME>.bin\n"
+		"                         they build (default: the current directory).\n"
+		"                         An explicit output path in read-part / dump /\n"
+		"                         read_flash / read_mem is used exactly as given.\n"
 		"  w-force NAME FILE       spd_dump w_force: rename the row to 'w_force'\n"
 		"                          in a temporary table, write, then send the\n"
 		"                          table back. Gets through where a plain write\n"
@@ -149,6 +184,15 @@ static void usage(void)
 		"                          offline: read or extract a Spreadtrum .pac\n"
 		"  The six offline tools open no USB and ignore the device options.\n"
 		"  Unlike the release tools they never overwrite their input file.\n"
+		"  read_flash ADDR OFF SIZE OUT  raw read by address, no partition\n"
+		"                               table involved (spd_dump read_flash).\n"
+		"                               All three are 32-bit; a bigger value is\n"
+		"                               refused before anything is sent.\n"
+		"  read_mem ADDR SIZE OUT  the same opcode for RAM (spd_dump read_mem:\n"
+		"                          the address goes in the offset field).\n"
+		"  erase_flash ADDR SIZE   raw erase by address (spd_dump erase_flash).\n"
+		"                          --yes confirms it; it never names a partition,\n"
+		"                          so erase-part's blacklist has nothing to match.\n"
 		"  erase-part NAME         not persist, not splloader, not all\n"
 		"  verity 0|1              DANGEROUS. Byte 0x7B of vbmeta (spd_dump):\n"
 		"                          0 writes 0x01 (dm-verity off), 1 writes 0x00\n"
@@ -256,14 +300,19 @@ static void put_fd(int fd, const char *s)
  * buffers the child's stdout/stderr until exit, so the prompt also goes
  * straight to the terminal: /dev/tty if it opens, else fd 0 when fd 0 is a
  * tty. The answer is read from stdin when it is a tty, else from /dev/tty.
- * Trailing CR/LF/space/tab are ignored ("yes\r\n" is yes). */
-static void confirm(int yes, const char *verb, const char *name)
+ * Trailing CR/LF/space/tab are ignored ("yes\r\n" is yes).
+ *
+ * Returns 1 when confirmed, 0 when declined or unanswerable. Writes exit on 0
+ * because a refused write must not go ahead; the read side (spd_confirm_read,
+ * below) treats 0 as "skip this read", which is what spd_dump's check_confirm
+ * returning false means to dump_partition(). */
+static int confirm_ask(int yes, const char *verb, const char *name)
 {
 	char buf[64], prompt[256], hex[3 * 64 + 1];
 	int in_fd = -1, out_fd = -1, tty = -1, n, k;
 	if (yes) {
 		fprintf(stderr, "confirmed via --yes: %s '%s'\n", verb, name);
-		return;
+		return 1;
 	}
 	tty = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
 	if (isatty(STDIN_FILENO))
@@ -273,7 +322,7 @@ static void confirm(int yes, const char *verb, const char *name)
 	if (in_fd < 0) {
 		fprintf(stderr, "spdhost: refusing %s '%s' without --yes/--confirm-token"
 			" (no terminal: stdin is not a tty and /dev/tty did not open)\n", verb, name);
-		exit(1);
+		return 0;
 	}
 	out_fd = tty >= 0 ? tty : STDIN_FILENO;
 	snprintf(prompt, sizeof(prompt), "spdhost: type yes to %s '%s': ", verb, name);
@@ -292,13 +341,32 @@ static void confirm(int yes, const char *verb, const char *name)
 		buf[l] = 0;
 		if (strcmp(buf, "yes") == 0) {
 			fprintf(stderr, "spdhost: confirmed: %s '%s'\n", verb, name);
-			return;
+			return 1;
 		}
 	}
 	if (n > 0 && hex[0])
 		hex[strlen(hex) - 1] = 0;
 	fprintf(stderr, "spdhost: not confirmed (read: %s)\n", n > 0 ? hex : n == 0 ? "EOF" : strerror(errno));
-	exit(1);
+	return 0;
+}
+
+/* A write is refused outright when the confirm says no. */
+static void confirm(int yes, const char *verb, const char *name)
+{
+	if (!confirm_ask(yes, verb, name))
+		exit(1);
+}
+
+/* spd_dump check_confirm() on the read side (dump_partition's "read userdata").
+ * --yes passes it, as skip_confirm does there. A "no" is not an error: the
+ * caller skips that read. */
+int spd_confirm_read(int yes, const char *what)
+{
+	if (yes) {
+		fprintf(stderr, "confirmed via --yes: read '%s'\n", what);
+		return 1;
+	}
+	return confirm_ask(0, "read", what);
 }
 
 /* verity / frp-reset / danger-erase. --yes does not pass this gate.
@@ -434,17 +502,53 @@ static void need_fdl1(struct spd *io, const char *cmd)
 	}
 }
 
+/* The reference spells five verbs with an underscore where spdhost uses a
+ * hyphen (`read_part`, `check_part`, `write_part`, `write_parts`,
+ * `erase_part`). Both spellings are accepted so a command line copied out of
+ * spd_dump's own documentation runs unchanged; the rest of the reference's
+ * underscore names (read_parts, partition_list, size_part/part_size, w_force,
+ * keep_charge, read_flash, read_mem, erase_flash) are already spelled that way
+ * in the dispatch chain. Returns the canonical name, or NULL when S is
+ * already one. */
+static const char *cmd_alias(const char *s)
+{
+	static const struct { const char *ref, *ours; } tab[] = {
+		{ "read_part", "read-part" },
+		{ "check_part", "check-part" },
+		{ "write_part", "write-part" },
+		{ "write_parts", "write-parts" },
+		{ "erase_part", "erase-part" },
+	};
+	size_t k;
+	for (k = 0; k < sizeof(tab) / sizeof(tab[0]); k++)
+		if (strcmp(s, tab[k].ref) == 0)
+			return tab[k].ours;
+	return NULL;
+}
+
 static int is_command(const char *s)
 {
+	const char *a = cmd_alias(s);
+	if (a)
+		s = a;
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
-		strcmp(s, "exec_addr") == 0 ||
+		strcmp(s, "loadfdl") == 0 || strcmp(s, "exec_addr") == 0 ||
+		strcmp(s, "exec_addr2") == 0 ||
+		strcmp(s, "loadexec") == 0 || strcmp(s, "loadexec2") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
+		strcmp(s, "read-parts") == 0 || strcmp(s, "read_parts") == 0 ||
+		strcmp(s, "print") == 0 || strcmp(s, "p") == 0 ||
 		strcmp(s, "partition-list") == 0 || strcmp(s, "partition_list") == 0 ||
 		strcmp(s, "check-part") == 0 ||
 		strcmp(s, "part-size") == 0 || strcmp(s, "size_part") == 0 ||
 		strcmp(s, "part_size") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "w-force") == 0 ||
 		strcmp(s, "w_force") == 0 || strcmp(s, "erase-part") == 0 ||
+		strcmp(s, "wof") == 0 || strcmp(s, "wov") == 0 ||
+		strcmp(s, "firstmode") == 0 || strcmp(s, "path") == 0 ||
+		strcmp(s, "keep_charge") == 0 || strcmp(s, "keep-charge") == 0 ||
+		strcmp(s, "read_flash") == 0 || strcmp(s, "read_mem") == 0 ||
+		strcmp(s, "erase_flash") == 0 ||
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
 		strcmp(s, "danger-erase") == 0 ||
 		strcmp(s, "write-parts") == 0 || strcmp(s, "write-parts-a") == 0 ||
@@ -467,6 +571,9 @@ static int need(int argc, int i, int n, const char *what)
 	return 0;
 }
 
+/* Defined with the other command state, below: whether to send KEEP_CHARGE. */
+static int keep_charge_on(void);
+
 static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 {
 	if (io->fdl_stage == 0) {
@@ -483,18 +590,30 @@ static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 				exit(1);
 			io->linked = 1;
 		}
-		spd_send_loader(io, path, addr);
-		if (io->exec_addr) {
-			/* spd_dump non-v2 exec_addr: stub at exec_addr, no END, no EXEC. */
-			spd_send_exec_file(io, io->exec_file, io->exec_addr);
-		} else if (spd_exec(io, io->usb.timeout_ms > 3000 ? io->usb.timeout_ms : 3000, 0)) {
-			exit(1);
+		if (io->exec_addr && io->exec_v2) {
+			/* spd_dump exec_addr2/loadexec2: the stub rides along in the
+			 * same download, behind zero filler. */
+			spd_send_loader_appended(io, path, addr, io->exec_file, io->exec_addr);
+		} else {
+			spd_send_loader(io, path, addr);
+			if (io->exec_addr) {
+				/* spd_dump non-v2 exec_addr: stub at exec_addr, no END, no EXEC. */
+				spd_send_exec_file(io, io->exec_file, io->exec_addr);
+			} else if (spd_exec(io, io->usb.timeout_ms > 3000 ? io->usb.timeout_ms : 3000, 0)) {
+				exit(1);
+			}
 		}
 		io->flags &= ~SPD_F_CRC16;
 		if (spd_check_baud_loader(io))
 			exit(1);
 		if (spd_connect(io))
 			exit(1);
+		/* spd_dump spd_dump.c:706 sends this right after the FDL1-stage
+		 * CMD_CONNECT, and only there -- the loader is the one that holds
+		 * the charger on while it flashes. A loader that refuses it still
+		 * flashes: the reference only prints when it is taken. */
+		if (keep_charge_on() && !spd_keep_charge(io))
+			fprintf(stderr, "KEEP_CHARGE FDL1\n");
 		io->fdl_stage = 1;
 		io->linked = 1;
 		fprintf(stderr, "FDL1 is running\n");
@@ -504,6 +623,23 @@ static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 			exit(1);
 		io->fdl_stage = 2;
 		fprintf(stderr, "FDL2 is running\n");
+		/* spd_dump spd_dump.c:736-752, the two frames between the EXEC and
+		 * the table read: the flash-info ask (a BSL_REP_READ_FLASH_INFO
+		 * reply means NAND) and DISABLE_TRANSCODE if the loader's Da_Info
+		 * asked for it. A device that ignores the ask is not fatal. */
+		spd_flash_info(io);
+		/* spd_dump's FDL2 stage ends by loading the partition table
+		 * (spd_dump.c:753-771 -> partition_list), so from here on every
+		 * command that names a partition has one, and the session has
+		 * already written partition_<time>.xml. Ours does the same read at
+		 * the same point; it just does not print the table, which is
+		 * `print`'s job. A device that refuses one is not fatal here.
+		 * NAND is the one case the reference skips: it has no SPRD table
+		 * to read, and says so instead (spd_dump.c:772). */
+		if (io->storage == SPD_STORAGE_NAND)
+			fprintf(stderr, "Storage is nand\n");
+		else
+			spd_parts_ensure(io);
 	} else {
 		fprintf(stderr, "only two fdl stages are supported in one run\n");
 		exit(1);
@@ -700,6 +836,9 @@ static int set_active_slot(struct spd *io, int yes, char which, int gate)
 		fprintf(stderr, "misc read-back mismatch: slot was NOT confirmed. Restore misc from the backup.\n");
 		return -1;
 	}
+	/* The write above dropped the cached slot; we know what it is now, so
+	 * say so rather than spending three frames re-reading misc. */
+	spd_slot_set(io, which == 'a' ? 1 : 2);
 	free(img);
 	return 0;
 }
@@ -726,6 +865,59 @@ static int part_named(struct spd *io, const char *name)
 		if (!strcmp(io->ptab[i].name, name))
 			return 1;
 	return 0;
+}
+
+/* The size of PATH in bytes, -1 when it cannot be read. */
+static int file_size(const char *path, uint64_t *out)
+{
+	FILE *f;
+	off_t n;
+	f = fopen(path, "rb");
+	if (!f)
+		return -1;
+	if (fseeko(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return -1;
+	}
+	n = ftello(f);
+	fclose(f);
+	if (n < 0)
+		return -1;
+	*out = (uint64_t)n;
+	return 0;
+}
+
+/* `path [DIR]`: where a command that names its own output file puts it.
+ * NULL means the current directory, which is what spd_dump's empty savepath
+ * means. Read by wof / wov / firstmode. */
+static const char *save_dir;
+
+/* `keep_charge [0|1]`: spd_dump's own default is 1 (spd_dump.c:155), and the
+ * command exists there to turn it off. Sentinel-initialised so the environment
+ * can still override the default, the way the other transport knobs work. */
+static int keep_charge = -1;
+
+static int keep_charge_on(void)
+{
+	if (keep_charge >= 0)
+		return keep_charge;
+	{
+		const char *v = getenv("SPDHOST_NO_KEEP_CHARGE");
+		return !(v && v[0] && strcmp(v, "0") != 0);
+	}
+}
+
+/* write-part NAME FILE, and the tail of wof / wov / firstmode, which build the
+ * same kind of image file and then flash it. Every write confirm is here, so
+ * no path into a partition can skip the one write-part takes. */
+static int do_write_part(struct spd *io, int yes, const char *name, const char *path)
+{
+	int part_slot;
+	if (strcmp(name, "misc") == 0)
+		return write_misc_image(io, yes, path, 1);
+	authorize_write(yes, "write", name, NULL, 0);
+	part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
+	return spd_write_named(io, name, path, part_slot);
 }
 
 static int same_file_size(const char *path, uint64_t expect)
@@ -1149,6 +1341,12 @@ int main(int argc, char **argv)
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];
+		{
+			/* spd_dump's underscores, folded to spdhost's hyphens. */
+			const char *a = cmd_alias(cmd);
+			if (a)
+				cmd = a;
+		}
 		/* An interrupt stops the run whether or not --keep-going is set.
 		 * That flag covers a command that failed on its own; an interrupted
 		 * one left the transfer half done, so the next command in the
@@ -1167,9 +1365,13 @@ int main(int argc, char **argv)
 			do_ping(io, line, fdl);
 			line = 0;
 			i++;
-		} else if (strcmp(cmd, "exec_addr") == 0) {
+		} else if (strcmp(cmd, "exec_addr") == 0 || strcmp(cmd, "exec_addr2") == 0) {
+			/* exec_addr2 (spd_dump.c:819) is exec_addr plus the flag that
+			 * makes the stub ride along in FDL1's own download instead of
+			 * starting a second one. */
 			uint64_t ea;
 			const char *file = NULL;
+			int v2 = cmd[9] == '2';
 			need(argc, i, 1, "exec_addr");
 			ea = parse_size(argv[i + 1]);
 			if (ea > 0xffffffffull) {
@@ -1205,7 +1407,9 @@ int main(int argc, char **argv)
 			}
 			io->exec_addr = (uint32_t)ea;
 			io->exec_file = file;
-			fprintf(stderr, "exec_addr: 0x%08x using %s\n", io->exec_addr, io->exec_file);
+			io->exec_v2 = v2;
+			fprintf(stderr, "exec_addr%s: 0x%08x using %s\n", v2 ? "2" : "",
+				io->exec_addr, io->exec_file);
 		} else if (strcmp(cmd, "fdl") == 0) {
 			need(argc, i, 2, "fdl");
 			{
@@ -1227,6 +1431,83 @@ int main(int argc, char **argv)
 			}
 			line = 0;
 			i += 3;
+		} else if (strcmp(cmd, "loadfdl") == 0) {
+			/* spd_dump loadfdl FILE: `fdl FILE addr` with the address taken
+			 * from the file's own name. It is the LAST "0X" in the name, or
+			 * the last "0x" when there is no upper-case one, and the rest of
+			 * that string is the hex address -- so
+			 * fdl2-dl_0x9efffe00.bin loads at 0x9efffe00. Nothing is
+			 * special-cased: a name with no 0x is refused, as in spd_dump. */
+			const char *p, *last = NULL;
+			uint64_t addr;
+			need(argc, i, 1, "loadfdl");
+			for (p = argv[i + 1]; (p = strstr(p, "0X")) != NULL; p += 2)
+				last = p;
+			if (!last)
+				for (p = argv[i + 1]; (p = strstr(p, "0x")) != NULL; p += 2)
+					last = p;
+			if (!last) {
+				fprintf(stderr, "loadfdl: \"0x\" not found in name of %s\n", argv[i + 1]);
+				return 1;
+			}
+			/* spd_dump: `addr = strtoul(last_pos, NULL, 16)`. Base 16
+			 * eats the "0x" itself and stops at the first character
+			 * that is not a hex digit, so fdl2-dl_0x9efffe00.bin and
+			 * fdl2-dl_0x9efffe00 both mean 0x9efffe00 -- a file name
+			 * with an extension is not a special case there, and must
+			 * not be one here. A name whose last 0x has no digits at
+			 * all parses as 0, as it does in the reference. */
+			errno = 0;
+			addr = strtoul(last, NULL, 16);
+			if (errno == ERANGE || addr > 0xffffffffull) {
+				fprintf(stderr, "loadfdl: address in %s does not fit in 32 bits\n", last);
+				return 1;
+			}
+			do_fdl(io, line, argv[i + 1], (uint32_t)addr);
+			if (!step_set && (addr == 0x5500 || addr == 0x65000800) && io->step != 0xf800) {
+				io->step = 0xf800;
+				if (verbose)
+					fprintf(stderr, "step: 0xf800 (FDL1 at 0x%llx, like spd_dump highspeed; --step overrides)\n",
+						(unsigned long long)addr);
+			}
+			line = 0;
+			i += 2;
+		} else if (strcmp(cmd, "loadexec") == 0 || strcmp(cmd, "loadexec2") == 0) {
+			/* spd_dump loadexec FILE: exec_addr with the address read out of
+			 * the file's own name (custom_exec_no_verify_<hex>.bin), and the
+			 * file remembered as the stub. It sends nothing and is BootROM
+			 * stage only, exactly like exec_addr. A name it cannot read an
+			 * address from, or a file that is not there, disables exec_addr
+			 * rather than failing the run -- which is what the reference does
+			 * (it prints "does not exist" and sets exec_addr = 0).
+			 * loadexec2 is the same command plus the same-download flag
+			 * (spd_dump.c:839). */
+			const char *base;
+			char straddr[9] = { 0 };
+			uint32_t ea = 0;
+			int v2 = cmd[8] == '2';
+			need(argc, i, 1, "loadexec");
+			base = strrchr(argv[i + 1], '/');
+			base = base ? base + 1 : argv[i + 1];
+			if (sscanf(base, "custom_exec_no_verify_%8[0-9a-fA-F]", straddr) == 1)
+				ea = (uint32_t)strtoul(straddr, NULL, 16);
+			i += 2;
+			if (io->fdl_stage != 0) {
+				fprintf(stderr, "loadexec: ignored (only valid before the first fdl); current exec_addr is 0x%x\n",
+					(unsigned)io->exec_addr);
+				continue;
+			}
+			io->exec_file = argv[i - 1];
+			if (!ea) {
+				fprintf(stderr, "loadexec: no custom_exec_no_verify_<hex> address in %s\n", base);
+				ea = 0;
+			} else if (access(argv[i - 1], R_OK) != 0) {
+				fprintf(stderr, "loadexec: %s does not exist\n", argv[i - 1]);
+				ea = 0;
+			}
+			io->exec_addr = ea;
+			io->exec_v2 = v2;
+			fprintf(stderr, "current exec_addr is 0x%x\n", (unsigned)io->exec_addr);
 		} else if (strcmp(cmd, "parts") == 0) {
 			const char *out = NULL;
 			need_fdl2(io, "parts");
@@ -1238,8 +1519,8 @@ int main(int argc, char **argv)
 				return 1;
 			i++;
 		} else if (strcmp(cmd, "read-part") == 0) {
-			uint64_t rsize, rnamesz = 0;
-			char rnamebuf[40];
+			uint64_t rsize, rnamesz = 0, roff;
+			char rnamebuf[40], ralt[40];
 			const char *rname = argv[i + 1];
 			need(argc, i, 4, "read-part");
 			need_fdl2(io, "read-part");
@@ -1257,8 +1538,21 @@ int main(int argc, char **argv)
 			 * size (spdhost's older behaviour); only a magic size needs it. */
 			if (spd_resolve_part(io, rname, rnamebuf, sizeof(rnamebuf), &rnamesz) == 0) {
 				rname = rnamebuf;
-				if (rsize == 0xffffffffu)
-					rsize = rnamesz; /* a found row always has a nonzero size */
+				if (rsize == 0xffffffffu) {
+					/* spd_dump read_part: `if (0xffffffff == size) size =
+					 * check_partition(io, gPartInfo.name, 1);` -- the
+					 * device sizes it, not the table. splloader is the
+					 * one name where the table has no row to probe with:
+					 * it is a raw offset, so it keeps its fixed 256 KiB
+					 * (documented divergence: the reference refuses the
+					 * name outright). A device that will not answer falls
+					 * back to the row's own size. */
+					uint64_t probed = 0;
+					if (strncmp(rname, "splloader", 9))
+						probed = spd_check_partition(io, rname, 1,
+							spd_active_slot(io));
+					rsize = probed ? probed : rnamesz;
+				}
 			} else if (rsize == 0xffffffffu) {
 				fprintf(stderr, "read-part: no size for '%s' in the live table; "
 					"run parts first or give an explicit size\n", rname);
@@ -1268,8 +1562,34 @@ int main(int argc, char **argv)
 				i += 5;
 				continue;
 			}
-			if (spd_read_part(io, rname, parse_size(argv[i + 2]),
-				rsize, argv[i + 4])) {
+			/* spd_dump dump_partition's nv rule, which read_part goes
+			 * through too: an `<x>1...` name with "nv1" in it reads its
+			 * `<x>2...` twin starting at 512, size less 512. It overrides
+			 * the offset and size given on the command line, as the
+			 * reference's own dump_partition does -- so the command line's
+			 * offset is kept unless the name was one (spd_nv_read_adjust
+			 * leaves *OFF at 0, and ALT untouched, for every other name). */
+			roff = parse_size(argv[i + 2]);
+			{
+				uint64_t nvoff = 0;
+				spd_nv_read_adjust(rname, ralt, sizeof(ralt), &nvoff, &rsize);
+				if (nvoff) {
+					rname = ralt;
+					roff = nvoff;
+					fprintf(stderr, "read-part: %s -> %s at offset %llu, %llu bytes\n",
+						argv[i + 1], rname, (unsigned long long)roff,
+						(unsigned long long)rsize);
+				}
+			}
+			/* spd_dump dump_partition's userdata rule: the read asks first. */
+			if (spd_userdata_declined(rname, yes)) {
+				i += 5;
+				continue;
+			}
+			/* and its super rule: metadata first, sized by the device. */
+			if (!strcmp(rname, "super"))
+				spd_metadata_beside(io, argv[i + 4], spd_active_slot(io));
+			if (spd_read_part(io, rname, roff, rsize, argv[i + 4])) {
 				if (!keep_going)
 					return 1;
 				/* The loop-top check stops the run on the next iteration, so
@@ -1305,10 +1625,47 @@ int main(int argc, char **argv)
 			if (!sz)
 				fprintf(stderr, "%s: '%s' is not in the live table\n", cmd, argv[i + 1]);
 			i += 2;
+		} else if (strcmp(cmd, "print") == 0 || strcmp(cmd, "p") == 0) {
+			/* spd_dump p|print: the table this session already read, in the
+			 * reference's own layout -- splloader first at its fixed
+			 * 256 KiB, then one row per line, MiB to the nearest whole. */
+			int k;
+			if (io->nparts > 0) {
+				printf("  0 %36s     256KB\n", "splloader");
+				for (k = 0; k < io->nparts; k++)
+					printf("%3d %36s %7lluMB\n", k + 1, io->ptab[k].name,
+						(unsigned long long)(io->ptab[k].size >> 20));
+			}
+			i++;
+		} else if (strcmp(cmd, "read-parts") == 0 || strcmp(cmd, "read_parts") == 0) {
+			/* spd_dump read_parts FILE [DIR]: every partition the XML list
+			 * names, into DIR/NAME.bin. DIR defaults to the `path`
+			 * directory (or the current one). */
+			const char *dir, *xml;
+			int named = 0;
+			need(argc, i, 1, "read-parts");
+			need_fdl2(io, "read-parts");
+			/* The list is argv[i+1] and the optional DIR argv[i+2]; the list
+			 * is taken before I moves, because after it the DIR sits at
+			 * argv[i+1] and would be read as the XML. */
+			xml = argv[i + 1];
+			if (i + 2 < argc && !is_command(argv[i + 2])) {
+				dir = argv[i + 2];
+				named = 1;
+				i++;
+			} else {
+				dir = save_dir && save_dir[0] ? save_dir : ".";
+				/* spd_dump's savepath[0] test: `path DIR` counts as named,
+				 * so the dump list is copied into it. */
+				named = save_dir && save_dir[0] ? 1 : 0;
+			}
+			if (spd_read_parts(io, xml, dir, named))
+				return 1;
+			i += 2;
 		} else if (strcmp(cmd, "dump") == 0) {
 			need(argc, i, 2, "dump");
 			need_fdl2(io, "dump");
-			if (spd_dump(io, argv[i + 1], argv[i + 2])) {
+			if (spd_dump(io, argv[i + 1], argv[i + 2], yes)) {
 				if (!keep_going)
 					return 1;
 				nfailed++;
@@ -1325,19 +1682,138 @@ int main(int argc, char **argv)
 				return 1; /* never --keep-going past a failed backup */
 			i += 2;
 		} else if (strcmp(cmd, "write-part") == 0) {
-			int part_slot;
 			need(argc, i, 2, "write-part");
 			need_fdl2(io, "write-part");
-			if (strcmp(argv[i + 1], "misc") == 0) {
-				if (write_misc_image(io, yes, argv[i + 2], 1))
-					return 1;
-			} else {
-				authorize_write(yes, "write", argv[i + 1], NULL, 0);
-				part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
-				if (spd_write_named(io, argv[i + 1], argv[i + 2], part_slot))
-					return 1;
-			}
+			if (do_write_part(io, yes, argv[i + 1], argv[i + 2]))
+				return 1;
 			i += 3;
+		} else if (strcmp(cmd, "wof") == 0 || strcmp(cmd, "wov") == 0) {
+			/* spd_dump wof NAME OFFSET FILE / wov NAME OFFSET VALUE: patch
+			 * a small region of a partition by writing the whole image (the
+			 * phone has no partial write), through the same write confirm as
+			 * write-part. The reference blacklists fixnv/runtimenv/userdata
+			 * inside w_mem_to_part_offset(), which is where we do it too. */
+			char img[1200];
+			uint8_t val[4];
+			const uint8_t *mem;
+			size_t len;
+			uint64_t off, flen = 0;
+			int slot, wov = strcmp(cmd, "wov") == 0;
+
+			need(argc, i, 3, cmd);
+			need_fdl2(io, cmd);
+			off = parse_size(argv[i + 2]);
+			if (wov) {
+				unsigned long long v;
+				errno = 0;
+				v = strtoull(argv[i + 3], NULL, 0);
+				if (errno || v > 0xffffffffull) {
+					fprintf(stderr, "wov: value %s is not a 32-bit number\n", argv[i + 3]);
+					return 1;
+				}
+				/* spd_dump memcpy()s the host uint32_t, so the file gets
+				 * the value little-endian; spelled out here rather than
+				 * copied so it does not depend on the host. */
+				val[0] = (uint8_t)v;
+				val[1] = (uint8_t)(v >> 8);
+				val[2] = (uint8_t)(v >> 16);
+				val[3] = (uint8_t)(v >> 24);
+				mem = val;
+				len = 4;
+			} else {
+				FILE *f;
+				if (file_size(argv[i + 3], &flen)) {
+					fprintf(stderr, "%s: cannot read %s\n", cmd, argv[i + 3]);
+					return 1;
+				}
+				if (flen > 256ull * 1024 * 1024) {
+					fprintf(stderr, "%s: %s is %llu bytes; over the 256 MB"
+						" in-memory patch limit\n", cmd, argv[i + 3],
+						(unsigned long long)flen);
+					return 1;
+				}
+				mem = malloc(flen ? (size_t)flen : 1);
+				if (!mem) {
+					fprintf(stderr, "%s: out of memory for %s\n", cmd, argv[i + 3]);
+					return 1;
+				}
+				f = fopen(argv[i + 3], "rb");
+				if (!f || (flen && fread((void *)mem, 1, (size_t)flen, f) != flen)) {
+					fprintf(stderr, "%s: read %s failed\n", cmd, argv[i + 3]);
+					if (f)
+						fclose(f);
+					free((void *)mem);
+					return 1;
+				}
+				fclose(f);
+				len = (size_t)flen;
+			}
+			slot = io->nparts > 0 ? spd_active_slot(io) : 0;
+			if (spd_mem_to_part_file(io, argv[i + 1], off, mem, len, save_dir, slot,
+				    img, sizeof(img))) {
+				if (!wov)
+					free((void *)mem);
+				return 1;
+			}
+			if (!wov)
+				free((void *)mem);
+			if (do_write_part(io, yes, argv[i + 1], img))
+				return 1;
+			i += 4;
+		} else if (strcmp(cmd, "firstmode") == 0) {
+			/* spd_dump firstmode mode_id: 4 bytes at miscdata+0x2420,
+			 * the mode the device boots into (mode_id + 0x53464D00).
+			 * The reference drives the whole thing at its 0x1000 step,
+			 * whatever blk_size says. */
+			char img[1200];
+			uint8_t modebuf[4];
+			uint64_t mode;
+			int slot, saved = io->step, rc;
+
+			need(argc, i, 1, "firstmode");
+			need_fdl2(io, "firstmode");
+			mode = parse_size(argv[i + 1]) + 0x53464D00ull;
+			if (mode > 0xffffffffull) {
+				fprintf(stderr, "firstmode: mode_id + 0x53464D00 does not fit in 32 bits\n");
+				return 1;
+			}
+			modebuf[0] = (uint8_t)mode;
+			modebuf[1] = (uint8_t)(mode >> 8);
+			modebuf[2] = (uint8_t)(mode >> 16);
+			modebuf[3] = (uint8_t)(mode >> 24);
+			io->step = 0x1000;
+			slot = io->nparts > 0 ? spd_active_slot(io) : 0;
+			rc = spd_mem_to_part_file(io, "miscdata", 0x2420, modebuf, 4, save_dir, slot,
+				img, sizeof(img));
+			if (!rc)
+				rc = do_write_part(io, yes, "miscdata", img);
+			io->step = saved;
+			if (rc)
+				return 1;
+			i += 2;
+		} else if (strcmp(cmd, "path") == 0) {
+			/* spd_dump path [save_location]: where a command that names
+			 * its own output file puts it. Ours is the image wof / wov /
+			 * firstmode build; an explicit output path (read-part, dump,
+			 * read_flash, read_mem) is used exactly as given, because
+			 * the menu passes absolute paths and the reference's my_fopen
+			 * would silently replace the directory with savepath. */
+			if (i + 1 < argc && !is_command(argv[i + 1])) {
+				save_dir = argv[i + 1];
+				i++;
+			}
+			fprintf(stderr, "save dir is %s\n", save_dir ? save_dir : ".");
+			i++;
+		} else if (strcmp(cmd, "keep_charge") == 0 || strcmp(cmd, "keep-charge") == 0) {
+			/* spd_dump keep_charge {0,1} (spd_dump.c:1285). Takes effect
+			 * on the next fdl, which is where the reference sends it. */
+			if (i + 1 >= argc || is_command(argv[i + 1])) {
+				fprintf(stderr, "keep_charge is %d\n", keep_charge_on());
+			} else {
+				keep_charge = atoi(argv[i + 1]) ? 1 : 0;
+				i++;
+			}
+			i++;
 		} else if (strcmp(cmd, "w-force") == 0 || strcmp(cmd, "w_force") == 0) {
 			int part_slot;
 			need(argc, i, 2, "w-force");
@@ -1405,6 +1881,52 @@ int main(int argc, char **argv)
 			if (spd_erase_part(io, argv[i + 1]))
 				return 1;
 			i += 2;
+		} else if (strcmp(cmd, "read_flash") == 0) {
+			/* spd_dump read_flash addr offset size FILE: a raw read by
+			 * address, for areas the partition table does not name.
+			 * 32-bit fields, hence the limit message from proto.c. */
+			int saved = io->step, rc;
+			need(argc, i, 4, "read_flash");
+			need_fdl2(io, "read_flash");
+			/* spd_dump calls dump_flash with `blk_size ? blk_size : 1024`
+			 * -- a different default from dump_partition's 0x1000, so
+			 * an unset --step must put the same 1024-byte requests on
+			 * the wire (the same temporary override exec_addr makes for
+			 * its 0x1000 stub chunks). */
+			if (!step_set)
+				io->step = 1024;
+			rc = spd_dump_flash(io, parse_size(argv[i + 1]), parse_size(argv[i + 2]),
+				parse_size(argv[i + 3]), argv[i + 4]);
+			io->step = saved;
+			if (rc)
+				return 1;
+			i += 5;
+		} else if (strcmp(cmd, "read_mem") == 0) {
+			/* The same opcode with the address put in the offset field
+			 * and a zero address (spd_dump dump_mem), and the same 1024
+			 * default step. */
+			int saved = io->step, rc;
+			need(argc, i, 3, "read_mem");
+			need_fdl2(io, "read_mem");
+			if (!step_set)
+				io->step = 1024;
+			rc = spd_dump_mem(io, parse_size(argv[i + 1]), parse_size(argv[i + 2]), argv[i + 3]);
+			io->step = saved;
+			if (rc)
+				return 1;
+			i += 4;
+		} else if (strcmp(cmd, "erase_flash") == 0) {
+			/* Raw erase by address. The reference asks check_confirm
+			 * ("erase flash") unless skip_confirm is on; --yes is our
+			 * equivalent of that flag and nothing more. It cannot name
+			 * persist or splloader -- it does not know about partitions
+			 * at all -- so the erase-part blacklist does not apply. */
+			need(argc, i, 2, "erase_flash");
+			need_fdl2(io, "erase_flash");
+			confirm(yes, "erase flash at", argv[i + 1]);
+			if (spd_erase_flash(io, parse_size(argv[i + 1]), parse_size(argv[i + 2])))
+				return 1;
+			i += 3;
 		} else if (strcmp(cmd, "verity") == 0) {
 			char what[64];
 			need(argc, i, 1, "verity");

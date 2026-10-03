@@ -41,4 +41,19 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
  * Refuses a row that does not cover 0x7B or is over 64MB. Sends nothing on
  * refusal. The caller has already taken the dangerous confirm. */
 int spd_verity(struct spd *io, int enable);
+
+/* spd_dump w_mem_to_part_offset(): build the image file the wof / wov /
+ * firstmode commands write and then flash, and hand back its path.
+ *
+ * At OFFSET 0 the file is exactly MEM[LEN] (spd_dump: fopen "wb" + fwrite).
+ * Past 0 the whole partition is read into the file first and MEM is written
+ * into it at OFFSET (spd_dump: dump_partition, then fopen "rb+", fseek,
+ * fwrite) -- the phone has no partial write, so the rest of the partition has
+ * to come from the phone. DIR is the `path` save directory, or NULL for the
+ * current one. OUT receives DIR/NAME.bin (the name as typed, as the reference
+ * builds it; the write itself still goes to the resolved row).
+ *
+ * Nothing is written to the phone here. 0 on success, -1 on refusal. */
+int spd_mem_to_part_file(struct spd *io, const char *name, uint64_t offset,
+	const uint8_t *mem, size_t len, const char *dir, int slot, char *out, size_t out_sz);
 #endif

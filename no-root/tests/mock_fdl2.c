@@ -16,6 +16,16 @@
  *   MOCK_MISC_OUT=F   (misc is always a live 1 MiB buffer) (partition writes land in it,
  *                     later reads see them); written to F after each END_DATA
  *                     and at READ_END of misc.
+ *   MOCK_READ_FLASH_MAX=N  READ_FLASH (0x06) answers at most N bytes, for the
+ *                     short-read path. MOCK_FAIL_READ_FLASH=1 NACKs it.
+ *   MOCK_GPT=1        user_partition holds a standard GPT (header at LBA 1,
+ *                     entries at LBA 2, four rows misc/boot_a/boot_b/userdata)
+ *                     instead of the pattern bytes, so spd_dump's gpt_info()
+ *                     path -- what a modern phone actually answers -- is
+ *                     exercised. MOCK_PTABLE must still list user_partition, or
+ *                     the read is NACKed before any of it is reached.
+ *   READ_FLASH/read_mem bytes are part_byte("flash", absolute address), so
+ *   `gen_expected flash ADDR SIZE` is what both must return.
  * Data bytes are pattern_byte(offset) ^ name_seed(name) (see mock_pattern.h).
  *
  * Stateful fake libusb: BootROM -> FDL1 -> FDL2 with partition reads.
@@ -54,6 +64,7 @@ static unsigned sum16_orig(const uint8_t *s, int len)
   return (crc >> 8) | ((crc & 0xff) << 8); }
 static uint32_t fnv1a(const uint8_t *p, int n) { uint32_t h = 2166136261u; while (n-- > 0) { h ^= *p++; h *= 16777619u; } return h; }
 static unsigned be16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 #include "mock_pattern.h"
@@ -70,6 +81,59 @@ static void load_tab(void)
 	fclose(f);
 }
 static int streq_env(const char *e, const char *n) { const char *v = getenv(e); return v && !strcmp(v, n); }
+
+/* MOCK_GPT=1: a standard GPT under `user_partition`, built once. The layout is
+ * the one spd_dump gpt_info() (common.c:977-1061) and spdhost gpt_probe() read:
+ * "EFI PART" at LBA 1, the entry array at the LBA named at header+72, 128-byte
+ * entries whose UTF-16LE name sits at +56 and whose sector range is at +32/+40.
+ * Nothing checks the CRCs or the type GUIDs, so they are left zero. The header
+ * at LBA 1 is also what tells both parsers the device is eMMC on 512-byte
+ * sectors. Sizes come out in bytes: (end - start + 1) * 512.
+ *
+ * The array is the full 128 entries a real GPT declares, with the four used
+ * ones followed by zeros: both parsers find the count by stopping at the first
+ * entry with an empty LBA range (gpt_info common.c:1029, gpt_probe), so a table
+ * without that terminator would test the two against different rules. */
+#define GPT_LEN (32u * 1024u)
+#define GPT_ENTRIES 128
+static uint8_t *gptbuf;
+static void gpt_build(void)
+{
+	static const char *names[] = { "misc", "boot_a", "boot_b", "userdata" };
+	static const uint64_t start[] = { 2048, 4096, 20480, 40960 };
+	static const uint64_t end[] = { 4095, 20479, 40959, 81919 };
+	uint8_t *h;
+	int i;
+
+	if (gptbuf) return;
+	gptbuf = calloc(1, GPT_LEN);
+	if (!gptbuf) return;
+	h = gptbuf + 512; /* LBA 1 */
+	memcpy(h, "EFI PART", 8);
+	h[8] = 0x00; h[9] = 0x00; h[10] = 0x01; h[11] = 0x00; /* revision 1.0 */
+	*(uint32_t *)(h + 12) = 92;   /* header size */
+	*(uint64_t *)(h + 24) = 1;    /* current LBA */
+	*(uint64_t *)(h + 40) = 34;   /* first usable LBA */
+	*(uint64_t *)(h + 48) = 81919;/* last usable LBA */
+	*(uint64_t *)(h + 72) = 2;    /* partition entry LBA */
+	*(uint32_t *)(h + 80) = GPT_ENTRIES; /* entries (128 * 128 B = 16 KiB) */
+	*(uint32_t *)(h + 84) = 128;  /* entry size */
+	for (i = 0; i < 4; i++) {
+		uint8_t *e = gptbuf + 2 * 512 + i * 128;
+		const char *n = names[i];
+		int k;
+		for (k = 0; n[k]; k++) e[56 + 2 * k] = (uint8_t)n[k];
+		*(uint64_t *)(e + 32) = start[i];
+		*(uint64_t *)(e + 40) = end[i];
+	}
+}
+static int gpt_wanted(const char *name)
+{
+	const char *v = getenv("MOCK_GPT");
+	if (!v || !strcmp(v, "0") || strcmp(name, "user_partition")) return 0;
+	gpt_build();
+	return gptbuf != NULL;
+}
 
 static uint64_t part_size(const char *n)
 {
@@ -149,8 +213,21 @@ static void log_out(const uint8_t *buf, int len)
 		if (off + want > cur_size) want = (uint32_t)(cur_size - off);
 		if (want > 0xffff) want = 0xffff;
 		if (!strcmp(cur_part, "misc") && (misc_init(), miscmem) && off + want <= misclen) memcpy(data, miscmem + off, want);
+		else if (gpt_wanted(cur_part) && off + want <= GPT_LEN) memcpy(data, gptbuf + off, want);
 		else if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
 		else for (k = 0; k < want; k++) data[k] = part_byte(cur_part, off + k);
+		make_reply(0x93, data, (int)want, crc); return; }
+	case 0x06: { /* READ_FLASH: {addr, size, offset}, all big-endian. The byte at
+	              * absolute address (addr + offset) is part_byte("flash", a), so
+	              * gen_expected can reproduce it and the same address read through
+	              * read_flash and through read_mem (which puts the address in the
+	              * first field and 0 in the third) returns the same bytes. */
+		uint32_t base = be32(raw + 4), want = be32(raw + 8), off = be32(raw + 12), k;
+		if (want > 0xffff) want = 0xffff;
+		if (streq_env("MOCK_FAIL_READ_FLASH", "1")) { make_reply(0x82, NULL, 0, crc); return; }
+		if (getenv("MOCK_READ_FLASH_MAX") && want > (uint32_t)atoi(getenv("MOCK_READ_FLASH_MAX")))
+			want = (uint32_t)atoi(getenv("MOCK_READ_FLASH_MAX"));
+		for (k = 0; k < want; k++) data[k] = part_byte("flash", (uint64_t)base + off + k);
 		make_reply(0x93, data, (int)want, crc); return; }
 	case 0x2d: load_tab(); if (ntab > 0) {
 		int k, j; memset(data, 0, ntab * 0x4c);

@@ -205,15 +205,19 @@ check "a table read leaves partition_<unixtime>.xml in SPDHOST_PART_XML_DIR (rc 
 # The automatic copy and `partition-list` must be the same bytes, or editing
 # one and feeding it back would depend on which command produced it.
 check "the automatic copy is byte-identical to partition-list (ours.xml)" cmp -s "$autof" ours.xml
-# Two table reads in one run are one file, as in the reference: the name is
-# picked once per process, so `parts` then `partition-list` does not leave two.
+# The device is asked for its table once per session and everything after that
+# re-prints the table already in hand, as in the reference: its call sites are
+# guarded by `if (gpt_failed == 1)` (spd_dump.c:755, 954, 1034) and a successful
+# read clears the flag (common.c:1143), so `parts` then `partition-list` is one
+# READ_PARTITION, one automatic file (the name is picked once per process), and
+# both outputs still written from the cached table.
 mkdir -p once
 MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/once \
 	sh once parts pt_once.txt partition-list once.xml; rc=$?
 n=$(ls "$tmp"/once/partition_*.xml 2>/dev/null | wc -l)
-check "two reads in one run leave one file, and the table was read twice (rc $rc, $n file)" \
-	bash -c "[ $rc = 0 ] && [ $n = 1 ] && [ -s once.xml ] &&
-		[ \$(grep -c '^parts: ' sh_once.log) = 2 ]"
+check "two listings in one run: one device read, one auto file, both outputs (rc $rc, $n file)" \
+	bash -c "[ $rc = 0 ] && [ $n = 1 ] && [ -s once.xml ] && [ -s pt_once.txt ] &&
+		[ \$(grep -c '^parts: ' sh_once.log) = 1 ] && [ \$(grep -c '^SEQ 2d ' sh_once.seq) = 1 ]"
 # Off unless asked for: an empty value means no copy, which is also what an
 # unset variable does, so no command grows a file nobody asked about.
 mkdir -p noxml
@@ -329,11 +333,15 @@ check "erase persist refused (rc $rc)" \
 sh nospl parts pt.txt erase-part splloader; rc=$?
 check "erase splloader refused (rc $rc)" bash -c "[ $rc != 0 ] && grep -q 'refusing' sh_nospl.log"
 
-# Oversized boot image is not sent.
+# Oversized boot image is not sent. The check is on a START_DATA frame (0x01),
+# not on the name appearing anywhere in the log: the table read probes the
+# DEVICE with READ_START (0x10) frames that carry partition names too, and
+# "uboot_a" has "boot_a" inside it, so a whole-file grep matched the probe the
+# FDL2 stage sends and stopped meaning "this partition was written".
 dd if=/dev/zero of=huge.img bs=1 count=1 seek=$((5*1024*1024)) status=none
 sh huge parts pt.txt write-part boot_a huge.img; rc=$?
 check "oversized write refused before START (rc $rc)" \
-	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_huge.log && ! grep -q '62006f006f0074005f006100' sh_huge.seq"
+	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_huge.log && ! grep -qE '^SEQ 01 .*62006f006f0074005f006100' sh_huge.seq"
 
 # An unknown name is skipped. The sibling that is on the phone is still written.
 mkdir -p skipdir
@@ -367,11 +375,19 @@ sh iduboot parts pt.txt write-part 2 boot.img; rc=$?
 check "the next numeric id (uboot_a) still writes (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'write uboot_a' sh_iduboot.log"
 
-# With no `parts` in the session, a numeric id takes the -2 path: the name is
-# sent as given. The lookup must fill the resolved name there too, or the
-# misc/calinv comparisons in spd_write_named read an uninitialised buffer.
-sh nonpt write-part 5 boot.img; rc=$?
-check "a numeric id with no table is sent as given and read no stale name (rc $rc)" \
+# A numeric id with no table takes the -2 path: the name is sent as given. The
+# lookup must fill the resolved name there too, or the misc/calinv comparisons
+# in spd_write_named read an uninitialised buffer.
+#
+# There is no "no table" session any more just by leaving `parts` out: the FDL2
+# stage reads the table by itself, as the reference does (spd_dump.c:755), so
+# the only way to reach -2 is a device that REFUSES one. The mock refuses only
+# when MOCK_PTABLE is unset -- its empty and "1" values both select the built-in
+# table -- so this case runs with the variable removed rather than blanked.
+sh_nopt() { local L=$1; shift; ( unset MOCK_PTABLE; MOCK_LOG=sh_$L.seq timeout 20 ./sh --usb-fd 7 --step 0x1000 --yes \
+	exec_addr 0x65015f08 custom_exec_no_verify_65015f08.bin "${LOAD[@]}" "$@" 7</dev/null </dev/null >sh_$L.log 2>&1 ); }
+sh_nopt nonpt write-part 5 boot.img; rc=$?
+check "a refused table: a numeric id is sent as given and read no stale name (rc $rc)" \
 	bash -c "grep -q 'no partition table yet' sh_nonpt.log && ! grep -q 'resolves to misc' sh_nonpt.log && ! grep -q 'restore calinv' sh_nonpt.log"
 
 # No splloader row: a file past the 256 KiB dump size is offered. This mock's
@@ -424,7 +440,7 @@ dd if=/dev/zero of=hugedir/boot_a.img bs=1 count=1 seek=$((5*1024*1024)) status=
 printf 'V' > hugedir/notapart.img
 sh hugedir parts pt.txt write-parts hugedir; rc=$?
 check "oversized image aborts the plan before START (rc $rc)" \
-	bash -c "[ $rc != 0 ] && ! grep -q '62006f006f0074005f006100' sh_hugedir.seq"
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 01 .*62006f006f0074005f006100' sh_hugedir.seq"
 
 # Two dumps in one process must both stay in the manifest (imei set).
 mkdir -p twodump

@@ -115,9 +115,23 @@ the emulated checks pass; it never runs them on a phone.
 
 ### Tests
 
-`tests/*.sh`, one per area (`write-seq`, `menu-dump`, `dhtb-tools`,
-`pac-tools`, …). Each builds its own binary and needs no device. Run
-`bash tests/<name>.sh` from `no-root/`.
+`tests/*.sh`, one per area (`write-seq`, `gpt-seq`, `menu-dump`,
+`dhtb-tools`, `pac-tools`, …). Each builds its own binary and needs no device.
+Run `bash tests/<name>.sh` from `no-root/`; the whole set runs in CI.
+
+Most of them drive `tests/mock_fdl2.c` through the real protocol, and the
+device it pretends to be is set with environment variables:
+
+| Knob | Effect |
+|---|---|
+| `MOCK_PTABLE` | unset → the device **refuses** a partition table (a bare ACK to `READ_PARTITION`); empty or `1` → its built-in four-row table; a filename → `name KiB` lines |
+| `MOCK_GPT` | `1` → `user_partition` holds a standard GPT (header at LBA 1, 128 entries at LBA 2: `misc` 1 MiB, `boot_a` 8 MiB, `boot_b` 10 MiB, `userdata` 20 MiB, then zeroed entries); unset → pattern bytes, so the SPRD `READ_PARTITION` fallback is taken |
+| `MOCK_SLOT` | `a` / `b` — what `misc`'s bootloader_control reports |
+| `MOCK_LOG` | the frame log the tests compare (`SEQ <type> len=…`) |
+
+`MOCK_PTABLE` must list `user_partition` for the GPT read to be answered at all,
+and every row must be at least 1024 KiB or spd_dump's divisor heuristic rescales
+the whole table. `tests/gpt-seq.sh` is the worked example.
 
 ## Safety
 
@@ -179,6 +193,25 @@ Handshake and loaders:
 - `exec_addr ADDR [FILE]` — BootROM stage only, before the first `fdl`: send
   FDL1, then FILE at ADDR as a no-verify stub that starts FDL1 (spd_dump's
   `exec_addr`). `ADDR 0` disables it.
+- `exec_addr2 ADDR [FILE]` — the same stub, but for a BootROM that accepts only
+  one download: FDL1's download is left open (no END), zero filler fills the gap
+  up to ADDR, and the stub rides in that same stream. spd_dump's `exec_addr2`,
+  CLI only; the menu always uses `exec_addr`.
+- `loadfdl FILE` — `fdl FILE`, with the address read out of FILE's own name,
+  which must carry `_0x<hex>` (spd_dump's `loadfdl`). A vendor pair named
+  `fdl1-dl_0x65000800.bin` / `fdl2-dl_0x9efffe00.bin` can then be sent without
+  being told the addresses. A name with no `0x` in it is refused.
+- `loadexec FILE` — the BootROM-stage `exec_addr`, with the address read out of
+  FILE's name (`custom_exec_no_verify_<hex>.bin`). A file that is not there
+  prints `does not exist` and leaves the address at 0, as spd_dump does; after
+  the first `fdl` the verb is ignored, also as spd_dump ignores it.
+- `loadexec2 FILE` — `loadexec`, in `exec_addr2`'s one-download form.
+- `keep_charge 0|1` — keep the phone powered between stages instead of letting
+  it drop (spd_dump's `keep_charge`). It takes effect on the next `fdl`, which
+  is where the loader is told. With no argument it prints the setting.
+- `path DIR` — where a command that builds its own output file puts it
+  (`wof`/`wov`, `firstmode`). A command given an explicit output path uses that
+  path as written.
 
 Partition table and reads:
 
@@ -190,6 +223,9 @@ Partition table and reads:
   convert with `bytes = units << (20 - divisor)`, where `divisor` starts at
   10 and drops while any non-zero entry is smaller than `1 << divisor`. The
   menu does this and writes `backup/partition_bytes.txt`.
+  On a phone whose `user_partition` holds a standard GPT — which is every
+  modern device — the rows come from that table instead and the unit is MiB,
+  the same number `partition-list` writes into the XML.
 - `partition-list [FILE]` — the same table as the XML `repartition` reads,
   byte for byte what spd_dump's `partition_list` writes for it: one
   `<Partitions>` list, `size` in the table's own unit, last row `0xffffffff`
@@ -204,6 +240,26 @@ Partition table and reads:
   each table read leaves `/sdcard/Download/partition_<unixtime>.xml` behind and
   option 4 (list partitions) says so. One name per run: a session that reads the
   table twice rewrites its own copy. `--part-xml ""` turns it off.
+
+  The table is read the way spd_dump reads it, and **once per session**.
+  spd_dump keeps a `gpt_failed` latch (`spd_dump.c:144`, set by
+  `common.c:1143/1088/1095`) and guards every call site with
+  `if (gpt_failed == 1)`, so the first command that needs the table asks the
+  device and everything after it in the same run re-prints the table already in
+  hand — `parts`, `partition-list`, `check-part`, `part-size`, `read-parts`,
+  `print` and `write-part` share one read. spdhost reads it at the same point,
+  at the FDL2 stage of `fdl`, so the table is there whether or not the session
+  asks for it and a later listing costs no USB round trips.
+  The read is `user_partition`, the first 32 KiB, tried as a **standard GPT**
+  first (spd_dump's `gpt_info()`, `common.c:977`): header at LBA 1, entry array
+  at `partition_entry_lba`, names from `partition_name` at offset 56 of each
+  128-byte entry, sizes from the LBA range. A header found at sector 1 means
+  eMMC, anywhere else UFS. The dump is kept as `pgpt.bin` and the message says
+  so. Only when that is not a GPT does it fall back to the SPRD
+  `READ_PARTITION` (0x2d) packet, whose reply is kept as `sprdpart.bin`. A
+  device that answers neither is reported as having no table, and a name lookup
+  then sends the name as given — `parts` is still not needed first, but without
+  a table a numeric id cannot be resolved.
 - `check-part NAME` — print `1` when the partition exists in the live table,
   `0` when it does not, like `spd_dump check_part`. Needs `parts`.
 - `part-size NAME` (also `size_part`, `part_size`) — print the byte size from
@@ -211,7 +267,20 @@ Partition table and reads:
   Needs `parts`. The menu's read-only "partition size" action uses this.
 - `read-part NAME OFF SIZE OUT` — `SIZE` may be `-` or `full` for the whole
   partition. `K`/`M`/`G` suffixes and `0x` hex work; a bare number is bytes.
-  Needs `parts`.
+  `-`/`full` and a `0xffffffff` size are the two cases where the size is asked
+  of the device (spd_dump's `check_partition`), which is the only way to size a
+  partition the table does not know; a name the device will not size falls back
+  to the table's own size. `splloader` stays at its fixed 256 KiB. Needs
+  `parts`.
+- `print` (also `p`) — spd_dump's `p`: list each partition with its byte size,
+  `splloader` first as row 0 at 256 KiB. Read-only, no `parts` needed.
+- `read-parts FILE.xml [DIR]` — spd_dump's `read_parts`: read every partition
+  the XML list names into `DIR/NAME.bin`, in the list's own order. `DIR`
+  defaults to the `path` directory, then the current directory. `userdata` in
+  the list is skipped, `splloader` is 256 KiB, a `size="0xffffffff"` row is
+  sized by the device, and `super` reads its `metadata` beside it. The list
+  itself is copied into `DIR` only when a destination was named — with none,
+  the reference leaves it where it is, and so does spdhost. Needs `parts`.
 - `dump all|all_lite|NAME DIR` — after `parts`, same session. `all` and
   `all_lite` take names and sizes from the table, add `splloader` (256 KiB),
   and skip blackbox/cache/userdata; `all_lite` also skips the inactive slot.
@@ -250,6 +319,14 @@ Writes:
   with `0xED26FF3A`) is sent as that container and each chunk may wait up to
   100 seconds. Junk names (`*.txt`, `SHA256SUMS`, `misc-slotinfo`,
   `misc-before-*`, `*_bak`) are skipped.
+- `wof NAME OFF FILE` / `wov NAME OFF VALUE` — patch `FILE` (or the 32-bit
+  `VALUE`, little-endian) into `NAME` at `OFF`. `fixnv*`, `runtimenv*` and
+  `userdata` are blacklisted, as in spd_dump's `w_mem_to_part_offset`; the
+  phone has no partial write, so the whole partition is read, patched and
+  written back under the same `yes` as `write-part`.
+- `firstmode N` — write `0x53464D00 + N` at `miscdata` `0x2420` (spd_dump's
+  `firstmode`). Writes misc, so it takes the same read-back and `yes` as the
+  other misc writes.
 - `repartition FILE.xml` — replace the phone's partition map with
   `<Partition id="name" size="N"/>` rows, `N` in MiB or `0xffffffff` for the
   last row ("take the rest"). Asks for `yes`; the menu never passes `--yes`
@@ -260,6 +337,16 @@ Writes:
   boot.img` in one session writes against the enlarged boot. A later `parts`
   re-reads the table from the device, which need not match until the phone
   restarts. Up to 862 rows — the 16-bit frame length.
+
+The loader tells us what it is stored on — `Da_Info.dwStorageType`, read from
+the FDL2 exec reply and from the flash-info exchange that follows it, and
+corroborated by the table read (`Storage is emmc`, `Storage is ufs`, `Storage
+is nand`, printed once per session). On eMMC and UFS the table is read
+automatically after FDL2; on NAND the reference does not read one at all
+(spd_dump.c:772), and neither does spdhost, so `parts` has to be run by hand if
+you need it. NAND also refuses `w-force` (`w-force is not allowed on
+NAND(UBI) devices`) and a plain write skips the `_bak` twin, both as
+spd_dump does.
 
 Slots and misc:
 
@@ -696,6 +783,92 @@ reopen child probes the same way before choosing its `termux-usb` arguments
 rather than hardcoding `-E`. Without that, a phone that resets after a loader
 step on an older Termux:API could never be reopened — the handle stayed dead
 and every following transfer timed out.
+
+## Where this deliberately differs from spd_dump
+
+Everything the two tools share is meant to put the same bytes on the wire, and
+the sequence tests compare frame for frame against a build of spd_dump. These
+are the places where spdhost knowingly does something else:
+
+- **The verbs that only make sense inside spd_dump's own debug loop are not
+  ported**: `send`, `write_flash`, `write_word`, `sendloop`, `end_data`,
+  `rawdata`, `transcode`, `disable_transcode`, `blk_size`/`bs`,
+  `fblk_size`/`fbs`, `nand_id`, `read_pactime`, `baudrate`, `slot`, `timeout`
+  and `verbose`. Each is either a raw packet injector, a knob our CLI already
+  has as an option (`--timeout`, `--verbose`, `--step`), or, in the case of
+  `baudrate`, compiled out of spd_dump itself under `USE_LIBUSB` (`spd_dump.c`
+  line 794). Transcode and the loader's raw-data mode are still *honoured* —
+  they are read from `Da_Info` and acted on where the reference acts on them
+  (`DISABLE_TRANSCODE` after FDL2) — they just cannot be toggled by hand.
+- **`erase_all` and `erase_part all` are not offered.** `spd_dump.c:1068,1088`
+  send `erase_partition("all")` after a typed confirmation. spdhost refuses
+  `all` in `erase-part` even with `--yes` or `--dangerous`; `danger-erase` is
+  the only path to a whole-partition erase, and it is limited to `persist` and
+  `splloader` names.
+- **`exec` is not a separate verb.** The reference sends `EXEC_DATA` for the
+  FDL2 loader from an `exec` command that must follow the two `fdl`s; spdhost's
+  second `fdl` sends it itself. `fdl ... fdl ...` therefore reaches FDL2 where
+  the reference needs `fdl ... fdl ... exec skip_confirm 1`.
+- **`exec_addr` refuses a missing stub; the reference drops it.** spd_dump's
+  `exec_addr` path (`spd_dump.c:815`) zeroes `exec_addr` when
+  `custom_exec_no_verify_<hex>.bin` is not on disk and then flashes a plain
+  download — the run proceeds without the no-verify stub, which is the one
+  variable that decides whether FDL1 is signature-checked. spdhost names the
+  missing file and stops (rc 1) instead of starting that run.
+- **Verb spellings.** The reference's one-letter aliases `r`, `w` and `e` are
+  not accepted; they are `dump`, `write-part` and `erase-part` here, and `dump`
+  takes an explicit output directory rather than writing to the working
+  directory. Wherever the reference spells a verb with an underscore
+  (`read_part`, `check_part`, `partition_list`, `read_parts`, `size_part`,
+  `w_force`, `keep_charge`, `read_flash`, `read_mem`, `erase_flash`) that
+  spelling still works.
+- **`skip_confirm` is `--yes`.** The reference's `skip_confirm 1` turns off its
+  own typed prompts; spdhost spells that `--yes`, and the menu never passes it.
+- **Exit codes.** spd_dump reaches `FDL2 >` and keeps reading commands, so a
+  scripted run of it ends on a timeout; spdhost runs the command list and
+  exits, nonzero on the first failure unless `--keep-going`.
+- **Where the text goes.** spd_dump prints everything, including its table, to
+  stderr. spdhost prints command *data* (`print`, `parts`, `part-size`,
+  `check-part`, `chip-uid`) to stdout and its progress to stderr, so the output
+  can be piped. The messages a test greps for are the same strings.
+- **Up to 862 list entries.** spd_dump's partition-list parser stops at 128
+  (`spd_dump.c` `dump_partitions`), while the frame it sends can hold 862;
+  spdhost takes the larger bound.
+- **The standard-GPT parse is bounded where the reference is not.** spd_dump's
+  `gpt_info()` trusts whatever the 32 KiB `user_partition` dump happens to
+  contain: a header at sector 0 makes its `real_SECTOR_SIZE` zero, it then seeks
+  and reads with that, and a table claiming more entries than the dump holds is
+  read past the end of the buffer. spdhost refuses the zero-sector header with a
+  message, reads only the entries the 32 KiB dump actually contains (and says
+  how many it trimmed), caps the count at 4096, and refuses an entry size below
+  the 128 bytes a record needs. The tables a real phone answers with are parsed
+  identically to the reference — the row names, sizes and the resulting XML are
+  byte for byte the same (`tests/gpt-seq.sh` asserts that against the vendored
+  spd_dump).
+- **A full GPT with no empty entry.** spd_dump calls the count "the index of the
+  first entry whose LBA range is all zero" (`common.c:1029`); when every entry is
+  used, that index never arrives and its count stays 0, which it then reports as
+  no table at all. spdhost takes all the entries in that one case, so the rows
+  are not lost. A phone always leaves the array padded with zeroed entries, so
+  this only matters for a table packed to the last record.
+- **A read the device will not size falls back to the table.** spd_dump's
+  `check_partition` returns 0 when the loader refuses to answer, and a
+  `read_parts` row of `0xffffffff` then reads nothing. spdhost uses the table's
+  own size for that row instead and says so, so a list dumped from one phone
+  still reads on a loader that will not answer the probe. `read-part
+  splloader 0 -` is the other side of the same coin: the reference refuses the
+  name, spdhost keeps its fixed 256 KiB. A name the live table has no row for
+  is refused too, the reference says `part not exist` and skips the row, but
+  spdhost reads it when an explicit size was given — that is how a raw region
+  with no table row is read without inventing a partition first.
+- **NAND.** spdhost tracks the storage type and honours its consequences
+  (no automatic table read, `w-force` refused, no `_bak` twin), but the UBI
+  sizing path in `dump_partitions` and the `read_pactime`/NAND-id handling are
+  not ported. Read and write on eMMC and UFS are the supported paths.
+- **Raw-data writes.** `Da_Info.bSupportRawData` and `dwFlushSize` are parsed
+  and reported, but the `ENABLE_RAW_DATA` write protocol is not implemented;
+  spdhost writes with the plain protocol, which every loader accepts and which
+  puts the same image bytes in the same partition.
 
 ## What this is not
 

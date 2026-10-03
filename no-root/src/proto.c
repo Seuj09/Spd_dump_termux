@@ -21,8 +21,12 @@
 #define BSL_CMD_END_DATA 0x03
 #define BSL_CMD_EXEC_DATA 0x04
 #define BSL_CMD_NORMAL_RESET 0x05
+#define BSL_CMD_READ_FLASH 0x06
 #define BSL_CMD_ERASE_FLASH 0x0a
+#define BSL_CMD_READ_FLASH_INFO 0x0d
+#define BSL_CMD_DISABLE_TRANSCODE 0x21
 #define BSL_CMD_REPARTITION 0x0b
+#define BSL_CMD_KEEP_CHARGE 0x13
 #define BSL_CMD_READ_START 0x10
 #define BSL_CMD_READ_MIDST 0x11
 #define BSL_CMD_READ_END 0x12
@@ -35,6 +39,7 @@
 #define BSL_REP_VER 0x81
 #define BSL_REP_READ_FLASH 0x93
 #define BSL_REP_INCOMPATIBLE_PARTITION 0x96
+#define BSL_REP_READ_FLASH_INFO 0x9b
 #define BSL_REP_READ_CHIP_UID 0xab
 #define BSL_REP_READ_PARTITION 0xba
 #define BSL_REP_LOG 0xff
@@ -124,6 +129,11 @@ static uint32_t rd32le(const uint8_t *p)
 		((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static uint64_t rd64le(const uint8_t *p)
+{
+	return (uint64_t)rd32le(p) | ((uint64_t)rd32le(p + 4) << 32);
+}
+
 /* CRC-16/XMODEM, init 0. The BootROM uses this on the unescaped body. */
 static unsigned crc16(const uint8_t *s, unsigned len)
 {
@@ -188,6 +198,12 @@ struct spd *spd_new(int verbose, int step)
 	io->verbose = verbose;
 	io->step = step > 0 ? step : 4096;
 	io->flags = SPD_F_TRANSCODE;
+	/* spd_dump's `int selected_ab = -1`: "the device has not been asked yet".
+	 * calloc's 0 would read as "asked, and the answer is not A/B". */
+	io->slot_bcb = -1;
+	/* spd_dump's `int gpt_failed = 1;` (spd_dump.c:144) -- same reasoning: the
+	 * table has not been asked for yet. */
+	io->ptab_state = 1;
 	io->raw = malloc(RAW_CAP);
 	io->enc = malloc(2 + RAW_CAP * 2);
 	io->recv = malloc(RECV_CAP);
@@ -469,7 +485,10 @@ const uint8_t *spd_payload(struct spd *io, unsigned *len)
 	return io->raw + 4;
 }
 
-int spd_check_ok(struct spd *io)
+/* Send the pending frame and read one reply: 0 on ACK. QUIET drops the
+ * "unexpected response" line -- check_partition() probes with sizes the device
+ * is expected to refuse, and the reference is silent about those refusals. */
+static int wait_ack(struct spd *io, int quiet)
 {
 	unsigned t;
 	int n;
@@ -477,17 +496,24 @@ int spd_check_ok(struct spd *io)
 		return -1;
 	n = spd_recv(io, io->usb.timeout_ms);
 	if (n == 0) {
-		fprintf(stderr, "timeout waiting for ack\n");
+		if (!quiet)
+			fprintf(stderr, "timeout waiting for ack\n");
 		return -1;
 	}
 	if (n < 0)
 		return -1;
 	t = spd_type(io);
 	if (t != BSL_REP_ACK) {
-		fprintf(stderr, "unexpected response 0x%04x\n", t);
+		if (!quiet)
+			fprintf(stderr, "unexpected response 0x%04x\n", t);
 		return -1;
 	}
 	return 0;
+}
+
+int spd_check_ok(struct spd *io)
+{
+	return wait_ack(io, 0);
 }
 
 /* Settle (and optional short IN drain) after BootROM line-state. */
@@ -810,6 +836,22 @@ int spd_connect(struct spd *io)
 	return spd_check_ok(io);
 }
 
+/* spd_dump spd_dump.c:425 and :706 -- `if (keep_charge) { encode_msg(io,
+ * BSL_CMD_KEEP_CHARGE, NULL, 0); if (!send_and_check(io)) DBG_LOG("KEEP_CHARGE
+ * FDL1\n"); }`. Sent once per run, right after the FDL1-stage CMD_CONNECT, and
+ * it tells the loader to keep charging the battery while it runs. A refusal is
+ * not an error: the reference only logs the success, so a loader that does not
+ * know the command still flashes. 0 = the loader took it. */
+int spd_keep_charge(struct spd *io)
+{
+	spd_encode(io, BSL_CMD_KEEP_CHARGE, NULL, 0);
+	if (spd_send(io) < 0)
+		return -1;
+	if (spd_recv(io, io->usb.timeout_ms) <= 0)
+		return -1;
+	return spd_type(io) == BSL_REP_ACK ? 0 : -1;
+}
+
 static uint8_t *load_file(const char *path, size_t *out)
 {
 	FILE *f = fopen(path, "rb");
@@ -883,6 +925,40 @@ int spd_send_loader(struct spd *io, const char *path, uint32_t addr)
  * but the last exactly like spd_dump; on the final MIDST we send and TOLERATE
  * a missing/timeout ack (and a non-ACK type), because that is the stub taking
  * over — not an error. The bytes put on the wire are identical either way. */
+/* The final MIDST of a download the stub takes over from: send it, then accept
+ * a missing ack, a recv error or any non-ACK type. The bytes on the wire are
+ * what matter; the reference's send_and_check would exit here, but the stub
+ * running is the normal reason for silence. Shared by the two exec_addr paths
+ * so they cannot drift. */
+static void send_final_chunk(struct spd *io, const char *what)
+{
+	int got;
+
+	if (io->dry) {
+		/* Test hook: SPDHOST_DRY_EXEC_NOACK=1 simulates the stub seizing
+		 * execution before it acks the last chunk. */
+		const char *e = getenv("SPDHOST_DRY_EXEC_NOACK");
+		io->dry_drop_ack = e && e[0] == '1';
+	}
+	if (spd_send(io) < 0) {
+		/* A USB reset as the stub starts is expected; anything else is a
+		 * real send failure (spd_dump exits here too). */
+		if (reopen_if_gone(io) != 0) {
+			fprintf(stderr, "%s: send of final chunk failed\n", what);
+			exit(1);
+		}
+	} else if ((got = spd_recv(io, io->usb.timeout_ms)) == 0) {
+		fprintf(stderr, "%s: no ack on final chunk "
+			"(stub likely running) - continuing\n", what);
+	} else if (got < 0) {
+		if (reopen_if_gone(io) != 0)
+			fprintf(stderr, "%s: recv error after final chunk - continuing\n", what);
+	} else if (spd_type(io) != BSL_REP_ACK) {
+		fprintf(stderr, "%s: final chunk response 0x%04x "
+			"(stub likely running) - continuing\n", what, spd_type(io));
+	}
+}
+
 int spd_send_exec_file(struct spd *io, const char *path, uint32_t addr)
 {
 	size_t size = 0;
@@ -902,41 +978,13 @@ int spd_send_exec_file(struct spd *io, const char *path, uint32_t addr)
 		exit(1);
 	for (off = 0; off < size; ) {
 		size_t n = size - off;
-		int last;
 		if (n > (size_t)step)
 			n = (size_t)step;
-		last = (off + n >= size);
 		spd_encode(io, BSL_CMD_MIDST_DATA, mem + off, n);
-		if (last) {
-			/* Final chunk: tolerate a missing ack (stub took over). */
-			int got;
-			if (io->dry) {
-				/* Test hook: SPDHOST_DRY_EXEC_NOACK=1 simulates the stub
-				 * seizing execution before it acks the last chunk. */
-				const char *e = getenv("SPDHOST_DRY_EXEC_NOACK");
-				io->dry_drop_ack = e && e[0] == '1';
-			}
-			if (spd_send(io) < 0) {
-				/* A USB reset as the stub starts is expected; anything
-				 * else is a real send failure (spd_dump exits here too). */
-				if (reopen_if_gone(io) != 0) {
-					fprintf(stderr, "exec_addr: send of final chunk failed\n");
-					exit(1);
-				}
-			} else if ((got = spd_recv(io, io->usb.timeout_ms)) == 0) {
-				fprintf(stderr, "exec_addr: no ack on final chunk "
-					"(stub likely running) - continuing\n");
-			} else if (got < 0) {
-				if (reopen_if_gone(io) != 0)
-					fprintf(stderr, "exec_addr: recv error after final chunk - continuing\n");
-			} else if (spd_type(io) != BSL_REP_ACK) {
-				fprintf(stderr, "exec_addr: final chunk response 0x%04x "
-					"(stub likely running) - continuing\n", spd_type(io));
-			}
-		} else {
-			if (spd_check_ok(io))
-				exit(1);
-		}
+		if (off + n >= size)
+			send_final_chunk(io, "exec_addr");
+		else if (spd_check_ok(io))
+			exit(1);
 		off += n;
 	}
 	/* No END_DATA, no EXEC_DATA — exactly like spd_dump's exec_addr path. */
@@ -944,6 +992,108 @@ int spd_send_exec_file(struct spd *io, const char *path, uint32_t addr)
 	fprintf(stderr, "exec_addr: sent %s (%zu bytes) at 0x%08x (no END/EXEC)\n",
 		path, size, addr);
 	return 0;
+}
+
+int spd_send_loader_appended(struct spd *io, const char *path, uint32_t addr,
+	const char *stub, uint32_t stub_addr)
+{
+	size_t size = 0, ssize = 0;
+	uint8_t *mem = load_file(path, &size);
+	uint8_t *smem = load_file(stub, &ssize);
+	uint8_t hdr[8];
+	uint8_t *zeros;
+	size_t off;
+	int step = 528; /* spd_dump's v2 branch sends every frame at a fixed 528 */
+	uint64_t gap;
+
+	if (size > 0xffffffffu)
+		die("loader too big");
+	if (ssize > 0xffffffffu || ssize == 0)
+		die("exec file too big or empty");
+	/* spd_dump: `int gapsize = exec_addr - addr - execsize;` -- a stub that is
+	 * not past the end of the loader leaves a negative gap, and its loop then
+	 * sends no filler at all. Mirror that instead of underflowing. */
+	gap = (uint64_t)stub_addr > (uint64_t)addr + size
+		? (uint64_t)stub_addr - addr - size : 0;
+
+	wr32be(hdr, addr);
+	wr32be(hdr + 4, (uint32_t)size);
+	spd_encode(io, BSL_CMD_START_DATA, hdr, 8);
+	if (spd_check_ok(io))
+		exit(1);
+	/* FDL1 itself, with NO END_DATA: the download stays open. */
+	for (off = 0; off < size; ) {
+		size_t n = size - off;
+		if (n > (size_t)step)
+			n = (size_t)step;
+		spd_encode(io, BSL_CMD_MIDST_DATA, mem + off, n);
+		if (spd_check_ok(io))
+			exit(1);
+		off += n;
+	}
+	/* The filler, up to the stub's address. The reference sends an
+	 * uninitialized malloc(528) here; nothing reads it, so zeros are sent. */
+	zeros = calloc(1, (size_t)step);
+	for (off = 0; off < (size_t)gap; ) {
+		size_t n = (size_t)gap - off;
+		if (n > (size_t)step)
+			n = (size_t)step;
+		spd_encode(io, BSL_CMD_MIDST_DATA, zeros, n);
+		if (spd_check_ok(io))
+			exit(1);
+		off += n;
+	}
+	free(zeros);
+	/* The stub: ONE MIDST with the whole file (spd_dump's
+	 * `encode_msg(BSL_CMD_MIDST_DATA, buf, execsize)`), which is also the last
+	 * packet of the download -- so its ack may never come. */
+	spd_encode(io, BSL_CMD_MIDST_DATA, smem, (uint32_t)ssize);
+	send_final_chunk(io, "exec_addr2");
+	free(mem);
+	free(smem);
+	fprintf(stderr, "exec_addr2: sent %s (%zu bytes) at 0x%08x + %zu zero bytes,"
+		" then %s (%zu bytes) in the same download (no END/EXEC)\n",
+		path, size, addr, (size_t)gap, stub, ssize);
+	return 0;
+}
+
+/* spd_dump get_Da_Info() (common.c:1955): the reply to EXEC_DATA on a loader that
+ * answers BSL_REP_INCOMPATIBLE_PARTITION carries its Da_Info. Two shapes on the
+ * wire: a `newt` key/length/value list, or the DA_INFO_T struct itself
+ * (common.h:162, packed). Only two fields change what we do, so only two are
+ * read: dwStorageType (BSL: key 6 / offset 16) and bDisableHDLC (key 0 /
+ * offset 4). bSupportRawData (key 2 / offset 9) and dwFlushSize are decoded by
+ * the reference into a raw-data write protocol this tool does not implement;
+ * see the README's divergence list. */
+static void da_info_parse(struct spd *io)
+{
+	unsigned plen = 0;
+	const uint8_t *pl = spd_payload(io, &plen);
+	uint32_t hdlc = 0, storage = 0;
+
+	if (plen > 6 && rd32le(pl) == 0x7477656e) { /* "newt" */
+		size_t off = 4;
+		while (off + 4 <= plen) {
+			uint16_t key = (uint16_t)(pl[off] | ((uint16_t)pl[off + 1] << 8));
+			uint16_t vlen = (uint16_t)(pl[off + 2] | ((uint16_t)pl[off + 3] << 8));
+			off += 4;
+			if (off + vlen > plen)
+				break;
+			if (key == 0 && vlen >= 4)
+				hdlc = rd32le(pl + off);
+			else if (key == 6 && vlen >= 4)
+				storage = rd32le(pl + off);
+			off += vlen;
+		}
+	} else if (plen >= 20) { /* DA_INFO_T: dwVersion, bDisableHDLC, ... dwStorageType */
+		hdlc = rd32le(pl + 4);
+		storage = rd32le(pl + 16);
+	}
+	if (storage)
+		io->storage = (int)storage;
+	if (hdlc)
+		io->hdlc_off_wanted = 1;
+	fprintf(stderr, "FDL2: incompatible partition\n");
 }
 
 int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible)
@@ -972,11 +1122,45 @@ int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible)
 	if (t == BSL_REP_ACK)
 		return 0;
 	if (allow_incompatible && t == BSL_REP_INCOMPATIBLE_PARTITION) {
-		fprintf(stderr, "exec returned incompatible-partition (continuing)\n");
+		/* The reply body is the loader's Da_Info (spd_dump.c:731-732). */
+		da_info_parse(io);
 		return 0;
 	}
 	fprintf(stderr, "exec response 0x%04x\n", t);
 	return -1;
+}
+
+/* spd_dump's fdl2 stage, after the EXEC_DATA reply (spd_dump.c:736-752): ask the
+ * loader for its flash info, then honour a Da_Info request to turn HDLC off.
+ * A BSL_REP_READ_FLASH_INFO reply is NAND (Da_Info.dwStorageType = 0x101); any
+ * other reply is logged and ignored, exactly as the reference does -- most
+ * loaders answer nothing useful here. Non-fatal either way: a device that does
+ * not answer is not asked twice. */
+int spd_flash_info(struct spd *io)
+{
+	unsigned t;
+
+	spd_encode(io, BSL_CMD_READ_FLASH_INFO, NULL, 0);
+	if (spd_send(io) < 0)
+		return -1;
+	if (spd_recv(io, io->usb.timeout_ms) <= 0)
+		return -1;
+	t = spd_type(io);
+	if (t == BSL_REP_READ_FLASH_INFO) {
+		io->storage = SPD_STORAGE_NAND;
+		fprintf(stderr, "Storage is nand\n");
+	} else if (t != BSL_REP_ACK) {
+		fprintf(stderr, "unexpected response (0x%04x)\n", t);
+	}
+	if (io->hdlc_off_wanted) {
+		spd_encode(io, BSL_CMD_DISABLE_TRANSCODE, NULL, 0);
+		if (!spd_check_ok(io)) {
+			io->flags &= ~SPD_F_TRANSCODE;
+			if (io->verbose)
+				fprintf(stderr, "DISABLE_TRANSCODE\n");
+		}
+	}
+	return 0;
 }
 
 static int put_name(uint8_t *dst, size_t nchars, const char *name)
@@ -1009,8 +1193,13 @@ static void select_part(struct spd *io, const char *name, uint64_t size, unsigne
 	spd_encode(io, cmd, pkt, (size_t)n);
 }
 
-static int read_part_core(struct spd *io, const char *name, uint64_t offset, uint64_t size,
-	const char *out_path, uint8_t *mem)
+/* QUIET silences the one-line summary. spd_dump's partition_list() wraps its
+ * GPT probe in `io->verbose = 0` (common.c:1073-1076) because that read is not
+ * the command the user asked for, and on a device whose table is an SPRD packet
+ * it always comes back short -- which would otherwise print a failure on every
+ * single session. */
+static int read_part_core_q(struct spd *io, const char *name, uint64_t offset, uint64_t size,
+	const char *out_path, uint8_t *mem, int quiet)
 {
 	FILE *fo = NULL;
 	uint64_t done = 0;
@@ -1026,7 +1215,8 @@ static int read_part_core(struct spd *io, const char *name, uint64_t offset, uin
 	 * READ_END and reported, so a batch can go on with the next partition. */
 	select_part(io, name, offset + size, BSL_CMD_READ_START);
 	if (spd_check_ok(io)) {
-		fprintf(stderr, "read %s: READ_START refused (no such partition or size too big)\n", name);
+		if (!quiet)
+			fprintf(stderr, "read %s: READ_START refused (no such partition or size too big)\n", name);
 		spd_encode(io, BSL_CMD_READ_END, NULL, 0);
 		spd_check_ok(io);
 		return -1;
@@ -1096,19 +1286,368 @@ static int read_part_core(struct spd *io, const char *name, uint64_t offset, uin
 		fprintf(stderr, "read %s: READ_END not acked\n", name);
 		bad = 1;
 	}
-	fprintf(stderr, "read %s: %llu of %llu bytes -> %s%s\n", name, (unsigned long long)done,
-		(unsigned long long)size, out_path ? out_path : "memory", (bad || done != size) ? " (INCOMPLETE)" : "");
+	if (!quiet)
+		fprintf(stderr, "read %s: %llu of %llu bytes -> %s%s\n", name, (unsigned long long)done,
+			(unsigned long long)size, out_path ? out_path : "memory",
+			(bad || done != size) ? " (INCOMPLETE)" : "");
 	return (!bad && done == size) ? 0 : -1;
 }
 
 int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path)
 {
-	return read_part_core(io, name, offset, size, out_path, NULL);
+	return read_part_core_q(io, name, offset, size, out_path, NULL, 0);
 }
 
 int spd_read_part_mem(struct spd *io, const char *name, uint64_t offset, uint64_t size, uint8_t *mem)
 {
-	return read_part_core(io, name, offset, size, NULL, mem);
+	return read_part_core_q(io, name, offset, size, NULL, mem, 0);
+}
+
+/* ------------------------------------------------------------------ *
+ * check_partition(): the one command that asks the DEVICE how big a
+ * partition is instead of reading the table (spd_dump common.c:1471).
+ * The table is what the phone booted with; the device is what the phone
+ * has now, which is the whole point for a row the XML wrote as
+ * 0xffffffff ("take the rest") -- super after a repartition.
+ *
+ * Three answers, tried in this order, exactly as the reference does:
+ *   1. find_partition_size_new(): read "<NAME>_size" (0x80 bytes at 0)
+ *      and parse the loader's own text ("size:...: 0x...", or lk's
+ *      "partition ... total size: 0x..."). Only on A/B, because that is
+ *      the only layout the reference keeps such rows for.
+ *   2. a probe: READ_START of 8 bytes, MIDST 8 at 0; a READ_FLASH reply
+ *      means the partition is there.
+ *   3. a binary search for the size: ask for 0xffffffff and let the
+ *      loader's refusal say "too big", then halve down. The reference's
+ *      own loop, with its two branches -- a loader that refuses the
+ *      0xffffffff START outright is NAND (its bounds are 10 and 20, and
+ *      the result loses one 1 KiB block per round).
+ *
+ * AB is the active slot, >0 on A/B. NEED_SIZE asks for the size (step 3);
+ * without it the answer is just 1/0 ("the partition exists").
+ */
+static void read_end(struct spd *io)
+{
+	spd_encode(io, BSL_CMD_READ_END, NULL, 0);
+	wait_ack(io, 1);
+}
+
+static uint64_t part_size_from_device(struct spd *io, const char *name)
+{
+	char tmp[80], text[512];
+	uint8_t req[8];
+	unsigned plen = 0;
+	const uint8_t *p;
+	unsigned long long off = 0;
+	int got;
+
+	if (snprintf(tmp, sizeof(tmp), "%s_size", name) >= (int)sizeof(tmp))
+		return 0;
+	select_part(io, tmp, 0x80, BSL_CMD_READ_START);
+	if (wait_ack(io, 1)) {
+		read_end(io);
+		return 0;
+	}
+	wr32le(req, 0x80);
+	wr32le(req + 4, 0);
+	spd_encode(io, BSL_CMD_READ_MIDST, req, 8);
+	if (spd_send(io) < 0)
+		die("send failed while asking for a partition size");
+	got = spd_recv(io, io->usb.timeout_ms);
+	if (got == 0)
+		die("timeout reached");
+	if (got < 0)
+		die("device reset while asking for a partition size");
+	if (spd_type(io) == BSL_REP_READ_FLASH) {
+		p = spd_payload(io, &plen);
+		if (plen >= sizeof(text))
+			plen = sizeof(text) - 1;
+		memcpy(text, p, plen);
+		text[plen] = 0;
+		if (sscanf(text, "size:%*[^:]: 0x%llx", &off) != 1)
+			sscanf(text, "partition %*s total size: 0x%llx", &off);
+	}
+	read_end(io);
+	return (uint64_t)off;
+}
+
+/* READ_START of 8 bytes + MIDST 8 at 0: 1 when the partition answered. */
+static int part_probe(struct spd *io, const char *name)
+{
+	uint8_t req[8];
+	int ret;
+
+	select_part(io, name, 0x8, BSL_CMD_READ_START);
+	if (wait_ack(io, 1)) {
+		read_end(io);
+		return 0;
+	}
+	wr32le(req, 0x8);
+	wr32le(req + 4, 0);
+	spd_encode(io, BSL_CMD_READ_MIDST, req, 8);
+	if (spd_send(io) < 0)
+		die("send failed while probing a partition");
+	ret = spd_recv(io, io->usb.timeout_ms);
+	if (ret == 0)
+		die("timeout reached");
+	if (ret < 0)
+		die("device reset while probing a partition");
+	ret = spd_type(io) == BSL_REP_READ_FLASH ? 1 : 0;
+	read_end(io);
+	return ret;
+}
+
+uint64_t spd_check_partition(struct spd *io, const char *name, int need_size, int ab)
+{
+	uint64_t offset = 0;
+	char name_tmp[40];
+	int i, end = 20, incrementing = 1;
+	int ret;
+
+	if (ab > 0 && !strcmp(name, "uboot"))
+		return 0;
+	if (strstr(name, "fixnv")) {
+		size_t l = strlen(name);
+		if (ab > 0 && (l < 2 || (strcmp(name + l - 2, "_a") && strcmp(name + l - 2, "_b"))))
+			return 0;
+		snprintf(name_tmp, sizeof(name_tmp), "%s", name);
+		{ char *d = strrchr(name_tmp, '1'); if (d) *d = '2'; }
+		name = name_tmp;
+	} else if (strstr(name, "runtimenv")) {
+		size_t l = strlen(name);
+		if (l >= 2 && (!strcmp(name + l - 2, "_a") || !strcmp(name + l - 2, "_b")))
+			return 0;
+		snprintf(name_tmp, sizeof(name_tmp), "%s", name);
+		{ char *d = strrchr(name_tmp, '1'); if (d) *d = '2'; }
+		name = name_tmp;
+	}
+
+	if (ab > 0) {
+		offset = part_size_from_device(io, name);
+		if (offset)
+			return need_size ? offset : 1;
+	}
+	ret = part_probe(io, name);
+	if (!ret)
+		return 0;
+	if (!need_size)
+		return 1;
+
+	select_part(io, name, 0xffffffffu, BSL_CMD_READ_START);
+	if (wait_ack(io, 1)) {
+		/* The loader refused 0xffffffff: NAND, whose bounds start at 10. */
+		end = 10;
+		read_end(io);
+		for (i = 21; i >= end;) {
+			uint64_t n64 = offset + (1ull << i) - (1ull << end);
+			select_part(io, name, n64, BSL_CMD_READ_START);
+			if (spd_send(io) < 0)
+				die("send failed while sizing a partition");
+			ret = spd_recv(io, io->usb.timeout_ms);
+			if (ret == 0)
+				die("timeout reached");
+			if (ret < 0)
+				die("device reset while sizing a partition");
+			ret = spd_type(io);
+			if (incrementing) {
+				if (ret != BSL_REP_ACK) {
+					offset += 1ull << (i - 1);
+					i -= 2;
+					incrementing = 0;
+				} else {
+					i++;
+				}
+			} else {
+				if (ret == BSL_REP_ACK)
+					offset += 1ull << i;
+				i--;
+			}
+			read_end(io);
+		}
+		offset -= 1ull << end;
+	} else {
+		for (i = 21; i >= end;) {
+			uint8_t data[12];
+			uint64_t n64 = offset + (1ull << i) - (1ull << end);
+			wr32le(data, 4);
+			wr32le(data + 4, (uint32_t)n64);
+			wr32le(data + 8, (uint32_t)(n64 >> 32));
+			spd_encode(io, BSL_CMD_READ_MIDST, data, 12);
+			if (spd_send(io) < 0)
+				die("send failed while sizing a partition");
+			ret = spd_recv(io, io->usb.timeout_ms);
+			if (ret == 0)
+				die("timeout reached");
+			if (ret < 0)
+				die("device reset while sizing a partition");
+			ret = spd_type(io);
+			if (incrementing) {
+				if (ret != BSL_REP_READ_FLASH) {
+					offset += 1ull << (i - 1);
+					i -= 2;
+					incrementing = 0;
+				} else {
+					i++;
+				}
+			} else {
+				if (ret == BSL_REP_READ_FLASH)
+					offset += 1ull << i;
+				i--;
+			}
+		}
+	}
+	if (end == 10) {
+		/* A loader that refuses 0xffffffff outright is NAND (spd_dump
+		 * common.c:1582, Da_Info.dwStorageType = 101). Nothing else in
+		 * this call depends on it, but w_force and load_partition_unify's
+		 * _bak copy do, and they can run later in the same session. */
+		io->storage = SPD_STORAGE_NAND;
+		if (io->verbose)
+			fprintf(stderr, "Storage is nand\n");
+	}
+	fprintf(stderr, "partition_size_pc: %s, 0x%llx\n", name, (unsigned long long)offset);
+	read_end(io);
+	return offset;
+}
+
+/* ------------------------------------------------------------------ *
+ * read_flash / read_mem / erase_flash: the three commands spd_dump
+ * builds on BSL_CMD_READ_FLASH (0x06) and BSL_CMD_ERASE_FLASH (0x0a).
+ * Unlike read_part these name no partition -- they take a raw address,
+ * which is what makes them useful for the areas the table does not
+ * describe (a boot chain's spare blocks, a partition's header, RAM
+ * after a loader was sent to it).
+ *
+ * The 12-byte body is big-endian and identical in both directions:
+ *   read_flash addr offset size FILE -> {addr, n, offset}
+ *   read_mem   addr size FILE        -> {addr, n, 0}      (spd_dump dump_mem)
+ * and the reply is BSL_REP_READ_FLASH (0x93) whose frame length is the
+ * byte count, exactly the reply read_part already reads. */
+static int raw_read_core(struct spd *io, uint32_t addr, uint32_t offset, uint64_t size,
+	const char *out_path, const char *what, int mem_mode)
+{
+	FILE *fo;
+	uint64_t done = 0;
+	int step = io->step;
+	int bad = 0;
+
+	fo = fopen(out_path, "wb");
+	if (!fo) {
+		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
+		return -1;
+	}
+	while (done < size) {
+		uint8_t req[12];
+		uint64_t left = size - done;
+		uint32_t n = left > (uint64_t)step ? (uint32_t)step : (uint32_t)left;
+		unsigned t, plen = 0;
+		const uint8_t *p;
+		int got;
+
+		if (spd_interrupted) {
+			fclose(fo);
+			fprintf(stderr, "interrupted; stopped %s at %llu of %llu bytes (%s left as-is)\n",
+				what, (unsigned long long)done, (unsigned long long)size, out_path);
+			return -1;
+		}
+		/* dump_flash sends a fixed address and a moving offset; dump_mem
+		 * sends the moving address and a zero offset (spd_dump.c
+		 * dump_mem: WRITE32_BE(data, offset), WRITE32_BE(data + 2, 0)).
+		 * The loader reads from field1 + field3 either way, so the two
+		 * are the same request -- but the frames are what a phone sees,
+		 * and only one of the two spellings is the reference's. */
+		wr32be(req, mem_mode ? addr + (uint32_t)done : addr);
+		wr32be(req + 4, n);
+		wr32be(req + 8, mem_mode ? 0 : offset + (uint32_t)done);
+		spd_encode(io, BSL_CMD_READ_FLASH, req, 12);
+		if (spd_send(io) < 0)
+			die("send failed during read");
+		got = spd_recv(io, io->usb.timeout_ms);
+		if (got == 0)
+			die("timeout during read");
+		if (got < 0)
+			die("device reset during read; this read was not resumed");
+		t = spd_type(io);
+		if (t != BSL_REP_READ_FLASH) {
+			/* spd_dump prints "unexpected response" and breaks. */
+			fprintf(stderr, "%s: response 0x%04x at 0x%08x+%llu\n", what, t, addr,
+				(unsigned long long)(offset + done));
+			bad = 1;
+			break;
+		}
+		p = spd_payload(io, &plen);
+		if (plen > n)
+			die("device returned more than requested");
+		if (fwrite(p, 1, plen, fo) != plen)
+			die("write failed");
+		done += plen;
+		if (plen != n)
+			break; /* short read: the device has no more to give here */
+	}
+	if (fclose(fo) != 0) {
+		fprintf(stderr, "close %s: %s\n", out_path, strerror(errno));
+		bad = 1;
+	}
+	fprintf(stderr, "%s: 0x%08x+%llu -> %s: %llu of %llu bytes%s\n", what, addr,
+		(unsigned long long)offset, out_path, (unsigned long long)done,
+		(unsigned long long)size, (bad || done != size) ? " (INCOMPLETE)" : "");
+	return (!bad && done == size) ? 0 : -1;
+}
+
+/* spd_dump refuses these with `if ((addr | size | offset | (addr + offset +
+ * size)) >> 32)` -- the opcode's fields are 32-bit. Spelled out rather than
+ * copied so the sum cannot wrap its way past the test. */
+static int over32(uint64_t a, uint64_t b, uint64_t c, const char *what)
+{
+	if (a > 0xffffffffu || b > 0xffffffffu || c > 0xffffffffu || a + b + c > 0xffffffffu) {
+		fprintf(stderr, "%s: 32-bit limit reached (0x%llx 0x%llx 0x%llx)\n", what,
+			(unsigned long long)a, (unsigned long long)b, (unsigned long long)c);
+		return 1;
+	}
+	return 0;
+}
+
+int spd_dump_flash(struct spd *io, uint64_t addr, uint64_t offset, uint64_t size, const char *out_path)
+{
+	if (over32(addr, offset, size, "read_flash"))
+		return -1;
+	return raw_read_core(io, (uint32_t)addr, (uint32_t)offset, size, out_path, "read_flash", 0);
+}
+
+int spd_dump_mem(struct spd *io, uint64_t addr, uint64_t size, const char *out_path)
+{
+	if (over32(addr, size, 0, "read_mem"))
+		return -1;
+	return raw_read_core(io, (uint32_t)addr, 0, size, out_path, "read_mem", 1);
+}
+
+/* BSL_CMD_ERASE_FLASH: 8 big-endian bytes, address then size. spd_dump
+ * ERR_EXITs on the 32-bit overflow and otherwise prints "Erase Flash Done"
+ * when the loader acks. Returns 0 on ACK. */
+int spd_erase_flash(struct spd *io, uint64_t addr, uint64_t size)
+{
+	uint8_t req[8];
+
+	if (over32(addr, size, 0, "erase_flash"))
+		return -1;
+	wr32be(req, (uint32_t)addr);
+	wr32be(req + 4, (uint32_t)size);
+	spd_encode(io, BSL_CMD_ERASE_FLASH, req, 8);
+	if (spd_check_ok(io)) {
+		fprintf(stderr, "erase_flash: the loader refused 0x%08x+0x%llx\n", (uint32_t)addr,
+			(unsigned long long)size);
+		return -1;
+	}
+	fprintf(stderr, "erase_flash: 0x%08x+0x%llx done\n", (uint32_t)addr, (unsigned long long)size);
+	return 0;
+}
+
+/* A misc write can rewrite the slot bytes, so the cached answer goes. Every
+ * path into a partition ends at a write primitive that calls this. */
+static void part_written(struct spd *io, const char *name)
+{
+	if (!strcmp(name, "misc"))
+		spd_slot_forget(io);
 }
 
 int spd_write_part(struct spd *io, const char *name, const char *path)
@@ -1154,6 +1693,7 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	}
 	fprintf(stderr, "write %s: %llu bytes from %s\n", name, (unsigned long long)len, path);
 
+	part_written(io, name);
 	select_part(io, name, len, BSL_CMD_START_DATA);
 	if (spd_check_ok(io)) {
 		/* spd_dump's load_partition closes the file and returns on a
@@ -1229,6 +1769,7 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 	}
 	fprintf(stderr, "write %s: %zu bytes from buffer\n", name, len);
 
+	part_written(io, name);
 	select_part(io, name, (uint64_t)len, BSL_CMD_START_DATA);
 	if (spd_check_ok(io)) {
 		/* As in spd_write_part: the reference returns without END_DATA
@@ -1278,8 +1819,125 @@ int spd_erase_part(struct spd *io, const char *name)
 	select_part(io, name, 0, BSL_CMD_ERASE_FLASH);
 	if (spd_check_ok(io))
 		return -1;
+	/* An erased misc no longer holds the bootloader_control block, so the
+	 * cached slot answer is not the device's any more. */
+	if (!strcmp(name, "misc"))
+		spd_slot_forget(io);
 	fprintf(stderr, "erased %s\n", name);
 	return 0;
+}
+
+void spd_slot_forget(struct spd *io)
+{
+	io->slot_known = 0;
+}
+
+void spd_slot_set(struct spd *io, int slot)
+{
+	io->slot = slot;
+	io->slot_known = 1;
+}
+
+/* AOSP bootloader_control (spd_dump common.h:177-192, packed): slot_suffix[4],
+ * magic, version, then nb_slot:3 | recovery_tries:3 | merge_status:3, then
+ * slot_metadata slot_info[4] of 2 bytes each -- priority:4, tries_remaining:3,
+ * successful_boot:1. ABC is those 32 bytes, already sliced at misc+0x800.
+ * AB_COMPARE_SLOTS(slot_info[1], slot_info[0]) < 0 means slot b (common.c:2011):
+ * higher priority wins, then the one that booted successfully, then the one with
+ * more tries left. Returns 1/2, or 0 when the device is not A/B. */
+int spd_slot_from_bytes(const uint8_t *abc, int have_uboot_a)
+{
+	int nb, p0, p1, ok0, ok1, t0, t1, d;
+
+	nb = abc[9] & 7;
+	if (nb != 2)
+		return 0;
+	p0 = abc[12] & 15; t0 = (abc[12] >> 4) & 7; ok0 = abc[12] >> 7;
+	p1 = abc[14] & 15; t1 = (abc[14] >> 4) & 7; ok1 = abc[14] >> 7;
+	if (p1 != p0) d = p0 - p1;
+	else if (ok1 != ok0) d = ok0 - ok1;
+	else d = t0 - t1;
+	if (!have_uboot_a)
+		return 0; /* spd_dump: no uboot_a means not really A/B */
+	return d < 0 ? 2 : 1;
+}
+
+/* spd_dump partition_list() applies this while it walks the table it just read
+ * (common.c:1046-1049 on the GPT path, 1131-1134 on the SPRD one): when
+ * select_ab() came back 0, the first row whose name ends in "_a" means the
+ * device is A/B after all and slot A is the one in use. Without it a table
+ * naming boot_a/boot_b reads as "not A/B" and the dump stops preferring the
+ * slot-A rows the way the reference's does. */
+int spd_slot_from_table(const struct spd *io)
+{
+	int i;
+	for (i = 0; i < io->nparts; i++) {
+		size_t l = strlen(io->ptab[i].name);
+		if (l > 2 && !strcmp(io->ptab[i].name + l - 2, "_a"))
+			return 1;
+	}
+	return 0;
+}
+
+/* spd_dump select_ab() (common.c:1988): read the 32-byte bootloader_control at
+ * misc+0x800 and ask the device which slot it is running. A refused READ_START,
+ * a reply that is not a read, or an nb_slot that is not 2 all mean "not A/B";
+ * so does a phone that kept no uboot_a, which the reference checks with a real
+ * partition probe. Leaves io->slot_bcb set (the reference's `selected_ab`).
+ *
+ * This is the read the reference puts on the wire at the FDL2 stage, before the
+ * table, so it is also where ours goes -- see fetch_ptab(). */
+static int select_ab(struct spd *io)
+{
+	uint8_t req[8], abc[32];
+	const uint8_t *p;
+	unsigned plen = 0;
+	int have_abc = 0, slot;
+
+	select_part(io, "misc", 0x820, BSL_CMD_READ_START);
+	if (wait_ack(io, 1)) {
+		read_end(io);
+		io->slot_bcb = 0;
+		return 0;
+	}
+	wr32le(req, 0x20);
+	wr32le(req + 4, 0x800);
+	spd_encode(io, BSL_CMD_READ_MIDST, req, 8);
+	if (spd_send(io) < 0)
+		die("send failed while reading the active slot");
+	{
+		int got = spd_recv(io, io->usb.timeout_ms);
+		if (got == 0)
+			die("timeout reached");
+		if (got < 0)
+			die("device reset while reading the active slot");
+	}
+	if (spd_type(io) == BSL_REP_READ_FLASH) {
+		p = spd_payload(io, &plen);
+		/* The reference copies the reply into its bootloader_control without
+		 * looking at the length. Ours needs the 20 bytes it reads -- short of
+		 * those, "not A/B" is the only honest answer. */
+		if (plen >= 20) {
+			memset(abc, 0, sizeof(abc));
+			memcpy(abc, p, plen < sizeof(abc) ? plen : sizeof(abc));
+			have_abc = 1;
+		}
+	}
+	read_end(io);
+	if (!have_abc) {
+		io->slot_bcb = 0;
+		return 0;
+	}
+	memcpy(io->slot_abc, abc, sizeof(abc));
+	io->slot_abc_valid = 1;
+	slot = spd_slot_from_bytes(abc, 1);
+	/* common.c:2014: a device that cannot find uboot_a is not A/B, whatever the
+	 * block says. check_partition() is the reference's own probe -- and the two
+	 * frames it adds here are frames the reference sends too. */
+	if (slot > 0 && spd_check_partition(io, "uboot_a", 0, slot) == 0)
+		slot = 0;
+	io->slot_bcb = slot;
+	return slot;
 }
 
 /* CRC-16/ARC, the checksum spd_dump puts in a fixnv image before sending it. */
@@ -1492,40 +2150,40 @@ static int xml_one(const char *tag, char *name, size_t namecap, uint32_t *size)
 	return 0;
 }
 
-int spd_repartition_xml(struct spd *io, const char *path)
+/* The one reader of a partition list XML: the file spd_dump's repartition
+ * takes and the one its read_parts takes are the same document, so both go
+ * through here and cannot drift apart on what a record means. WHAT names the
+ * caller in the messages. */
+int spd_xml_partitions(const char *path, const char *what, struct spd_xml_part **out)
 {
 	FILE *fi;
 	char *src, *p, *end;
-	uint8_t *buf, *w, *sent;
 	off_t sz;
-	int n = 0, cap, i;
-	/* The payload is n * 0x4c and the BSL frame length is 16 bits, so the
-	 * protocol itself stops at 862 entries. spd_dump passes 0xffff as a byte
-	 * budget and then overruns its own 128-entry ptable for anything past
-	 * 128; refusing cleanly at the real limit is better than either. */
-	cap = 0xffff / 0x4c;
+	int n = 0, cap;
+	struct spd_xml_part *list;
 
+	*out = NULL;
 	fi = fopen(path, "rb");
 	if (!fi) {
-		fprintf(stderr, "repartition: open %s: %s\n", path, strerror(errno));
+		fprintf(stderr, "%s: open %s: %s\n", what, path, strerror(errno));
 		return -1;
 	}
 	if (fseeko(fi, 0, SEEK_END) != 0 || (sz = ftello(fi)) <= 0 || sz > 1024 * 1024 ||
 		fseeko(fi, 0, SEEK_SET) != 0) {
-		fprintf(stderr, "repartition: %s is empty or over 1 MiB\n", path);
+		fprintf(stderr, "%s: %s is empty or over 1 MiB\n", what, path);
 		fclose(fi);
 		return -1;
 	}
 	src = malloc((size_t)sz + 1);
 	if (!src || fread(src, 1, (size_t)sz, fi) != (size_t)sz) {
-		fprintf(stderr, "repartition: short read\n");
+		fprintf(stderr, "%s: short read\n", what);
 		free(src);
 		fclose(fi);
 		return -1;
 	}
 	fclose(fi);
 	if (memchr(src, 0, (size_t)sz)) {
-		fprintf(stderr, "repartition: XML contains a zero byte\n");
+		fprintf(stderr, "%s: XML contains a zero byte\n", what);
 		free(src);
 		return -1;
 	}
@@ -1533,38 +2191,34 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	p = strstr(src, "<Partitions>");
 	end = p ? strstr(p, "</Partitions>") : NULL;
 	if (!p || !end || strstr(end + 1, "<Partitions>")) {
-		fprintf(stderr, "repartition: need one <Partitions> list\n");
+		fprintf(stderr, "%s: need one <Partitions> list\n", what);
 		free(src);
 		return -1;
 	}
-	buf = calloc((size_t)cap, 0x4c);
-	if (!buf) {
+	/* The frame limit, so a list this long is refused here rather than by
+	 * spd_repartition_xml after the entries have been built. */
+	cap = 0xffff / 0x4c;
+	list = calloc((size_t)cap, sizeof(*list));
+	if (!list) {
 		free(src);
 		return -1;
 	}
-	w = buf;
 	p += strlen("<Partitions>");
 	while (p < end) {
-		char *lt, *gt, name[36];
-		uint32_t size;
-		int i;
+		char *lt, *gt;
 		while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 			p++;
 		if (p >= end)
 			break;
 		if (*p != '<') {
-			fprintf(stderr, "repartition: unexpected text in <Partitions>\n");
-			free(buf);
-			free(src);
-			return -1;
+			fprintf(stderr, "%s: unexpected text in <Partitions>\n", what);
+			goto bad;
 		}
 		if (!strncmp(p, "<!--", 4)) {
 			char *c = strstr(p + 4, "-->");
 			if (!c || c >= end) {
-				fprintf(stderr, "repartition: unclosed comment\n");
-				free(buf);
-				free(src);
-				return -1;
+				fprintf(stderr, "%s: unclosed comment\n", what);
+				goto bad;
 			}
 			p = c + 3;
 			continue;
@@ -1572,39 +2226,60 @@ int spd_repartition_xml(struct spd *io, const char *path)
 		lt = p + 1;
 		gt = strchr(lt, '>');
 		if (!gt || gt >= end) {
-			fprintf(stderr, "repartition: unclosed tag\n");
-			free(buf);
-			free(src);
-			return -1;
+			fprintf(stderr, "%s: unclosed tag\n", what);
+			goto bad;
 		}
 		*gt = 0;
-		if (xml_one(lt, name, sizeof(name), &size)) {
-			fprintf(stderr, "repartition: bad Partition tag near '%s'\n", lt);
-			free(buf);
-			free(src);
-			return -1;
-		}
 		if (n >= cap) {
-			fprintf(stderr, "repartition: more than %d partitions (frame limit)\n", cap);
-			free(buf);
-			free(src);
-			return -1;
+			fprintf(stderr, "%s: more than %d partitions (frame limit)\n", what, cap);
+			goto bad;
 		}
-		memset(w, 0, 0x4c);
-		for (i = 0; name[i]; i++)
-			w[i * 2] = (uint8_t)name[i];
-		wr32le(w + 0x48, size);
-		fprintf(stderr, "repartition: [%d] %s size=%u\n", n + 1, name, size);
-		w += 0x4c;
+		if (xml_one(lt, list[n].name, sizeof(list[n].name), &list[n].size)) {
+			fprintf(stderr, "%s: bad Partition tag near '%s'\n", what, lt);
+			goto bad;
+		}
 		n++;
 		p = gt + 1;
 	}
 	free(src);
 	if (n < 1) {
-		fprintf(stderr, "repartition: no Partition entries\n");
-		free(buf);
+		fprintf(stderr, "%s: no Partition entries\n", what);
+		free(list);
 		return -1;
 	}
+	*out = list;
+	return n;
+bad:
+	free(src);
+	free(list);
+	return -1;
+}
+
+int spd_repartition_xml(struct spd *io, const char *path)
+{
+	uint8_t *buf, *w, *sent;
+	struct spd_xml_part *list = NULL;
+	int n, i;
+
+	n = spd_xml_partitions(path, "repartition", &list);
+	if (n < 0)
+		return -1;
+	buf = calloc((size_t)n, 0x4c);
+	if (!buf) {
+		free(list);
+		return -1;
+	}
+	w = buf;
+	for (i = 0; i < n; i++) {
+		int k;
+		memset(w, 0, 0x4c);
+		for (k = 0; list[i].name[k]; k++)
+			w[k * 2] = (uint8_t)list[i].name[k];
+		wr32le(w + 0x48, list[i].size);
+		fprintf(stderr, "repartition: [%d] %s size=%u\n", i + 1, list[i].name, list[i].size);
+		w += 0x4c;
+	}
+	free(list);
 	sent = buf;
 	spd_encode(io, BSL_CMD_REPARTITION, sent, (size_t)n * 0x4c);
 	if (spd_check_ok(io)) {
@@ -1636,8 +2311,13 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	 * echo of this table later (spd_repartition_echo, for a force write) uses
 	 * the same unit the XML did. fetch_ptab sets it from the wire instead. */
 	io->ptab_shift = 20;
+	/* The session has a table (the one just sent), so the latch is "asked and
+	 * answered": spd_dump's gpt_failed is already 0 here and scan_xml_partitions
+	 * rewrites io->ptable in place, so a later partition_list prints the new
+	 * layout rather than re-reading one the phone has not applied yet. */
+	io->ptab_state = 0;
 	free(buf);
-	fprintf(stderr, "repartition: sent %d entries; this session now resolves names and sizes against the new layout. `parts` re-reads the table from the device, which need not match it until the phone restarts.\n", n);
+	fprintf(stderr, "repartition: sent %d entries; this session now resolves names and sizes against the new layout, and `parts` prints that same layout until the phone restarts.\n", n);
 	return 0;
 }
 
@@ -1778,16 +2458,268 @@ static void part_xml_auto(struct spd *io, unsigned count)
 	fprintf(stderr, "partition xml: %s (%u entries)\n", path, count);
 }
 
+/* The device's raw table packet, as "sprdpart.bin" in the dump folder (or the
+ * cwd when none was named, which is where the reference's savepath points). A
+ * failure is a warning: the XML and the in-memory table are what the command
+ * the user asked for actually needs. */
+static void save_raw_ptab(const struct spd *io, const uint8_t *p, unsigned count)
+{
+	char path[1200];
+	FILE *fo;
+	int n;
+
+	n = snprintf(path, sizeof(path), "%s/sprdpart.bin",
+		io->part_xml_dir && io->part_xml_dir[0] ? io->part_xml_dir : ".");
+	if (n <= 0 || (size_t)n >= sizeof(path)) {
+		fprintf(stderr, "partition-list: sprdpart.bin path is too long; skipped\n");
+		return;
+	}
+	fo = fopen(path, "wb");
+	if (!fo) {
+		fprintf(stderr, "partition-list: create %s: %s (the session continues)\n",
+			path, strerror(errno));
+		return;
+	}
+	if (fwrite(p, 1, (size_t)count * 0x4c, fo) != (size_t)count * 0x4c || fclose(fo) != 0) {
+		fprintf(stderr, "partition-list: create %s failed (the session continues)\n", path);
+		remove(path);
+		return;
+	}
+	fprintf(stderr, "partition-list: sprd partition list packet saved to %s\n", path);
+}
+
+/* ---------------------------------------------------------------- *
+ * The standard-GPT half of spd_dump partition_list() (common.c:1075-1078
+ * and gpt_info, common.c:976-1061).
+ *
+ * Before it asks for the SPRD packet, the reference reads the first 32 KiB of
+ * the `user_partition` partition and looks for an EFI header in it. A phone
+ * whose storage was laid out with a generic GPT -- one that was reflashed with
+ * a standard table, or whose vendor kept the Google layout -- answers here and
+ * has no SPRD packet at all, so this is the only way its table is ever read.
+ * A phone with an SPRD table (the usual case) refuses the read, pgpt.bin is
+ * removed, and the packet read below runs exactly as it did before.
+ */
+
+#define GPT_PROBE_BYTES (32u * 1024u)  /* spd_dump: 32*1024 at step 4096 */
+#define GPT_PROBE_STEP 4096u
+#define GPT_SECTOR_SIZE 512u           /* common.c:973 */
+#define GPT_MAX_SECTORS 32u            /* common.c:974 */
+#define GPT_ENTRY_BYTES 128u           /* sizeof(efi_entry), packed */
+#define GPT_ENTRY_CAP 4096u            /* allocation guard; see below */
+
+static void part_dir_path(const struct spd *io, const char *name, char *out, size_t cap)
+{
+	int n = snprintf(out, cap, "%s/%s",
+		io->part_xml_dir && io->part_xml_dir[0] ? io->part_xml_dir : ".", name);
+	if (n <= 0 || (size_t)n >= cap)
+		out[0] = 0;
+}
+
+/* The `user_partition` read and the GPT parse. 0 = the table came from a
+ * standard GPT (io->ptab filled, io->nparts set, pgpt.bin kept, the XML
+ * written), -1 = fall back to the SPRD packet (pgpt.bin removed if it was
+ * made). Everything it does on -1 is what the reference does on gpt_failed. */
+static int gpt_probe(struct spd *io)
+{
+	char path[1200];
+	uint8_t sec[GPT_SECTOR_SIZE];
+	uint64_t entry_lba, real_sector;
+	int sector_index = -1, nent, entsz, n, i, storage;
+	FILE *fi;
+
+	part_dir_path(io, "pgpt.bin", path, sizeof(path));
+	if (!path[0]) {
+		fprintf(stderr, "partition-list: pgpt.bin path is too long; skipped\n");
+		return -1;
+	}
+	io->step = (int)GPT_PROBE_STEP;
+	if (read_part_core_q(io, "user_partition", 0, GPT_PROBE_BYTES, path, NULL, 1) != 0) {
+		remove(path);
+		return -1;
+	}
+	/* spd_dump: `if (32 * 1024 == size) gpt_failed = gpt_info(...)`. A short
+	 * read is not a table, and the file it left is not useful either. */
+	fi = fopen(path, "rb");
+	if (!fi) {
+		fprintf(stderr, "partition-list: open %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	for (i = 0; i < (int)GPT_MAX_SECTORS; i++) {
+		if (fread(sec, 1, sizeof(sec), fi) != sizeof(sec))
+			break;
+		if (!memcmp(sec, "EFI PART", 8)) {
+			sector_index = i;
+			break;
+		}
+	}
+	if (sector_index < 0) {
+		fclose(fi);
+		remove(path); /* gpt_failed: the reference removes pgpt.bin too */
+		return -1;
+	}
+	/* common.c:1007: the header at LBA 1 means 512-byte sectors and eMMC; found
+	 * anywhere else (a 4 KiB-sector disk puts it at index 8) means UFS. */
+	real_sector = (uint64_t)GPT_SECTOR_SIZE * (uint64_t)sector_index;
+	storage = (sector_index == 1) ? SPD_STORAGE_EMMC : SPD_STORAGE_UFS;
+	if (real_sector == 0) {
+		/* A header at offset 0: the reference divides by it and reads the
+		 * garbage at offset 0 as the entry array. Nothing sane to do with it. */
+		fprintf(stderr, "partition-list: GPT header at sector 0; not a usable table\n");
+		fclose(fi);
+		remove(path);
+		return -1;
+	}
+	entry_lba = rd64le(sec + 72);
+	nent = (int)rd32le(sec + 80);
+	entsz = (int)rd32le(sec + 84);
+	if (nent <= 0 || entsz < (int)GPT_ENTRY_BYTES) {
+		fprintf(stderr, "partition-list: GPT says %d entries of %d bytes; not a usable table\n",
+			nent, entsz);
+		fclose(fi);
+		remove(path);
+		return -1;
+	}
+	if ((uint32_t)nent > GPT_ENTRY_CAP)
+		nent = (int)GPT_ENTRY_CAP;
+	/* The reference allocates nent * sizeof(efi_entry) and reads that much,
+	 * then walks whatever the short read left behind. Ours reads only what the
+	 * 32 KiB probe actually holds -- the entry array cannot be longer than the
+	 * buffer it was dumped into. */
+	{
+		uint64_t off = entry_lba * real_sector;
+		uint64_t avail = off < GPT_PROBE_BYTES ? GPT_PROBE_BYTES - off : 0;
+		uint64_t fits = avail / GPT_ENTRY_BYTES;
+		if ((uint64_t)nent > fits) {
+			fprintf(stderr, "partition-list: GPT entry array is %llu bytes past the %u-byte probe;"
+				" reading %llu entries\n", (unsigned long long)((uint64_t)nent * GPT_ENTRY_BYTES),
+				GPT_PROBE_BYTES, (unsigned long long)fits);
+			nent = (int)fits;
+		}
+		if (nent <= 0) {
+			fclose(fi);
+			remove(path);
+			return -1;
+		}
+		if (fseeko(fi, (off_t)off, SEEK_SET) != 0) {
+			fprintf(stderr, "partition-list: seek %s: %s\n", path, strerror(errno));
+			fclose(fi);
+			remove(path);
+			return -1;
+		}
+	}
+	{
+		uint8_t *rec = calloc((size_t)nent, GPT_ENTRY_BYTES);
+		if (!rec)
+			die("out of memory");
+		if (fread(rec, GPT_ENTRY_BYTES, (size_t)nent, fi) != (size_t)nent) {
+			fprintf(stderr, "partition-list: short read of the GPT entry array\n");
+			free(rec);
+			fclose(fi);
+			remove(path);
+			return -1;
+		}
+		/* spd_dump stops at the first entry whose LBA range is empty and calls
+		 * that the count (common.c:1029-1033); a full table with no empty entry
+		 * leaves its n at 0, which reads as "no table". Ours takes all nent
+		 * then, which is the only reading that keeps the rows. */
+		n = nent;
+		for (i = 0; i < nent; i++) {
+			const uint8_t *e = rec + (size_t)i * GPT_ENTRY_BYTES;
+			if (rd64le(e + 32) == 0 && rd64le(e + 40) == 0) {
+				n = i;
+				break;
+			}
+		}
+		free(io->ptab);
+		io->ptab = calloc(n ? (size_t)n : 1, sizeof(*io->ptab));
+		if (!io->ptab)
+			die("out of memory");
+		io->nparts = n;
+		for (i = 0; i < n; i++) {
+			/* sizeof(efi_entry) == 128: type GUID 0..15, unique GUID 16..31,
+			 * starting_lba 32, ending_lba 40, attributes 48, then the
+			 * partition_name as 36 UTF-16LE wchars at 56 (72 bytes, to the end
+			 * of the record). gpt_info() reads it through
+			 * `entry.partition_name` (common.c:1037); reading it from 0 -- the
+			 * type GUID, which a real table always fills with a nonzero GUID --
+			 * gave every row an empty or mojibake name. */
+			const uint8_t *e = rec + (size_t)i * GPT_ENTRY_BYTES;
+			uint64_t start = rd64le(e + 32), end = rd64le(e + 40);
+			unsigned k;
+			for (k = 0; k < 36 && e[56 + k * 2]; k++)
+				io->ptab[i].name[k] = (char)e[56 + k * 2];
+			io->ptab[i].name[k] = 0;
+			io->ptab[i].size = (end - start + 1) * real_sector;
+		}
+		free(rec);
+	}
+	fclose(fi);
+	io->storage = storage;
+	/* Sizes here are bytes already, and the XML is MiB whichever path wrote it
+	 * (xml_body fixes the shift at 20), so the read shift is 20 for the same
+	 * reason the repartition echo's is. */
+	io->ptab_shift = 20;
+	fprintf(stderr, "parts: %d entries from the standard GPT (%llu-byte sectors)\n",
+		io->nparts, (unsigned long long)real_sector);
+	fprintf(stderr, "Storage is %s\n", storage == SPD_STORAGE_EMMC ? "emmc" : "ufs");
+	/* The reference's partition_list: gpt_info succeeded, but a count of 0
+	 * makes it drop the table and refuse to read the packet either. */
+	if (io->nparts == 0)
+		return 1;
+	fprintf(stderr, "partition-list: standard gpt table saved to %s\n", path);
+	fprintf(stderr, "partition-list: skip saving sprd partition list packet\n");
+	part_xml_auto(io, (unsigned)io->nparts);
+	return 0;
+}
+
 /* Ask the device for its partition table and rebuild io->ptab from it.
- * The raw payload and its entry count go back through the out-parameters.
- * 0 = ok, -1 = refused or
- * malformed. The one place the fetch lives: `parts` prints it as text and
- * `partition-list` writes it as the XML `repartition` reads back. */
-static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
+ * 0 = ok, -1 = refused or malformed. The one place the fetch lives: `parts`
+ * prints it as text and `partition-list` writes it as the XML `repartition`
+ * reads back.
+ *
+ * The device is asked ONCE per session, as in the reference: every caller there
+ * is guarded by `if (gpt_failed == 1)` (spd_dump.c:755, 954, 1034, 1603) and a
+ * successful read clears it, so a second `parts` or `partition-list` re-prints
+ * the table already in io->ptab instead of putting a second READ_PARTITION on
+ * the wire. A refusal latches the same way (gpt_failed = -1), which is why
+ * io->ptab_state is a tri-state rather than a flag. */
+static int fetch_ptab(struct spd *io)
 {
 	unsigned t, plen = 0, i;
 	const uint8_t *p;
+	int gpt;
 
+	if (io->ptab_state != 1)
+		return io->ptab_state < 0 ? -1 : 0;
+	/* spd_dump partition_list() (common.c:1071-1078), in its own order: the
+	 * active slot is asked of the DEVICE once per session, then the GPT probe,
+	 * and only then the SPRD packet. `if (selected_ab < 0)` is the reference's
+	 * own latch -- a second table read in one session sends neither the misc
+	 * read nor the uboot_a probe again. */
+	if (io->slot_bcb < 0)
+		spd_slot_set(io, select_ab(io));
+	{
+		int step = io->step;
+		gpt = gpt_probe(io);
+		io->step = step;
+	}
+	if (gpt == 0) {
+		/* A standard GPT answered. There is no SPRD packet to save, and the
+		 * XML is already written -- both as the reference does it. */
+		if (io->slot_bcb == 0)
+			spd_slot_set(io, spd_slot_from_table(io));
+		io->ptab_state = 0;
+		return 0;
+	}
+	if (gpt > 0) {
+		/* gpt_info() parsed a table with no rows at all: the reference calls
+		 * that "no table" (partition_list returns NULL) rather than falling
+		 * back to the packet. */
+		fprintf(stderr, "partition table: the standard GPT has no entries\n");
+		io->ptab_state = -1;
+		return -1;
+	}
 	spd_encode(io, BSL_CMD_READ_PARTITION, NULL, 0);
 	if (spd_send(io) < 0)
 		die("send failed");
@@ -1801,11 +2733,13 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 	t = spd_type(io);
 	if (t != BSL_REP_READ_PARTITION) {
 		fprintf(stderr, "partition response 0x%04x\n", t);
+		io->ptab_state = -1; /* common.c:1088 gpt_failed = -1 */
 		return -1;
 	}
 	p = spd_payload(io, &plen);
 	if (plen % 0x4c) {
 		fprintf(stderr, "partition table length %u is not a multiple of 0x4c\n", plen);
+		io->ptab_state = -1; /* common.c:1095 gpt_failed = -1 */
 		return -1;
 	}
 	/* spd_dump partition_list() (common.c ~1109-1124): divisor starts at 10
@@ -1819,11 +2753,23 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 		if (!io->ptab)
 			die("out of memory");
 		io->nparts = (int)n;
+		/* A new table is a new answer for "is this table A/B", so the effective
+		 * slot is recomputed below -- but the device's own answer (slot_bcb,
+		 * the reference's selected_ab) is not re-asked, exactly as the
+		 * reference does not re-ask it. */
+		spd_slot_forget(io);
 		for (i = 0; i < n; i++) {
 			uint32_t u = rd32le(p + i * 0x4c + 0x48);
 			while (u && divisor > 0 && !(u >> divisor))
 				divisor--;
 		}
+		/* spd_dump partition_list() reads the storage type out of the same
+		 * heuristic it sizes the table with: divisor 10 means the rows are
+		 * MiB and the device is eMMC, anything else is UFS (common.c:1116,
+		 * and common.c:1007 on the GPT path). It is what load_partition_unify
+		 * and w_force look at, so it is recorded even though the sizes here
+		 * do not need it. */
+		io->storage = (divisor == 10) ? SPD_STORAGE_EMMC : SPD_STORAGE_UFS;
 		io->ptab_shift = 20 - divisor;
 		for (i = 0; i < n; i++) {
 			const uint8_t *rec = p + i * 0x4c;
@@ -1835,13 +2781,41 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 		}
 		fprintf(stderr, "parts: %u entries, units << %d = bytes (spd_dump divisor %d)\n",
 			n, io->ptab_shift, divisor);
-		*count = n;
+		fprintf(stderr, "Storage is %s\n",
+			divisor == 10 ? "emmc" : "ufs");
 	}
-	*raw = p;
+	/* common.c:1143 gpt_failed = 0: the session has its table now, so nothing
+	 * asks the device again. */
+	io->ptab_state = 0;
+	/* spd_dump partition_list() (common.c:1131-1134): a device that answered
+	 * "not A/B" but whose table names an _a row is A/B after all, and slot A is
+	 * the one in use. The table read is where the reference applies it, so this
+	 * is where ours does too. */
+	if (io->slot_bcb == 0)
+		spd_slot_set(io, spd_slot_from_table(io));
 	/* Every read of the table leaves the XML behind, not just an explicit
 	 * `partition-list`: that is what the reference does, and it is the only
 	 * reason a user can edit a layout without asking for the dump first. */
-	part_xml_auto(io, *count);
+	part_xml_auto(io, (unsigned)io->nparts);
+	/* spd_dump partition_list() also drops the device's own packet as
+	 * "sprdpart.bin" whenever the table came from the device rather than from
+	 * a standard GPT ("sprd partition list packet saved to sprdpart.bin"). It
+	 * is what a repair flow flashes back to restore a table, so it is worth
+	 * the same place the XML goes -- and the cwd, as the reference's savepath
+	 * starts at ".", when no dump folder was named. */
+	save_raw_ptab(io, p, (unsigned)io->nparts);
+	return 0;
+}
+
+int spd_parts_ensure(struct spd *io)
+{
+	if (io->nparts > 0)
+		return 0;
+	if (fetch_ptab(io) || io->nparts <= 0) {
+		fprintf(stderr, "partition table: the device did not give one; "
+			"commands that name a partition have nothing to resolve against\n");
+		return -1;
+	}
 	return 0;
 }
 
@@ -1866,12 +2840,12 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
  * as it read. */
 int spd_part_xml(struct spd *io, const char *out_path)
 {
-	const uint8_t *p;
-	unsigned count = 0;
+	unsigned count;
 	FILE *fo;
 
-	if (fetch_ptab(io, &p, &count))
+	if (fetch_ptab(io))
 		return -1;
+	count = (unsigned)io->nparts;
 	if (count < 1) {
 		fprintf(stderr, "partition-list: the device reported an empty table\n");
 		return -1;
@@ -1901,11 +2875,11 @@ int spd_part_xml(struct spd *io, const char *out_path)
 int spd_list_parts(struct spd *io, const char *out_path)
 {
 	FILE *fo = NULL;
-	const uint8_t *p;
-	unsigned i, count = 0;
+	unsigned i, count;
 
-	if (fetch_ptab(io, &p, &count))
+	if (fetch_ptab(io))
 		return -1;
+	count = (unsigned)io->nparts;
 	if (out_path && strcmp(out_path, "-") != 0) {
 		fo = fopen(out_path, "w");
 		if (!fo) {
@@ -1924,23 +2898,23 @@ int spd_list_parts(struct spd *io, const char *out_path)
 	 * itself (parts_units_to_bytes) and writes partition_bytes.txt from this
 	 * file. Printing bytes here made the menu shift twice, so every dump came
 	 * out at unit << 2*shift and every size check failed. */
+	/* Printed from io->ptab, not from the packet the device sent: a second
+	 * `parts` in the same session is answered from the table already in hand
+	 * (fetch_ptab's latch), and after a `repartition` the in-memory table is
+	 * the new layout -- the same one spd_dump prints, because it prints from
+	 * io->ptable (spd_dump.c:1041-1042) and not from a saved packet. The raw
+	 * packet is only valid for the read that produced it; io->ptab also holds
+	 * a standard-GPT table, for which there is no packet at all. */
 	for (i = 0; i < count; i++) {
-		const uint8_t *rec = p + i * 0x4c;
-		char name[37];
-		unsigned k;
-		/* Wire entry is 0x4c: UTF-16LE name[36] + LE size dword at 0x48.
-		 * A high dword would begin at 0x4c (the next record); common FDL
-		 * tables only ship the low 32 bits. Always print as uint64. */
-		uint64_t sz = (uint64_t)rd32le(rec + 0x48);
-		for (k = 0; k < 36; k++) {
-			name[k] = (char)rec[k * 2];
-			if (!name[k])
-				break;
-		}
-		name[k] = 0;
-		printf("%u %s %" PRIu64 "\n", i + 1, name, sz);
+		/* The column is the table's own unit, which is what the menu and the
+		 * README say it is: bytes >> ptab_shift. On a wire read that is the
+		 * raw 0x4c-record dword (size = dword << shift), so this prints the
+		 * same number it always did; after a repartition, where the shift is
+		 * 20, it is the XML's MiB. */
+		uint64_t sz = io->ptab[i].size >> io->ptab_shift;
+		printf("%u %s %" PRIu64 "\n", i + 1, io->ptab[i].name, sz);
 		if (fo)
-			fprintf(fo, "%s %" PRIu64 "\n", name, sz);
+			fprintf(fo, "%s %" PRIu64 "\n", io->ptab[i].name, sz);
 	}
 	if (fo) {
 		/* Buffered writes report their failure at fclose. A table file cut
