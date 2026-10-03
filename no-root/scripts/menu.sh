@@ -545,7 +545,7 @@ find_misc_dir() {
 		"$here/misc" \
 		"$HOME/spdhost/misc" \
 		"$HOME/Spd_dump_termux/no-root/misc" \
-		"$HOME/spreadtrum_flash_termux"
+		"$HOME/spreadtrum_flash_termux/misc"
 	do
 		if [[ -f $d/misc-fastbootd.bin && -f $d/misc-wipe.bin ]]; then
 			(cd "$d" && pwd)
@@ -972,7 +972,17 @@ need_loaders() {
 		return 0
 	fi
 	echo "Set the loader files first."
-	configure_loaders
+	configure_loaders || return 1
+	# configure_loaders also returns 0 on its "Back" and "Unchanged." arms, so
+	# its status alone is not proof the user picked anything: backing out used
+	# to return 0 here and every option then built a session with an empty
+	# FDL1 path ("open : No such file") instead of stopping. Re-check the four
+	# fields, which is the only thing this gate actually promises.
+	if [[ -f $FDL1 && -n $FDL1_ADDR && -f $FDL2 && -n $FDL2_ADDR ]]; then
+		return 0
+	fi
+	echo "Still no loader files; option 3 picks them." >&2
+	return 1
 }
 
 ready() {
@@ -1361,7 +1371,14 @@ record_sha256() {
 	digest=$(sha256sum "$f" | awk '{print $1}') || return 1
 	if [[ -f $sums ]]; then
 		tmp=$(mktemp "$sums.XXXXXX") || return 1
-		awk -v k="$key" '{ n = $0; sub(/^[0-9a-f]+  /, "", n); if (n != k) print }' "$sums" > "$tmp" && mv "$tmp" "$sums"
+		# A failed filter or rename used to leave the mktemp file sitting in
+		# the dump folder while the new line was still appended below, so the
+		# next run's `ls` would show a stray SHA256SUMS.XXXXXX. Drop it.
+		if ! awk -v k="$key" '{ n = $0; sub(/^[0-9a-f]+  /, "", n); if (n != k) print }' "$sums" > "$tmp" ||
+			! mv "$tmp" "$sums"; then
+			rm -f "$tmp"
+			return 1
+		fi
 	fi
 	printf '%s  %s\n' "$digest" "$key" >> "$sums"
 	echo "ok   $key $(fmt_size "$(stat -c %s "$f")") sha256 $digest"
@@ -1583,7 +1600,7 @@ dispatch_dump_query() {
 }
 
 dump_partition() {
-	local parts_file raw reply query matched name size out refresh=0 target rc
+	local parts_file raw reply query matched name size refresh=0 target rc
 	need_loaders || return
 	cls
 	echo "Dump partition(s)"
@@ -2350,7 +2367,7 @@ flash_input_menu() {
 	# Parallel arrays, not "src:dst" strings: a file name is allowed to contain
 	# a colon, and splitting on the first one would then cut the path in half.
 	local -a names=() skipped=() stage_src=() stage_dst=()
-	local f base stage="" i
+	local f base stage="" i tdir
 	need_loaders || return
 	mkdir -p "$INPUT_DIR"
 	shopt -s nullglob
@@ -2394,8 +2411,17 @@ flash_input_menu() {
 		echo "Not flashed: ${skipped[*]}"
 	fi
 	# Nothing below writes to $INPUT_DIR; the stage is a private view of it.
-	stage=$(mktemp -d "${TMPDIR:-/tmp}/spdhost-flash.XXXXXX") || {
-		echo "Could not create a staging folder." >&2
+	# spd_tmpdir(), not ${TMPDIR:-/tmp}: a stock Termux has no /tmp at all,
+	# only $PREFIX/tmp, and with TMPDIR unset this fell through to a path that
+	# cannot be created -- menu [6] aborted with "Could not create a staging
+	# folder." on exactly the phone this tool is for. The suites masked it by
+	# exporting TMPDIR.
+	tdir=$(spd_tmpdir) || {
+		echo "no writable temp directory (set TMPDIR)" >&2
+		return 1
+	}
+	stage=$(mktemp -d "$tdir/spdhost-flash.XXXXXX") || {
+		echo "Could not create a staging folder in $tdir." >&2
 		return 1
 	}
 	for (( i = 0; i < ${#stage_src[@]}; i++ )); do
@@ -3176,9 +3202,11 @@ chip_uid_action() {
 }
 
 # Read-only: one session that refreshes the table and prints the byte size
-# spdhost resolves for one name (the same table a dump or a write uses). This
-# is the release menu's "check partition size", and it is the way to confirm
-# the cached table still matches the phone after a repartition.
+# spdhost resolves for one name (the same table a dump or a write uses). It is
+# the way to confirm the cached table still matches the phone after a
+# repartition. part-size, not check-part: spd_dump's check_part prints 0/1
+# ("Checks if the specified partition exists"), and the byte count is its
+# separate size_part / part_size command.
 check_part_action() {
 	local name
 	need_loaders || return 1
@@ -3191,10 +3219,10 @@ check_part_action() {
 		echo "A partition name is letters, digits and _ only." >&2
 		return 1
 	fi
-	echo "Read-only: parts, then check-part $name. Nothing is written."
+	echo "Read-only: parts, then part-size $name. Nothing is written."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" check-part "$name"
+		parts "$(parts_cache_path)" part-size "$name"
 }
 
 # erase-part clears one partition. persist, splloader, splloader_bak and all
@@ -3239,7 +3267,7 @@ erase_part_action() {
 # misc+0x800, so a 2048-byte image is not enough on its own -- use a full misc
 # dump.
 pack_slot_action() {
-	local bin in img out which
+	local bin in out which
 	bin=$(resolve_spdhost_bin) || { echo "spdhost binary not found (make)." >&2; return 1; }
 	read -r -p "misc image [$DUMP_DIR/misc.img]: " in
 	in=${in:-$DUMP_DIR/misc.img}

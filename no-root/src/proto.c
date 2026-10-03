@@ -1648,19 +1648,17 @@ int spd_repartition_xml(struct spd *io, const char *path)
  * refuses a direct write to a name it knows -- its own list of partition
  * names and sizes -- and a name it has never heard of is not checked.
  *
- * The unit is io->ptab_shift -- the shift the table was read with -- so a
- * table the device gave us goes back exactly as it came. spd_dump writes a
- * fixed size >> 20 there, which is only the same number when the shift the
- * device's units produced was 20; on an ordinary table it is 10 (units are
- * KiB), and the fixed >> 20 would send every row back a thousand times too
- * small. Echoing with the read shift is the same number as the reference's in
- * the one case they agree and the right number in the rest.
+ * The unit is MiB, the same one the XML carries and the same one spd_dump's
+ * load_partition_force writes (`size >> 20`) -- this table goes back to the
+ * DEVICE, and the device reads the repartition payload in the unit
+ * scan_xml_partitions writes into it, which is the XML's MiB unchanged. io->ptab
+ * holds bytes whichever unit the read used, so the conversion here is the fixed
+ * >> 20 and not the read shift.
  * 0 = accepted, -1 = refused. io->ptab is left alone either way. */
 int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 {
 	uint8_t *buf, *w;
 	int i;
-	unsigned shift = io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u;
 
 	if (io->nparts < 1 || !io->ptab)
 		return -1;
@@ -1688,7 +1686,7 @@ int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 		if (i + 1 == io->nparts)
 			wr32le(w + 0x48, ~0u);
 		else
-			wr32le(w + 0x48, (uint32_t)(io->ptab[i].size >> shift));
+			wr32le(w + 0x48, (uint32_t)(io->ptab[i].size >> 20));
 		w += 0x4c;
 	}
 	spd_encode(io, BSL_CMD_REPARTITION, buf, (size_t)io->nparts * 0x4c);
@@ -1697,12 +1695,20 @@ int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 }
 
 /* The XML body spd_dump writes and reads back: one row per table entry, the
- * size in the table's own unit, and the last row as 0xffffffff ("take the
- * rest", which is what a table ends with). `partition-list` writes this to the
- * file the user names and the automatic copy below writes the same bytes, so
- * either one can be edited and handed to `repartition`. SHIFT turns the byte
- * size fetch_ptab computed back into that unit (see spd_part_xml). */
-static void xml_body(FILE *fo, const struct spd *io, unsigned count, unsigned shift)
+ * size in MiB, and the last row as 0xffffffff ("take the rest", which is what a
+ * table ends with). `partition-list` writes this to the file the user names and
+ * the automatic copy below writes the same bytes, so either one can be edited
+ * and handed to `repartition`.
+ *
+ * MiB is not an assumption about the wire unit, it is the format: spd_dump
+ * writes this file with a fixed `size >> 20` and reads it back with
+ * `size << 20` (common.c scan_xml_partitions), writing the same number into
+ * the device table unconverted. The wire unit is whatever fetch_ptab's divisor
+ * found -- KiB on an eMMC whose rows are all >= 1 MiB -- so `>> ptab_shift`
+ * here is NOT the same number: on a divisor-10 table it writes every row 1024x
+ * too large, and feeding that back would claim a 5 GiB super was 5 TiB. The
+ * divisor normalises the READ; the XML is MiB either way. */
+static void xml_body(FILE *fo, const struct spd *io, unsigned count)
 {
 	unsigned i;
 
@@ -1712,7 +1718,7 @@ static void xml_body(FILE *fo, const struct spd *io, unsigned count, unsigned sh
 		if (i + 1 == count)
 			fprintf(fo, "0x%x\"/>\n", ~0u);
 		else
-			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> shift));
+			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> 20));
 	}
 	/* No trailing newline: the reference's own partition_list CLI writes the
 	 * closing tag bare (spd_dump.c ~1047), and its repartition reads either.
@@ -1761,7 +1767,7 @@ static void part_xml_auto(struct spd *io, unsigned count)
 				path, strerror(errno));
 		return;
 	}
-	xml_body(fo, io, count, io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u);
+	xml_body(fo, io, count);
 	if (fclose(fo) != 0) {
 		if (!warned++)
 			fprintf(stderr, "auto partition xml: write %s: %s (the session continues)\n",
@@ -1850,19 +1856,18 @@ static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
  * user enlarged to 10000 arrives as 10000. On a phone whose rows are MiB -- a
  * 5 GiB super is 5120 -- that is the number the XML has to carry.
  *
- * The divisor fetch_ptab read the table with is what turns bytes back into that
- * unit. spd_dump writes a fixed size >> 20 here instead, which is the same
- * number only when the divisor landed on 0. That is the usual case, because one
- * 1 MiB partition anywhere (misc, sml_a, vbmeta_a) drags it there, and it is
- * what this phone's own table does. Not every table has one: where it has none
- * the divisor is 10 and the fixed shift writes every row a thousand times too
- * small, so dumping a table and feeding it back would shrink the whole layout.
- * The read shift is the same number in the usual case and the right one in the
- * rest. A row the device reports as 0 is written as 0, as it read. */
+ * The divisor fetch_ptab read the table with normalises the READ: bytes =
+ * units << (20 - divisor), whichever unit the device reported. The XML is the
+ * normalised one -- spd_dump writes a fixed `size >> 20` here and its own
+ * reader turns the number back into bytes with `size << 20`, so MiB is the
+ * format and not a property of the phone. Echoing the read shift instead (which
+ * is 10, not 20, on a table whose rows are all >= 1 MiB) would write every row
+ * a thousand times too large. A row the device reports as 0 is written as 0,
+ * as it read. */
 int spd_part_xml(struct spd *io, const char *out_path)
 {
 	const uint8_t *p;
-	unsigned count = 0, shift;
+	unsigned count = 0;
 	FILE *fo;
 
 	if (fetch_ptab(io, &p, &count))
@@ -1871,13 +1876,12 @@ int spd_part_xml(struct spd *io, const char *out_path)
 		fprintf(stderr, "partition-list: the device reported an empty table\n");
 		return -1;
 	}
-	shift = io->ptab_shift > 0 ? (unsigned)io->ptab_shift : 20u;
 	fo = (!out_path || !strcmp(out_path, "-")) ? stdout : fopen(out_path, "w");
 	if (!fo) {
 		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
 		return -1;
 	}
-	xml_body(fo, io, count, shift);
+	xml_body(fo, io, count);
 	if (fo != stdout) {
 		/* Same as the parts table file: a short write must not leave a file
 		 * the next repartition reads as the real table. */

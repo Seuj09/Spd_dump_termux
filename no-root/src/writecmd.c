@@ -1,7 +1,8 @@
 /* Directory restore and single-partition writes.
  * Behavior follows spd_dump load_partitions / load_partition_unify, except:
- * no temporary repartition (w_force), and runtimenv is written rather than
- * erased. vbmeta byte 0x7B is only spd_verity(), not a side effect of write.
+ * no temporary repartition (w_force), runtimenv is written rather than
+ * erased, and load_partition_unify's vbmeta 0x7B patch (write_bak_image) is
+ * applied to a copy in memory instead of to the user's file on disk.
  * The directory scan visits every regular file;
  * spd_dump's readdir loop skips one entry.
  *
@@ -90,17 +91,127 @@ static int rank_of(const char *name)
 	return 2;
 }
 
+/* Index of the table row named RESOLVED, or -1. Exact match: a lookup name is
+ * already the row's own spelling by the time either caller asks. */
+static int table_row_of(struct spd *io, const char *resolved)
+{
+	int i;
+	for (i = 0; i < io->nparts; i++)
+		if (!strcmp(io->ptab[i].name, resolved))
+			return i;
+	return -1;
+}
+
+/* The rename dance load_partition_force() (common.c 1302) performs: send the
+ * live table with row IDX renamed to "w_force", write the image under that
+ * name, then send the table back. The loader checks a write against the names
+ * it knows, so a name it has never seen is not checked -- that is the whole
+ * point, and why the reference uses it for the primary half of every
+ * load_partition_unify() that has a NAME_bak row, not only for w_force.
+ *
+ * WHAT names the caller in the messages ("w-force", "write"). Returns 0 when
+ * the write ran and the table was put back, -1 otherwise -- a failed restore is
+ * reported as such, because the device is then left holding a table with a
+ * "w_force" row where the target used to be. */
+static int force_row_write(struct spd *io, int idx, const char *resolved, const char *path,
+	const char *what)
+{
+	int rc;
+
+	if (spd_repartition_echo(io, idx, "w_force")) {
+		fprintf(stderr, "%s %s: the device refused the temporary table; nothing written\n",
+			what, resolved);
+		return -1;
+	}
+	rc = spd_write_part(io, "w_force", path);
+	/* Back to the real name whether the write ran or not: the row is the
+	 * phone's, and leaving it renamed is worse than a failed write. */
+	if (spd_repartition_echo(io, idx, resolved)) {
+		fprintf(stderr, "%s %s: FAILED to put the table back; the device now has a"
+			" 'w_force' row in place of %s. Re-send the table (repartition, or"
+			" partition-list then repartition) before using the phone.\n",
+			what, resolved, resolved);
+		return -1;
+	}
+	if (rc) {
+		fprintf(stderr, "%s %s: the write failed; the table is back to normal\n",
+			what, resolved);
+		return -1;
+	}
+	fprintf(stderr, "%s %s: done, table restored\n", what, resolved);
+	return 0;
+}
+
 struct plan_item {
 	char name[40];
 	char path[1024];
 	int rank;
 };
 
+/* The *_bak half of spd_dump's load_partition_unify (common.c ~2126): on a
+ * phone whose table has a same-size NAME_bak row, the image is written twice,
+ * once under each name. For vbmeta the reference zeroes byte 0x7B of the image
+ * first. 0x7B is Unisoc's dm-verity switch -- dm_disable() writes 0x01 there,
+ * dm_enable() 0x00 (common.c 2017-2026) -- so the backup copy always lands
+ * with verification enabled whatever the image carries; the primary keeps the
+ * image's own byte, because it is written before this runs.
+ *
+ * The reference reaches for that byte with fopen(fn, "rb+") on the file the
+ * user named, so a restore silently edits their dump on disk. Patching a copy
+ * in memory instead sends the device exactly the bytes spd_dump sends it while
+ * leaving the file its owner's; a second restore, or a re-dump, then does not
+ * depend on whether a flash already ran. An image too short to hold the offset
+ * is sent unchanged -- the reference would grow the file by a zero byte to
+ * reach 0x7B, which is not a behavior worth copying. */
+static int write_bak_image(struct spd *io, const char *bak, const char *path,
+	const char *resolved, uint64_t flen)
+{
+	uint8_t *buf;
+	int rc;
+
+	if (strcmp(resolved, "vbmeta") != 0)
+		return spd_write_part(io, bak, path);
+	if (flen <= 0x7B) {
+		fprintf(stderr, "write %s_bak: %s is %llu bytes, too short to hold the 0x7b verity"
+			" byte; writing it unchanged\n", resolved, path, (unsigned long long)flen);
+		return spd_write_part(io, bak, path);
+	}
+	if (flen > (64ull << 20) || flen > (uint64_t)SIZE_MAX) {
+		fprintf(stderr, "write %s_bak: %s is %llu bytes, over the 64MB patch cap;"
+			" writing it unchanged\n", resolved, path, (unsigned long long)flen);
+		return spd_write_part(io, bak, path);
+	}
+	buf = malloc((size_t)flen);
+	if (!buf) {
+		fprintf(stderr, "write %s_bak: out of memory for a %llu-byte image; not written\n",
+			resolved, (unsigned long long)flen);
+		return -1;
+	}
+	{
+		FILE *f = fopen(path, "rb");
+		size_t got = f ? fread(buf, 1, (size_t)flen, f) : 0;
+		if (f)
+			fclose(f);
+		if (got != (size_t)flen) {
+			fprintf(stderr, "write %s_bak: short read on %s; not written\n", resolved, path);
+			free(buf);
+			return -1;
+		}
+	}
+	/* flen was checked against the row above, so the byte is inside the file. */
+	fprintf(stderr, "write %s_bak: vbmeta verity byte 0x7b: %02x -> 00 (spd_dump"
+		" load_partition_unify)\n", resolved, buf[0x7B]);
+	buf[0x7B] = 0;
+	rc = spd_write_part_buf(io, bak, buf, (size_t)flen);
+	free(buf);
+	return rc;
+}
+
 int spd_write_named(struct spd *io, const char *name, const char *path, int slot)
 {
 	char resolved[40], bak[48];
-	uint64_t psz = 0, flen = 0;
-	int lk, bk;
+	uint64_t psz = 0, bsz = 0, flen = 0;
+	int lk, bk, idx;
 	if (!strcmp(name, "misc")) {
 		fprintf(stderr, "write %s: misc goes through the backup path\n", name);
 		return -1;
@@ -141,29 +252,44 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	if (strstr(resolved, "runtimenv"))
 		fprintf(stderr, "write %s: spd_dump erases runtimenv instead of restoring the file; writing the file\n",
 			resolved);
-	if (spd_write_part(io, resolved, path))
-		return -1;
-	/* Same-size *_bak, and only when the device is not A/B. No repartition
-	 * rename and no vbmeta flag change (spd_dump's w_force / byte 0x7B). */
-	if (slot > 0 || !strncmp(resolved, "splloader", 9) || io->nparts <= 0)
-		return 0;
-	if (strlen(resolved) + 4 >= sizeof(bak))
-		return 0;
+	/* Which half of spd_dump's load_partition_unify() (common.c 2102) this
+	 * write is. The reference takes the plain write when the device is A/B --
+	 * except for vbmeta, whose `if (vbmeta) isVBMETA = 1; else if (selected_ab
+	 * > 0 || ...)` chain never reaches the early return (common.c 2108-2114)
+	 * -- and when splloader is the target, when there is no table, or when no
+	 * NAME_bak row exists. Otherwise the primary goes through load_partition_force()
+	 * and, if the two rows are the same size, the image is written a second
+	 * time under NAME_bak. */
+	if ((slot > 0 && strcmp(resolved, "vbmeta")) || !strncmp(resolved, "splloader", 9) ||
+		io->nparts <= 0 || strlen(resolved) + 4 >= sizeof(bak))
+		return spd_write_part(io, resolved, path);
 	snprintf(bak, sizeof(bak), "%s_bak", resolved);
-	bk = spd_lookup_part(io, bak, 0, bak, sizeof(bak), &psz);
+	bk = spd_lookup_part(io, bak, 0, bak, sizeof(bak), &bsz);
 	if (bk != 0)
-		return 0;
-	{
-		uint64_t primary = 0;
-		char primary_name[40];
-		if (spd_lookup_part(io, resolved, 0, primary_name, sizeof(primary_name), &primary) ||
-			primary != psz)
-			return 0;
+		return spd_write_part(io, resolved, path);
+
+	/* The primary half. load_partition_force() renames the row to "w_force"
+	 * and back for the same reason the standalone w-force command exists: the
+	 * loader does not size-check a name it has never seen, and a dual-copy
+	 * phone's row for uboot or vbmeta is not the size of the image being
+	 * restored. It runs before the size comparison, as in the reference --
+	 * the rename is not conditional on size0 == size1. */
+	idx = table_row_of(io, resolved);
+	if (idx < 0) {
+		fprintf(stderr, "write %s: %s is not a table row\n", resolved, resolved);
+		return -1;
 	}
-	if (flen > psz)
+	if (force_row_write(io, idx, resolved, path, "write"))
+		return -1;
+
+	if (psz != bsz) {
+		fprintf(stderr, "write %s_bak: %s_bak is %llu bytes and %s is %llu; the second"
+			" copy is not written (spd_dump writes it only when they match)\n",
+			resolved, resolved, (unsigned long long)bsz, resolved, (unsigned long long)psz);
 		return 0;
+	}
 	fprintf(stderr, "write %s_bak: same size, normal write (no repartition)\n", resolved);
-	return spd_write_part(io, bak, path);
+	return write_bak_image(io, bak, path, resolved, flen);
 }
 
 /* spd_dump's w_force: the write that gets through when a plain write does not.
@@ -184,16 +310,12 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
  * (spd_dump.c ~1139); it is a raw offset rather than a table row, and a
  * restore that fails midway would leave the phone with no row to write back.
  * misc keeps our rule from spd_write_named(): it goes through the backup path
- * with its own guards, rename or not.
- *
- * Returns 0 when the write ran and the original table was put back, -1
- * otherwise. A failed restore is reported as such: the device is then left
- * holding a table with a "w_force" row where the target used to be. */
+ * with its own guards, rename or not. */
 int spd_write_force(struct spd *io, const char *name, const char *path, int slot)
 {
 	char resolved[40];
 	uint64_t psz = 0, flen = 0;
-	int idx = -1, i, rc;
+	int idx;
 
 	if (io->nparts <= 0) {
 		fprintf(stderr, "w-force %s: no partition table (run parts in this session first)\n", name);
@@ -208,11 +330,7 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
 		fprintf(stderr, "w-force %s: not in the live partition table\n", name);
 		return -1;
 	}
-	for (i = 0; i < io->nparts; i++)
-		if (!strcmp(io->ptab[i].name, resolved)) {
-			idx = i;
-			break;
-		}
+	idx = table_row_of(io, resolved);
 	if (idx < 0) {
 		fprintf(stderr, "w-force %s: %s is not a table row\n", name, resolved);
 		return -1;
@@ -233,26 +351,7 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
 			" a force write does not stop at the row, so it can run into the next"
 			" partition\n", resolved, (unsigned long long)flen, (unsigned long long)psz);
 
-	if (spd_repartition_echo(io, idx, "w_force")) {
-		fprintf(stderr, "w-force %s: the device refused the temporary table; nothing written\n",
-			resolved);
-		return -1;
-	}
-	rc = spd_write_part(io, "w_force", path);
-	/* Back to the real name whether the write ran or not: the row is the
-	 * phone's, and leaving it renamed is worse than a failed write. */
-	if (spd_repartition_echo(io, idx, resolved)) {
-		fprintf(stderr, "w-force %s: FAILED to put the table back; the device now has a"
-			" 'w_force' row in place of %s. Re-send the table (repartition, or"
-			" partition-list then repartition) before using the phone.\n", resolved, resolved);
-		return -1;
-	}
-	if (rc) {
-		fprintf(stderr, "w-force %s: the write failed; the table is back to normal\n", resolved);
-		return -1;
-	}
-	fprintf(stderr, "w-force %s: done, table restored\n", resolved);
-	return 0;
+	return force_row_write(io, idx, resolved, path, "w-force");
 }
 
 struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n)

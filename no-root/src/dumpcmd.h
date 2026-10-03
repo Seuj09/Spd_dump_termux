@@ -14,7 +14,8 @@ int spd_pack_slot_file(char which, const char *in_path, const char *out_path);
 int spd_lookup_part(struct spd *io, const char *name, int slot,
 	char *out, size_t cap, uint64_t *size);
 int spd_dump(struct spd *io, const char *target, const char *outdir);
-/* spd_dump check_part NAME: byte size from the live table, 0 when absent.
+/* NAME's byte size from the live table, 0 when absent. check-part prints it as
+ * 0/1 (spd_dump check_part), part-size prints the number (spd_dump size_part).
  * splloader is 256 KiB even with no table row (it is a raw offset on NAND). */
 uint64_t spd_check_part(struct spd *io, const char *name);
 /* spd_dump get_partition_info: exact name, then NAME_a / NAME_b for the live

@@ -42,6 +42,15 @@ sh_run() { # DIR CMD...
 		fdl "$tmp/fdl1-dl.bin" 0x65000800 fdl "$tmp/fdl2-dl.bin" 0x9efffe00 "$@" reset \
 		7</dev/null </dev/null >sh.log 2>&1 )
 }
+# Same session, but stdout is what the caller gets: for the commands whose whole
+# answer is a number on stdout (check-part, part-size). Digits only, one line.
+sh_out() { # DIR CMD...
+	local d=$1; shift; mkdir -p "$d"
+	( cd "$d" && MOCK_PTABLE="$tmp/pt" MOCK_SLOT=a MOCK_LOG="$d/sh.seq" \
+		timeout 120 "$tmp/sh" --usb-fd 7 exec_addr 0x65015f08 "$tmp/custom_exec_no_verify_65015f08.bin" \
+		fdl "$tmp/fdl1-dl.bin" 0x65000800 fdl "$tmp/fdl2-dl.bin" 0x9efffe00 "$@" reset \
+		7</dev/null 2>/dev/null | grep -xE '[0-9]+' | tr '\n' ' ' )
+}
 # menu DIR/*.img vs spd_dump DIR/*.bin: same names, same bytes. misc-slotinfo.img is
 # spdhost's own 32-byte slot record and has no spd_dump counterpart.
 same_as_spd() { # MENUDIR SPDDIR
@@ -87,21 +96,28 @@ check "preset_resign is the spd_dump set, named by the resolved table name" bash
 	'cd "'"$tmp"'/r1" && [ -f recovery.img ] && [ -f boot_a.img ] && [ -f teecfg.img ] && [ -f trustos.img ] && [ -f sml.img ] && [ -f uboot_a.img ] && [ -f splloader.img ] && [ -f vbmeta.img ]'
 check "preset_resign splloader is 256 KiB" test "$(stat -c %s "$tmp/r1/splloader.img")" = 262144
 
-# ---- check-part: slot-resolved size from the live table ----
+# ---- check-part (0/1, spd_dump check_part) and part-size (bytes, size_part) ----
+# Two commands with two contracts: the reference prints 0/1 for check_part
+# ("Checks if the specified partition exists", README.md:177, need_size=0 at
+# spd_dump.c:925) and the byte count for size_part / part_size. Both read the
+# slot-resolved live table here.
 sh_run "$tmp/c1" parts "$tmp/c1/pt.txt" check-part boot check-part l_dsp check-part splloader \
 	check-part nvefs check-part nosuchpart >/dev/null; rc=$?
-got=$(grep -vE '^[0-9]+ ' "$tmp/c1/sh.log" 2>/dev/null | grep -xE '[0-9]+' | tr '\n' ' ')
-# sizes go to stdout of the process, captured in sh.log only for stderr; re-read from a fresh run
-out=$(cd "$tmp/c1" && MOCK_PTABLE="$tmp/pt" MOCK_SLOT=a timeout 120 "$tmp/sh" --usb-fd 7 \
-	exec_addr 0x65015f08 "$tmp/custom_exec_no_verify_65015f08.bin" fdl "$tmp/fdl1-dl.bin" 0x65000800 \
-	fdl "$tmp/fdl2-dl.bin" 0x9efffe00 parts "$tmp/c1/pt2.txt" check-part boot check-part l_dsp \
-	check-part splloader check-part nvefs check-part nosuchpart reset 7</dev/null 2>/dev/null \
-	| grep -xE '[0-9]+' | tr '\n' ' '); rc=$?
-check "check-part prints 5 sizes ($rc): $out" test "$(wc -w <<<"$out")" = 5
-check "check-part boot -> boot_a 4096 KiB = 4194304" test "$(awk '{print $1}' <<<"$out")" = 4194304
-check "check-part l_dsp 4194304, splloader 262144, nvefs 1048576" \
-	test "$(awk '{print $2, $3, $4}' <<<"$out")" = "4194304 262144 1048576"
-check "check-part unknown name -> 0" test "$(awk '{print $5}' <<<"$out")" = 0
+check "check-part on a fresh session rc=0 ($rc)" test "$rc" = 0
+out=$(sh_out "$tmp/c1" parts "$tmp/c1/pt2.txt" check-part boot check-part l_dsp \
+	check-part splloader check-part nvefs check-part nosuchpart)
+check "check-part prints 5 answers: $out" test "$(wc -w <<<"$out")" = 5
+check "check-part: an existing partition is 1, an unknown name is 0" \
+	test "$(awk '{print $1, $2, $3, $4, $5}' <<<"$out")" = "1 1 1 1 0"
+
+out=$(sh_out "$tmp/c1" parts "$tmp/c1/pt3.txt" part-size boot part-size l_dsp \
+	part-size splloader part-size nvefs part-size nosuchpart)
+check "part-size boot -> boot_a 4096 KiB = 4194304, l_dsp 4194304, splloader 262144, nvefs 1048576" \
+	test "$(awk '{print $1, $2, $3, $4}' <<<"$out")" = "4194304 4194304 262144 1048576"
+check "part-size unknown name -> 0" test "$(awk '{print $5}' <<<"$out")" = 0
+out=$(sh_out "$tmp/c1" parts "$tmp/c1/pt4.txt" size_part boot part_size boot)
+check "part-size answers to the size_part / part_size spellings too: $out" \
+	test "$(tr -d ' ' <<<"$out")" = "41943044194304"
 
 # ---- read-part SIZE "-" / "full" / 0xffffffff: whole partition ----
 sh_run "$tmp/f1" parts "$tmp/f1/pt.txt" read-part l_dsp 0 - "$tmp/f1/a.bin" \

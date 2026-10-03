@@ -350,8 +350,16 @@ int spd_resolve_part(struct spd *io, const char *name, char *out, size_t cap, ui
 	return spd_lookup_part(io, name, spd_active_slot(io), out, cap, size);
 }
 
-/* check-part NAME: size in bytes, 0 when the name is not in the live table.
- * A size-0 row reads as absent, like spd_dump check_part. */
+/* NAME's byte size in the live table, resolved through the active slot; 0 when
+ * the name is not in the table (a size-0 row reads as absent). One lookup feeds
+ * both commands: check-part prints 0/1 like spd_dump check_part, part-size
+ * prints the byte count like spd_dump size_part / part_size.
+ *
+ * spd_dump's check_part does not read the table at all -- it probes the device
+ * with a 0x8 READ_START and reports whether the loader answered (common.c:1505,
+ * used with need_size=0 at spd_dump.c:925) -- so it also works before a
+ * partition_list. Ours is a table read and therefore needs `parts` first, which
+ * is also why it can report a byte count the probe path cannot. */
 uint64_t spd_check_part(struct spd *io, const char *name)
 {
 	char out[40];

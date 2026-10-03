@@ -50,6 +50,25 @@ for pair in "reboot-recovery reboot-recovery" "reboot-fastboot reboot-fastboot";
 	check "bare $2: backup + verify + reset (rc $sdrc/$shrc)" \
 		bash -c "[ $shrc = 0 ] && grep -q 'misc-backup:' sh_$1.log && grep -q 'misc-verify: OK' sh_$1.log && grep -q '^SEQ 05 ' sh_$1.seq"
 done
+# The reference guards all four with `if (!fdl1_loaded) { DBG_LOG("FDL NOT
+# READY"); continue; }` (spd_dump.c:1303, 1330, 1347) -- reset and power-off are
+# FDL opcodes and mean nothing to a BootROM that is still waiting for a loader,
+# so spd_dump sends nothing and reports nothing. We refuse instead: a reset the
+# device never received would let the menu print success and leave the phone
+# sitting in download mode.
+for c in reset power-off poweroff; do
+	MOCK_LOG=sh_s0_$c.seq timeout 30 ./sh --usb-fd 7 --yes "$c" 7</dev/null </dev/null >sh_s0_$c.log 2>&1; rc=$?
+	check "$c at stage 0: refused (rc $rc), no reset frame" \
+		bash -c "[ $rc != 0 ] && grep -q 'requires a loader (fdl_stage >= 1)' sh_s0_$c.log &&
+			! grep -qs '^SEQ 05 ' sh_s0_$c.seq && ! grep -qs '^SEQ 17 ' sh_s0_$c.seq"
+done
+# Stage 1 (FDL1 in RAM, FDL2 not executed yet) is enough, as in the reference,
+# where fdl1_loaded is set by the FDL1 load and only the FDL2 exec clears it.
+MOCK_LOG=sh_s1.seq timeout 30 ./sh --usb-fd 7 --yes exec_addr 0x65015f08 custom_exec_no_verify_65015f08.bin \
+	fdl fdl1-dl.bin 0x65000800 reset 7</dev/null </dev/null >sh_s1.log 2>&1; rc=$?
+check "reset after FDL1 only: allowed (rc $rc), reset frame sent" \
+	bash -c "[ $rc = 0 ] && grep -q '^SEQ 05 ' sh_s1.seq"
+
 dd if=/dev/zero of=odd.img bs=4096 count=1 status=none
 sh odd write-part misc odd.img; rc=$?
 check "write misc 4096 refused (not a 2048 BCB and not the whole partition, rc $rc)" \

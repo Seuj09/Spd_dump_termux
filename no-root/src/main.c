@@ -97,9 +97,12 @@ static void usage(void)
 		"                               edit it, feed it to repartition.\n"
 		"  read-part NAME OFF SIZE OUT  SIZE may be - or full (or 0xffffffff) for\n"
 		"                               the whole partition, like spd_dump read_part\n"
-		"  check-part NAME              print the byte size from the live table\n"
-		"                               (0 and a note when absent), like spd_dump\n"
-		"                               check_part. Needs parts.\n"
+		"  check-part NAME              print 1 when the partition exists, 0 when\n"
+		"                               it does not (a note on stderr), like\n"
+		"                               spd_dump check_part. Needs parts.\n"
+		"  part-size NAME               print the byte size from the live table,\n"
+		"                               0 when absent, like spd_dump size_part /\n"
+		"                               part_size. Needs parts.\n"
 		"  dump all|all_lite|NAME DIR   after parts, same session: size from the\n"
 		"                               live table (units -> bytes like spd_dump),\n"
 		"                               slot from misc, splloader 256K in all*,\n"
@@ -413,6 +416,24 @@ static void need_fdl2(struct spd *io, const char *cmd)
 	}
 }
 
+/* The reference gates reset, reboot-recovery, reboot-fastboot and poweroff on
+ * `if (!fdl1_loaded) { DBG_LOG("FDL NOT READY"); continue; }` (spd_dump.c:1303,
+ * 1314, 1330, 1347) -- all four are FDL opcodes and none of them means anything
+ * to a BootROM still waiting for a loader, so at stage 0 it does nothing at all.
+ * We refuse instead of skipping: a reset that silently did not happen would let
+ * the menu report success and leave the phone sitting in download mode. Stage 1
+ * is enough, matching the reference, which treats fdl1_loaded == -1 (FDL2
+ * executed) as loaded just the same. */
+static void need_fdl1(struct spd *io, const char *cmd)
+{
+	if (io->fdl_stage < 1) {
+		fprintf(stderr,
+			"%s requires a loader (fdl_stage >= 1); run an fdl command first (now at stage %d)\n",
+			cmd, io->fdl_stage);
+		exit(1);
+	}
+}
+
 static int is_command(const char *s)
 {
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
@@ -420,6 +441,8 @@ static int is_command(const char *s)
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
 		strcmp(s, "partition-list") == 0 || strcmp(s, "partition_list") == 0 ||
 		strcmp(s, "check-part") == 0 ||
+		strcmp(s, "part-size") == 0 || strcmp(s, "size_part") == 0 ||
+		strcmp(s, "part_size") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "w-force") == 0 ||
 		strcmp(s, "w_force") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
@@ -1263,12 +1286,24 @@ int main(int argc, char **argv)
 			}
 			i += 5;
 		} else if (strcmp(cmd, "check-part") == 0) {
+			/* spd_dump check_part prints 0/1 -- "Checks if the specified
+			 * partition exists" (README.md:177, spd_dump.c:925 with
+			 * need_size=0). The byte count is part-size, below. */
 			uint64_t sz;
 			need(argc, i, 1, "check-part");
 			sz = spd_check_part(io, argv[i + 1]);
-			printf("%llu\n", (unsigned long long)sz);
+			printf("%d\n", sz ? 1 : 0);
 			if (!sz)
 				fprintf(stderr, "check-part: '%s' is not in the live table\n", argv[i + 1]);
+			i += 2;
+		} else if (strcmp(cmd, "part-size") == 0 || strcmp(cmd, "size_part") == 0 ||
+			strcmp(cmd, "part_size") == 0) {
+			uint64_t sz;
+			need(argc, i, 1, cmd);
+			sz = spd_check_part(io, argv[i + 1]);
+			printf("%llu\n", (unsigned long long)sz);
+			if (!sz)
+				fprintf(stderr, "%s: '%s' is not in the live table\n", cmd, argv[i + 1]);
 			i += 2;
 		} else if (strcmp(cmd, "dump") == 0) {
 			need(argc, i, 2, "dump");
@@ -1417,11 +1452,13 @@ int main(int argc, char **argv)
 			i++;
 			break;
 		} else if (strcmp(cmd, "reset") == 0) {
+			need_fdl1(io, "reset");
 			if (spd_simple(io, 0x05))
 				return 1;
 			i++;
 			break; /* spd_dump: `if (!send_and_check(io)) break;` */
 		} else if (strcmp(cmd, "power-off") == 0 || strcmp(cmd, "poweroff") == 0) {
+			need_fdl1(io, "power-off");
 			if (spd_simple(io, 0x17))
 				return 1;
 			i++;

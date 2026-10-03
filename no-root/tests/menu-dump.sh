@@ -71,8 +71,8 @@ check "KiB table: shift 10 like spd_dump" test "$PARTS_SHIFT" = 10
 autox=$(ls "$DUMP_DIR"/partition_*.xml 2>/dev/null | head -1)
 check "KiB table: the parts session left partition_<unixtime>.xml in the dump folder" \
 	test -n "$autox"
-check "auto XML is the live table in the table's own unit (boot_a 4096, last row 0xffffffff)" \
-	bash -c "grep -q 'Partition id=\"boot_a\" size=\"4096\"' '$autox' &&
+check "auto XML is the live table in MiB (boot_a 4096 KiB -> 4, last row 0xffffffff)" \
+	bash -c "grep -q 'Partition id=\"boot_a\" size=\"4\"' '$autox' &&
 		grep -q 'Partition id=\"blackbox\" size=\"0xffffffff\"' '$autox'"
 check "fmt_size 4194304=4M 1572864=1.5M 262144=256K 6442450944=6G" \
 	test "$(fmt_size 4194304) $(fmt_size 1572864) $(fmt_size 262144) $(fmt_size 6442450944)" = "4M 1.5M 256K 6G"

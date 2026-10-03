@@ -237,22 +237,24 @@ frc=$?
 check "--part-xml DIR writes there and beats SPDHOST_PART_XML_DIR (rc $frc)" \
 	bash -c "[ $frc = 0 ] && [ -n \"\$(ls flagx/partition_*.xml 2>/dev/null)\" ] &&
 		[ -z \"\$(ls envx/partition_*.xml 2>/dev/null)\" ]"
-# spd_dump writes a fixed size >> 20 in its XML. On a table with no 1-unit row
-# the divisor is 10 instead, so that fixed shift reports every row a thousand
-# times too small -- a dump edited and fed back would shrink the whole layout.
-# Ours writes the unit the table was read in, so it is right on both.
+# A table whose rows are all >= 1 MiB reads in KiB (divisor 10), and the XML is
+# MiB anyway: spd_dump writes size >> 20 and its reader turns the number back
+# into bytes with size << 20, so MiB is the format rather than a property of the
+# phone. Writing the read shift here instead was a bug -- it put 1024x the real
+# size in every row, and feeding that back would claim a 5 GiB super was 5 TiB.
+# Parity with the reference is the contract, on both kinds of table.
 printf '%s\n' 'boot_a 4096' 'super 8192' 'userdata 6144' > unitspt
 MOCK_PTABLE=$tmp/unitspt sh unit partition-list ours10.xml; shrc=$?
 MOCK_PTABLE=$tmp/unitspt sd unit2 skip_confirm 1 partition_list theirs10.xml reset; sdrc=$?
-check "a table with no 1-unit row dumps in its own unit (rc $shrc/$sdrc)" \
-	bash -c "[ $shrc = 0 ] && grep -q 'Partition id=\"super\" size=\"8192\"' ours10.xml &&
-		grep -q 'Partition id=\"boot_a\" size=\"4096\"' ours10.xml"
-check "spd_dump's fixed shift shrinks the same table 1024x, which is why we do not copy it" \
-	bash -c "[ $sdrc = 0 ] && grep -q 'Partition id=\"super\" size=\"8\"' theirs10.xml &&
-		grep -q 'Partition id=\"boot_a\" size=\"4\"' theirs10.xml"
+check "KiB-unit table: partition-list is byte-identical to spd_dump (rc $shrc/$sdrc)" \
+	bash -c "[ $shrc = 0 ] && [ $sdrc = 0 ] && cmp -s ours10.xml theirs10.xml"
+check "the unit normalises to MiB (boot_a 4096 KiB -> 4, super 8192 KiB -> 8)" \
+	bash -c "grep -q 'Partition id=\"boot_a\" size=\"4\"' ours10.xml &&
+		grep -q 'Partition id=\"super\" size=\"8\"' ours10.xml &&
+		grep -q 'Partition id=\"userdata\" size=\"0xffffffff\"' ours10.xml"
 sh unitrt repartition ours10.xml; rc=$?
-check "the same dump fed back keeps super at 8192, not 8 (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q 'repartition: \[2\] super size=8192' sh_unitrt.log"
+check "the same dump fed back carries the MiB numbers (super 8) (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'repartition: \[2\] super size=8' sh_unitrt.log"
 # A table whose unit is not KiB, and one holding a zero-size row. fetch_ptab's
 # divisor loop skips zero entries; spd_dump's own loop spins on one, which is
 # why ours is written to survive the table that would hang the reference.

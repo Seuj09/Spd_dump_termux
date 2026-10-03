@@ -104,16 +104,16 @@ tr=$(menu restore_backup_menu \
 	"type yes to restore this backup" 'no\r')
 check "restore: a typed 'no' starts no session" test ! -s "$tmp/ran/log"
 
-# --------------------------------------------- check-part (read-only)
+# --------------------------------------------- part-size (read-only)
 tr=$(menu check_part_action \
 	"Partition name" 'boot_a\r' \
 	"Press Enter to continue" '\r')
-check "check-part: parts then check-part in one session" ran_has "parts $tmp/dump/partition_list.txt check-part boot_a"
-check "check-part: nothing else is sent" ran_lacks "write-part"
-check "check-part: never passes --yes" ran_lacks --yes
+check "part-size: parts then part-size in one session" ran_has "parts $tmp/dump/partition_list.txt part-size boot_a"
+check "part-size: nothing else is sent" ran_lacks "write-part"
+check "part-size: never passes --yes" ran_lacks --yes
 
 tr=$(menu check_part_action "Partition name" 'not a name\r')
-check "check-part: a bad name is refused before the plug-in wait" test ! -s "$tmp/ran/log"
+check "part-size: a bad name is refused before the plug-in wait" test ! -s "$tmp/ran/log"
 
 # ----------------------------------------------- erase-part (dangerous)
 for name in persist splloader all; do

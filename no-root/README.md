@@ -204,8 +204,11 @@ Partition table and reads:
   each table read leaves `/sdcard/Download/partition_<unixtime>.xml` behind and
   option 4 (list partitions) says so. One name per run: a session that reads the
   table twice rewrites its own copy. `--part-xml ""` turns it off.
-- `check-part NAME` — print the byte size from the live table (0 when the
-  name is absent). Needs `parts`.
+- `check-part NAME` — print `1` when the partition exists in the live table,
+  `0` when it does not, like `spd_dump check_part`. Needs `parts`.
+- `part-size NAME` (also `size_part`, `part_size`) — print the byte size from
+  the live table, `0` when the name is absent, like `spd_dump size_part`.
+  Needs `parts`. The menu's read-only "partition size" action uses this.
 - `read-part NAME OFF SIZE OUT` — `SIZE` may be `-` or `full` for the whole
   partition. `K`/`M`/`G` suffixes and `0x` hex work; a bare number is bytes.
   Needs `parts`.
