@@ -873,6 +873,7 @@ int main(int argc, char **argv)
 	char failed[1024] = "";
 	int step_set = 0;
 	int nfailed = 0;
+	int interrupted_stop = 0;
 	char self_path[512];
 	int timeout = 1000, step = 4096;
 	unsigned vid = 0x1782, pid = 0x4d00;
@@ -1095,6 +1096,15 @@ int main(int argc, char **argv)
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];
+		/* An interrupt stops the run whether or not --keep-going is set.
+		 * That flag covers a command that failed on its own; an interrupted
+		 * one left the transfer half done, so the next command in the
+		 * sequence would go to a loader still waiting for the rest of it. */
+		if (spd_interrupted) {
+			fprintf(stderr, "interrupted; stopping before '%s'\n", cmd);
+			interrupted_stop = 1;
+			break;
+		}
 		if (strcmp(cmd, "ping") == 0) {
 			int fdl = 0;
 			if (i + 1 < argc && strcmp(argv[i + 1], "--fdl") == 0) {
@@ -1209,7 +1219,12 @@ int main(int argc, char **argv)
 				rsize, argv[i + 4])) {
 				if (!keep_going)
 					return 1;
-				fprintf(stderr, "read-part %s FAILED; continuing (--keep-going)\n", argv[i + 1]);
+				/* The loop-top check stops the run on the next iteration, so
+				 * promising to continue here would contradict it. */
+				if (spd_interrupted)
+					fprintf(stderr, "read-part %s FAILED; interrupted\n", argv[i + 1]);
+				else
+					fprintf(stderr, "read-part %s FAILED; continuing (--keep-going)\n", argv[i + 1]);
 				nfailed++;
 				if (strlen(failed) + strlen(argv[i + 1]) + 2 < sizeof(failed)) {
 					strcat(failed, " ");
@@ -1363,12 +1378,14 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (i < argc)
+	if (i < argc && !interrupted_stop)
 		fprintf(stderr, "note: ignored after reset/power-off/reboot-*: %s ... (the device left FDL2)\n", argv[i]);
 
 	if (!dry)
 		spd_usb_close(&io->usb);
 	spd_free(io);
+	if (interrupted_stop)
+		return 1;
 	if (nfailed) {
 		fprintf(stderr, "read-part failed (%d):%s\n", nfailed, failed);
 		return 1;

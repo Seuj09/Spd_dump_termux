@@ -481,6 +481,25 @@ PY
 bash -n "$root/scripts/menu.sh"
 check "menu.sh syntax" test $? -eq 0
 
+# Ctrl-C stops the run whatever --keep-going says. An interrupted read leaves
+# the loader waiting for the rest of a transfer that was never ended, so the
+# next command in the sequence would go into a desynchronised loader -- and a
+# long read is exactly when a user reaches for Ctrl-C. 32 MiB at the smallest
+# legal step is ~500k round trips, so the signal lands inside the read; the
+# second read must never run.
+printf '%s\n' 'slowpart 32768' >> pt
+./sh --usb-fd 7 --step 0x40 --yes --keep-going exec_addr 0x65015f08 \
+	custom_exec_no_verify_65015f08.bin "${LOAD[@]}" parts pt.txt \
+	read-part slowpart 0 - slow1.bin read-part boot_a 0 0x100 slow2.bin reset 7</dev/null \
+	</dev/null >sigint.log 2>&1 &
+sigpid=$!
+sleep 1
+kill -INT "$sigpid" 2>/dev/null
+wait "$sigpid"; rc=$?
+check "Ctrl-C under --keep-going stops the run before the next command (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q \"interrupted; stopping before 'read-part'\" sigint.log &&
+		! grep -q \"stopping before 'reset'\" sigint.log && [ ! -f slow2.bin ]"
+
 echo
 echo "write-seq: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

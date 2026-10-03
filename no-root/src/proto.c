@@ -1700,8 +1700,17 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		if (fo)
 			fprintf(fo, "%s %" PRIu64 "\n", name, sz);
 	}
-	if (fo)
-		fclose(fo);
+	if (fo) {
+		/* Buffered writes report their failure at fclose. A table file cut
+		 * short by a full disk would otherwise sit where the next session
+		 * reads it as the real table and sizes every partition from it, so
+		 * a failed write leaves no file at all. */
+		if (fclose(fo) != 0) {
+			fprintf(stderr, "write %s: %s\n", out_path, strerror(errno));
+			remove(out_path);
+			return -1;
+		}
+	}
 	return 0;
 }
 
