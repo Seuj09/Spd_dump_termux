@@ -55,8 +55,11 @@ menu_run() { # CONFFILE FN [ARGS...]
 		export SPDHOST_MENU_LIB=1 SPDHOST_MENU_CONFIG=$conf
 		export SPDHOST_INPUT_DIR=$tmp/input SPDHOST_DUMP_DIR=$tmp/dump
 		export SPDHOST_MENU_RUNNER=$tmp/runner
+		# MENU_SH moves the menu to another tree, which is how the exec-stub
+		# lookup is tested against a package that ships only one stub: that
+		# lookup starts at the menu's own directory.
 		# shellcheck source=/dev/null
-		source "$root/scripts/menu.sh" >/dev/null 2>&1
+		source "${MENU_SH:-$root/scripts/menu.sh}" >/dev/null 2>&1
 		load_config
 		"$@"
 	)
@@ -67,6 +70,7 @@ show_chip_error() { printf 'CHIPERR=%s\n' "${CONFIG_CHIP_ERROR:-}"; }
 show_addrs() {
 	printf 'F1=%s F2=%s EX=%s SOC=%s\n' "${FDL1_ADDR:-}" "${FDL2_ADDR:-}" "${EXEC_ADDR:-}" "${SOC:-}"
 }
+hex_probe() { hex_mode_menu; show_addrs; }
 manual_probe() {
 	configure_loaders_manual
 	printf 'RESULT SOC=%s EXEC_ADDR=%s\n' "$SOC" "$EXEC_ADDR"
@@ -364,6 +368,55 @@ check "smoke_test without timeout: says why it stopped" \
 	has "$out" "did not answer within 5s (stopped after 3 tries)"
 check "smoke_test without timeout: still reaches its summary" \
 	has "$out" "Smoke test:"
+
+# ------------------------------------------- hex mode (extra menu [9])
+# The release menu's "ganti hex mode": flip exec_addr between the chip's two
+# exec stubs. Both ship in this tree, so the flip works; the branch that matters
+# is the one where the second stub is NOT there, because a saved alt address
+# with no file behind it would fail every later session. The stub lookup starts
+# at the menu's own directory, so that branch needs a package that ships one.
+UMK1=$root/fdl/ums9230/infinix/fdl1-dl.bin
+UMK2=$root/fdl/ums9230/infinix/fdl2-dl.bin
+mkconf() { # FILE EXEC_ADDR FDL1 FDL2
+	cat >"$1" <<EOF
+FDL1=$3
+FDL1_ADDR=0x65000800
+FDL2=$4
+FDL2_ADDR=0x9efffe00
+EXEC_ADDR=$2
+SOC=ums9230
+EOF
+}
+
+mkconf "$tmp/hex-both.conf" 0x65015f08 "$UMK1" "$UMK2"
+out=$(cd "$tmp" && menu_run "$tmp/hex-both.conf" hex_probe)
+check "hex mode: both stubs on disk, the flip selects the second and saves it" \
+	bash -c '[[ $1 == *"EX=0x65015f48"* ]] && grep -q "^EXEC_ADDR=0x65015f48$" "$2"' _ "$out" "$tmp/hex-both.conf"
+out=$(cd "$tmp" && menu_run "$tmp/hex-both.conf" hex_probe)
+check "hex mode: flipping again goes back to the primary and saves that" \
+	bash -c '[[ $1 == *"EX=0x65015f08"* ]] && grep -q "^EXEC_ADDR=0x65015f08$" "$2"' _ "$out" "$tmp/hex-both.conf"
+
+# A package that ships only the primary stub, loaders included, so nothing in
+# the search path can turn up the second one.
+mkdir -p "$tmp/pkg/scripts" "$tmp/pkg/fdl/ums9230"
+cp "$root/scripts/menu.sh" "$tmp/pkg/scripts/"
+cp "$UMK1" "$UMK2" "$tmp/pkg/fdl/ums9230/"
+: >"$tmp/pkg/fdl/ums9230/custom_exec_no_verify_65015f08.bin"
+P1=$tmp/pkg/fdl/ums9230/fdl1-dl.bin
+P2=$tmp/pkg/fdl/ums9230/fdl2-dl.bin
+
+mkconf "$tmp/hex-noalt.conf" 0x65015f08 "$P1" "$P2"
+# 2>/dev/null: exec_stub_present's "missing <file>" on stderr is the expected
+# refusal here, not a test failure.
+out=$(cd "$tmp/pkg" && MENU_SH=$tmp/pkg/scripts/menu.sh menu_run "$tmp/hex-noalt.conf" hex_probe 2>/dev/null)
+check "hex mode: no second stub in the package, the flip is refused" \
+	bash -c '[[ $1 == *"Second stub is not on disk"* && $1 == *"EX=0x65015f08"* ]]' _ "$out"
+
+mkconf "$tmp/hex-savedalt.conf" 0x65015f48 "$P1" "$P2"
+out=$(cd "$tmp/pkg" && MENU_SH=$tmp/pkg/scripts/menu.sh menu_run "$tmp/hex-savedalt.conf" hex_probe 2>/dev/null)
+check "hex mode: a saved alt address with no stub behind it is repaired to the primary" \
+	bash -c '[[ $1 == *"Saved exec_addr 0x65015f08"* && $1 == *"EX=0x65015f08"* ]] &&
+		grep -q "^EXEC_ADDR=0x65015f08$" "$2"' _ "$out" "$tmp/hex-savedalt.conf"
 
 echo
 echo "menu-config: $pass passed, $fail failed"

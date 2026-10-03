@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The menu items that expose spdhost commands the rest of the menu never
 # reached: write-parts-a/-b (restore to a forced slot), check-part, erase-part,
-# pack-slot, and the offline PAC reader. Driven on a pty, the way termux-usb -e
-# runs the menu, because
+# pack-slot, the offline PAC reader, the multi-name backup line (and `imei`),
+# the live misc read the slot tools work from, and chip-uid. Driven on a pty,
+# the way termux-usb -e runs the menu, because
 # every one of these confirms through confirm_action/confirm_dangerous and both
 # refuse without a terminal.
 #
@@ -272,6 +273,42 @@ python3 "$drive" "$tr" "PAC file" '\r' -- \
 	"SPDHOST_INPUT_DIR=$tmp/no-pac $tmp/fn.sh pac_extract_action" </dev/null
 check "pac: no pac anywhere is refused before anything runs" \
 	bash -c '[[ $1 == *"none in"* ]]' _ "$(cat "$tr")"
+
+# ------------------------------------- the multi-name backup line
+# The release backup line takes several names in one go, and `imei` is its
+# shorthand for six of them. One session, one `dump NAME DIR` per name, with
+# --keep-going, so one name the table does not have does not lose the rest.
+rm -f "$tmp/ran/log"
+tr=$tmp/many.pty
+python3 "$drive" "$tr" "Press Enter to continue" '\r' -- \
+	"$tmp/fn.sh dump_many_session boot_a vbmeta" </dev/null
+check "dump two names: one session, a dump each, --keep-going" \
+	bash -c "grep -q -- --keep-going $tmp/ran/log &&
+		grep -q 'dump boot_a $tmp/dump' $tmp/ran/log &&
+		grep -q 'dump vbmeta $tmp/dump' $tmp/ran/log &&
+		grep -q -- 'parts ' $tmp/ran/log && ! grep -q -- --yes $tmp/ran/log"
+
+tr=$(menu dump_imei_session "Press Enter to continue" '\r')
+check "dump imei: the six release names, in one session" \
+	bash -c "for n in miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2; do
+		grep -q \"dump \$n $tmp/dump\" $tmp/ran/log || exit 1; done"
+
+# ---------------------------------------- the live misc read
+# read_misc_image is the live misc copy the slot tools work from. It has to
+# land in the temp dir, never in DUMP_DIR: write-parts restores every NAME.img
+# it finds there, so a live misc image in DUMP_DIR could be written back to the
+# phone by a later restore.
+tr=$(menu read_misc_image "Press Enter to continue" '\r')
+check "read-misc: parts then misc-backup, into the temp dir and not the dump folder" \
+	bash -c "grep -q -- 'misc-backup ' $tmp/ran/log &&
+		! grep -q -- 'misc-backup $tmp/dump' $tmp/ran/log"
+
+# --------------------------------------------------- chip-uid
+# Read-only: no typed confirm, and nothing on the line that writes or reboots.
+tr=$(menu chip_uid_action "Press Enter to continue" '\r')
+check "chip-uid: one read-only session, no write, no erase, no --yes" \
+	bash -c "grep -q 'chip-uid' $tmp/ran/log &&
+		! grep -qE -- 'write-part|erase|repartition|reset|--yes' $tmp/ran/log"
 
 echo
 echo "menu-extra: $pass passed, $fail failed"

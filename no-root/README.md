@@ -278,7 +278,10 @@ Partition table and reads:
   the XML list names into `DIR/NAME.bin`, in the list's own order. `DIR`
   defaults to the `path` directory, then the current directory. `userdata` in
   the list is skipped, `splloader` is 256 KiB, a `size="0xffffffff"` row is
-  sized by the device, and `super` reads its `metadata` beside it. The list
+  sized by the device, and `super` reads its `metadata` beside it. A row the
+  live table does not carry is skipped too, as spd_dump's `dump_partitions`
+  does (`common.c:1757`); on an A/B phone the `misc` image is read a second
+  time at the end as the slot info (`common.c:1771`). The list
   itself is copied into `DIR` only when a destination was named — with none,
   the reference leaves it where it is, and so does spdhost. Needs `parts`.
 - `dump all|all_lite|NAME DIR` — after `parts`, same session. `all` and
@@ -876,9 +879,11 @@ are the places where spdhost knowingly does something else:
   still reads on a loader that will not answer the probe. `read-part
   splloader 0 -` is the other side of the same coin: the reference refuses the
   name, spdhost keeps its fixed 256 KiB. A name the live table has no row for
-  is refused too, the reference says `part not exist` and skips the row, but
-  spdhost reads it when an explicit size was given — that is how a raw region
-  with no table row is read without inventing a partition first.
+  is refused by the reference — it says `part not exist` and skips the row — but
+  the single `read-part` still sends the read when an explicit size was given,
+  which is how a raw region with no table row is read without inventing a
+  partition first. In a `read_parts` **list** the row is skipped instead, by
+  both tools (`common.c:1757`).
 - **NAND.** spdhost tracks the storage type and honours its consequences
   (no automatic table read, `w-force` refused, no `_bak` twin), but the UBI
   sizing path in `dump_partitions` and the `read_pactime`/NAND-id handling are

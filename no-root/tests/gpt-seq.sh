@@ -28,8 +28,12 @@ cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/inf
 cd "$tmp"
 mkdir -p ref ours
 # The mock must still list `user_partition`, or the 32 KiB read is NACKed before
-# the GPT is ever looked at. The row size is only there to satisfy the table walk.
-printf '%s\n' 'misc 1024' 'user_partition 32768' 'boot_a 4096' 'boot_b 4096' 'userdata 8192' > phonept
+# the GPT is ever looked at. The rows are the GPT's own partitions in KiB -- the
+# listing always comes from the GPT, never from here -- and they double as the
+# READ_START ceiling, because the mock NACKs a read bigger than the row it was
+# handed (mock_fdl2.c:206): misc 2048*512, boot_a 16384*512, boot_b 20480*512,
+# userdata 40960*512 sectors, i.e. 1024/8192/10240/20480 KiB.
+printf '%s\n' 'misc 1024' 'user_partition 32768' 'boot_a 8192' 'boot_b 10240' 'userdata 20480' > phonept
 # MOCK_GPT: `user_partition` holds a real GPT -- header at LBA 1, 128 entries at
 # LBA 2 -- with misc 1 MiB, boot_a 8 MiB, boot_b 10 MiB, userdata 20 MiB and 124
 # zeroed entries after them, which is what a formatted phone looks like.
@@ -101,6 +105,47 @@ check "three listings in one session are still one device read" \
 	bash -c "[ \$(grep -c '^1 misc 1$' sh_gpt.log) = 2 ] &&
 		[ \$(grep -c '^4 userdata 20$' sh_gpt.log) = 2 ] &&
 		[ \$(grep -c '^SEQ 10 .*75007300650072005f0070' sh_gpt.seq) = 1 ]"
+
+# The GPT-derived XML is what a real phone feeds `read-parts`, so drive it from one.
+# `userdata` is 0xffffffff -- read to the end of the partition -- which both tools
+# skip rather than pull 20 MiB through a test; the two sized rows must come back at
+# exactly the GPT sizes: misc 2048*512 = 1048576, boot_a 16384*512 = 8388608.
+printf '%s\n' '<Partitions>' '    <Partition id="misc" size="1"/>' \
+	'    <Partition id="boot_a" size="8"/>' '    <Partition id="userdata" size="0xffffffff"/>' \
+	'</Partitions>' > ours/rl.xml
+mkdir -p ours/out
+sh read read-parts rl.xml out; rc=$?
+check "read-parts from the GPT table: both sized rows at their GPT sizes, end-to-end row skipped (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s ours/out/misc.bin) = 1048576 ] &&
+		[ \$(stat -c %s ours/out/boot_a.bin) = 8388608 ] && [ ! -e ours/out/userdata.bin ]"
+
+# A row the live table does not carry is skipped rather than read as something
+# else: spd_dump's dump_partitions drops any row whose lookup comes back size 0
+# (common.c:1757-1758). Ours says so in the log and carries on, same exit code.
+printf '%s\n' '<Partitions>' '    <Partition id="nosuchpart" size="1"/>' '</Partitions>' > ours/rb.xml
+mkdir -p ours/bad
+sh bad read-parts rb.xml bad; rc=$?
+check "a row the live table does not have is skipped like spd_dump, not read as another partition (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'nosuchpart is not in the live table' sh_bad.log &&
+		[ ! -e ours/bad/nosuchpart.bin ]"
+
+# `0xffffffff` on a named row means "to the end of the partition" and the size
+# comes from a device query, not from the file. The same list goes to each tool in
+# its own directory, and the images have to land on the same bytes.
+printf '%s\n' '<Partitions>' '    <Partition id="misc" size="1"/>' \
+	'    <Partition id="boot_b" size="0xffffffff"/>' '    <Partition id="userdata" size="0xffffffff"/>' \
+	'</Partitions>' > ours/rp.xml
+cp ours/rp.xml ref/rp.xml
+sd rp partition_list rp_list.xml read_parts rp.xml reset
+sh rp partition-list rp_list.xml read-parts rp.xml .
+check "read-parts 0xffffffff reads to the partition end, byte-identical to spd_dump" \
+	bash -c "cmp -s ref/boot_b.bin ours/boot_b.bin && cmp -s ref/misc.bin ours/misc.bin &&
+		[ \$(stat -c %s ours/boot_b.bin) = 10485760 ]"
+# userdata is dropped by name (common.c:1755) and the misc image is re-dumped as
+# the slot info (common.c:1771) -- both tools do both, from the same list.
+check "read-parts drops userdata and re-dumps misc as slot info, like spd_dump" \
+	bash -c "[ ! -e ref/userdata.bin ] && [ ! -e ours/userdata.bin ] &&
+		grep -q 'saving slot info' ref_rp.log && grep -q 'saving slot info' sh_rp.log"
 
 # With the on-flash GPT replaced by pattern bytes (MOCK_GPT unset), the same phone
 # falls back to the SPRD packet: the branch gpt_info() is tried BEFORE.
