@@ -316,8 +316,8 @@ int spd_mem_to_part_file(struct spd *io, const char *name, uint64_t offset,
 int spd_write_named(struct spd *io, const char *name, const char *path, int slot)
 {
 	char resolved[40], bak[48];
-	uint64_t psz = 0, bsz = 0, flen = 0;
-	int lk, bk, idx;
+	uint64_t psz = 0, bsz = 0, flen = 0, live = 0;
+	int lk, bk, idx, failed = 0, rc;
 	if (!strcmp(name, "misc")) {
 		fprintf(stderr, "write %s: misc goes through the backup path\n", name);
 		return -1;
@@ -364,8 +364,8 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	 * > 0 || ...)` chain never reaches the early return (common.c 2108-2114)
 	 * -- and when splloader is the target, when there is no table, or when no
 	 * NAME_bak row exists. Otherwise the primary goes through load_partition_force()
-	 * and, if the two rows are the same size, the image is written a second
-	 * time under NAME_bak. */
+	 * and, if the device's size for the primary equals the NAME_bak row, the
+	 * image is written a second time under NAME_bak. */
 	if ((slot > 0 && strcmp(resolved, "vbmeta")) ||
 		io->storage == SPD_STORAGE_NAND || !strncmp(resolved, "splloader", 9) ||
 		io->nparts <= 0 || strlen(resolved) + 4 >= sizeof(bak))
@@ -374,6 +374,14 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	bk = spd_lookup_part(io, bak, 0, bak, sizeof(bak), &bsz);
 	if (bk != 0)
 		return spd_write_part(io, resolved, path);
+
+	/* size0 is not the row's size: load_partition_unify() asks the DEVICE,
+	 * `size0 = check_partition(io, name0, 1)` (common.c 2122), and compares
+	 * that against the NAME_bak row. It runs before the force write, as in the
+	 * reference, and it is the same probe read-part uses for a 0xffffffff size
+	 * -- so the frames here are the reference's, including the NAND fallback
+	 * that sets io->storage. */
+	live = spd_check_partition(io, resolved, 1, slot);
 
 	/* The primary half. load_partition_force() renames the row to "w_force"
 	 * and back for the same reason the standalone w-force command exists: the
@@ -386,17 +394,26 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 		fprintf(stderr, "write %s: %s is not a table row\n", resolved, resolved);
 		return -1;
 	}
-	if (force_row_write(io, idx, resolved, path, "write"))
-		return -1;
+	failed = force_row_write(io, idx, resolved, path, "write") != 0;
+	/* load_partition_force() is void and its caller never looks at the result
+	 * (common.c 1321, 2126), so a primary that fails does NOT stop the
+	 * NAME_bak copy there. Match that: the second copy is the one that boots
+	 * when the first is broken, which is why the pair is written at all. The
+	 * failure is still reported, and still fails the command. */
+	if (failed)
+		fprintf(stderr, "write %s: the primary copy failed; writing %s_bak anyway,"
+			" as spd_dump does\n", resolved, resolved);
 
-	if (psz != bsz) {
-		fprintf(stderr, "write %s_bak: %s_bak is %llu bytes and %s is %llu; the second"
-			" copy is not written (spd_dump writes it only when they match)\n",
-			resolved, resolved, (unsigned long long)bsz, resolved, (unsigned long long)psz);
-		return 0;
+	if (live != bsz) {
+		fprintf(stderr, "write %s_bak: the device reports %s as %llu bytes and %s_bak is"
+			" %llu; the second copy is not written (spd_dump writes it only when they"
+			" match)\n", resolved, resolved, (unsigned long long)live, resolved,
+			(unsigned long long)bsz);
+		return failed ? -1 : 0;
 	}
 	fprintf(stderr, "write %s_bak: same size, normal write (no repartition)\n", resolved);
-	return write_bak_image(io, bak, path, resolved, flen);
+	rc = write_bak_image(io, bak, path, resolved, flen);
+	return (failed || rc) ? -1 : 0;
 }
 
 /* spd_dump's w_force: the write that gets through when a plain write does not.

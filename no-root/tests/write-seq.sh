@@ -832,6 +832,57 @@ check "Ctrl-C under --keep-going stops the run before the next command (rc $rc)"
 	bash -c "[ $rc != 0 ] && grep -q \"interrupted; stopping before 'read-part'\" sigint.log &&
 		! grep -q \"stopping before 'reset'\" sigint.log && [ ! -f slow2.bin ]"
 
+# The NAME / NAME_bak twin. A plain `w` reaches load_partition_unify()'s second
+# half (common.c 2102) only off A/B, an eMMC phone with a NAME_bak row, and
+# there the reference does three things this pins: it sizes the primary by
+# ASKING THE DEVICE (size0 = check_partition(io, name0, 1), common.c 2122) and
+# not from the row; it force-writes the primary through the same rename w-force
+# uses (common.c 2126); and only then, if the device's size for the primary and
+# the NAME_bak row agree, it writes the image a second time under NAME_bak.
+printf '%s\n' 'misc 1024' 'boot 4096' 'boot_bak 4096' > ptbak
+head -c 4194304 /dev/urandom > bootfull.img
+MOCK_PTABLE=$tmp/ptbak sd wbak skip_confirm 1 partition_list pbak.xml w boot bootfull.img reset; sdrc=$?
+MOCK_PTABLE=$tmp/ptbak sh wbak parts pbak.txt write-part boot bootfull.img; shrc=$?
+check "the NAME/NAME_bak pair: both copies written, rc $sdrc/$shrc" \
+	bash -c "[ $shrc = 0 ] && [ $sdrc = 0 ] && grep -q 'Write Part Done: boot_bak' sd_wbak.log &&
+		grep -q 'write boot_bak: 4194304 bytes from bootfull.img' sh_wbak.log"
+# The row says 4096 KiB, but the reference does not use the row here -- it reads
+# the partition back to size it, which is the partition_size_pc line and ~18
+# frames of probe. Ours reports the same size, so the twin decision is made on
+# the same number.
+check "the primary is sized from the device, as spd_dump does, not from the row" \
+	bash -c "grep -q 'partition_size_pc: boot, 0x400000' sd_wbak.log &&
+		grep -q 'partition_size_pc: boot, 0x400000' sh_wbak.log"
+check "the twin write is the force dance, in spd_dump's order (RFRB)" \
+	bash -c "awk '/^SEQ 0b /{printf \"R\"} /^SEQ 01 len=76 77005f0066006f00720063006500/{printf \"F\"} \
+		/^SEQ 01 len=76 62006f006f0074005f0062/{printf \"B\"}' sh_wbak.seq | grep -qx RFRB"
+# Both packets of that dance are the reference's, byte for byte: the first
+# renames the row to w_force, the second puts it back, and a phone left holding
+# either one is a phone with no row to write.
+check "both repartition packets of the twin write match spd_dump byte for byte" \
+	bash -c 'awk "/^SEQ 0b /{print}" sd_wbak.seq > a_bak; awk "/^SEQ 0b /{print}" sh_wbak.seq > b_bak;
+		[ -s a_bak ] && [ $(wc -l < a_bak) = 2 ] && diff -q a_bak b_bak >/dev/null'
+# Unequal rows: the primary is still force-written -- the rename is not
+# conditional on the sizes -- but the second copy is not.
+printf '%s\n' 'misc 1024' 'boot 4096' 'boot_bak 2048' > ptbak2
+MOCK_PTABLE=$tmp/ptbak2 sh wbak2 parts pbak2.txt write-part boot bootfull.img; rc=$?
+check "a NAME_bak row of another size: the primary only, no second copy (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'boot_bak is 2097152' sh_wbak2.log &&
+		! grep -q 'write boot_bak: 4194304 bytes from' sh_wbak2.log &&
+		[ \$(grep -cE '^SEQ 0b ' sh_wbak2.seq) = 2 ]"
+# A primary the loader refuses must not cost the second copy: the reference's
+# load_partition_force() is void and nobody looks at what it did (common.c
+# 1321), so the NAME_bak write runs anyway. The failure is still ours to
+# report, so the command still fails -- but the copy the phone boots from when
+# the first is broken is on the device.
+MOCK_PTABLE=$tmp/ptbak MOCK_FAIL_WRITE=w_force sh wbak3 parts pbak.txt write-part boot bootfull.img; rc=$?
+check "a refused primary still gets the NAME_bak copy, as spd_dump does (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'the primary copy failed; writing boot_bak anyway' sh_wbak3.log &&
+		grep -q 'write boot_bak: 4194304 bytes from bootfull.img' sh_wbak3.log"
+MOCK_PTABLE=$tmp/ptbak MOCK_FAIL_WRITE=w_force sd wbak3 skip_confirm 1 partition_list pbak3.xml w boot bootfull.img reset
+check "…and spd_dump writes it too (same refusal, same second copy)" \
+	grep -q 'Write Part Done: boot_bak' sd_wbak3.log
+
 echo
 echo "write-seq: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
