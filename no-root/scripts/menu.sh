@@ -1818,27 +1818,40 @@ confirm_dangerous() {
 	fi
 }
 
-# Release-menu file. Not shipped in this tree. The rooted package keeps
-# fdl2-cboot.bin next to fdl1-dl.bin (ums9230/infinix/) and gen_spl-unlock
-# two directories above that, beside menu.sh. spl-unlock.bin is generated.
+# Release-menu file, shipped per model: fdl/<soc>/<brand>/fdl2-cboot.bin, and
+# gen_spl-unlock beside menu.sh. spl-unlock.bin is generated.
 #
 # The selected model's own loader directory is searched FIRST. This file is
 # what unlock_bootloader_menu writes to uboot just after erasing splloader, so
 # picking up another model's copy is a brick: the old order tried the
 # hardcoded ums9230/infinix directory before the model's own, and a phone
-# configured as ums9230/itel (we ship no itel cboot) therefore got infinix's
-# uboot. That directory is now a last resort, and only while the selection
-# really is that same ums9230/infinix pair.
+# configured as ums9230/itel therefore got infinix's uboot. That directory is
+# now a last resort, and only while the selection really is that same
+# ums9230/infinix pair.
+#
+# Every directory the menu offers carries one now, but the brand-level copy
+# must never stand in for an alternatif sub-model: those are different phones
+# (c53 is not c31), so a lookup that crosses out of the sub-model's own folder
+# is refused rather than answered with the wrong image.
 find_user_file() {
-	local name=$1 d base soc dev
+	local name=$1 d base soc dev fdir
 	local -a places=()
 	base=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 	soc=${SOC:-}
 	dev=${DEVICE:-}
 	# The model's own loader directory, then its package root.
 	if [[ -n ${FDL1:-} ]]; then
-		places+=("$(dirname "$FDL1")/$name")
-		places+=("$(dirname "$FDL1")/../../$name")
+		fdir=$(dirname "$FDL1")
+		places+=("$fdir/$name")
+		# Two levels up is the package root for the legacy layout, where the
+		# loaders live at <package>/<soc>/<brand>/. From an alternatif
+		# sub-model (<soc>/<brand>/alternatif/<model>/) the same hop lands on
+		# <soc>/<brand>/ -- the generic brand image, which belongs to a
+		# different phone. Writing that to uboot is a brick, so it is not
+		# taken from inside an alternatif folder.
+		if [[ $fdir != */alternatif/* && $fdir != */alternativ/* ]]; then
+			places+=("$fdir/../../$name")
+		fi
 	fi
 	places+=(
 		"$PWD/$name"
@@ -1847,9 +1860,10 @@ find_user_file() {
 	)
 	# Legacy release layout: menu at the package root, loaders under
 	# ums9230/infinix/. Only when no model has been chosen yet, or the chosen
-	# one is that very pair — otherwise this is a different phone's file.
-	# ${dev%%/*} compares a sub-model (DEVICE=realme/model) by brand.
-	if [[ -z $dev || ( $soc == ums9230 && ${dev%%/*} == infinix ) ]]; then
+	# one is that very pair — otherwise this is a different phone's file. A
+	# sub-model (DEVICE=infinix/hot12pro) is not that pair either: it is its
+	# own phone, so it does not get infinix's image.
+	if [[ -z $dev || ( $soc == ums9230 && $dev == infinix ) ]]; then
 		places+=("$PWD/ums9230/infinix/$name" "$base/ums9230/infinix/$name")
 	fi
 	for d in "${places[@]}"; do
@@ -2872,8 +2886,10 @@ unlock_make_spl_unlock() {
 	return 0
 }
 
-# Release-menu unlock. fdl2-cboot.bin is shipped only for ums9230/infinix.
-# A missing dump does not continue into the erase. --dangerous is not passed.
+# Release-menu unlock. fdl2-cboot.bin ships per model for every chip+brand the
+# menu offers (fdl/<soc>/<brand>/), but not for alternatif sub-models, whose
+# own image the vendor package does not carry. A missing blob, or a missing
+# dump, does not continue into the erase. --dangerous is not passed.
 unlock_bootloader_menu() {
 	local cboot unlock can_gen=0 work spl uboot slotf rc erase_rc=0
 	cboot=$(find_user_file fdl2-cboot.bin || true)
@@ -2895,10 +2911,11 @@ unlock_bootloader_menu() {
 			echo "  looked beside the loaders: $(dirname "${FDL1:-<fdl1>}")/fdl2-cboot.bin"
 			[[ -n $parent ]] && echo "  and the package root: $parent/fdl2-cboot.bin"
 			echo "  and the working directory: $PWD/fdl2-cboot.bin"
-			echo "This is a vendor blob, shipped here for ums9230/infinix only."
-			echo "Release packages carry one copy per model (fdl/<chip>/<brand>/);"
-			echo "it is not derivable from the other files, so another model's"
-			echo "package has to supply it."
+			echo "This is a vendor blob, one per model (fdl/<chip>/<brand>/)."
+			echo "It ships for every chip+brand the menu offers, but not for the"
+			echo "alternatif sub-models, whose own image the vendor package does"
+			echo "not carry. It is not derivable from the other files, and another"
+			echo "phone's copy must not be used, so nothing is written."
 		fi
 		if [[ -z $unlock && $can_gen == 0 ]]; then
 			echo "Missing spl-unlock.bin, and nothing here can build it."

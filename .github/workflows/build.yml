@@ -205,7 +205,7 @@ jobs:
             echo "Experimental pre-release (not Latest) from \`$branch\` @ \`$sha\`."
             echo
             echo "Static musl builds of spdhost and the vendored spd_dump, with the"
-            echo "menu, the FDL loaders, the cboot blob and the misc BCB images, for"
+            echo "menu, the FDL loaders, the per-model cboot images and the misc BCBs, for"
             echo "both phone architectures. arm32 is ARMv7-A + NEON (\`arm-linux-musleabihf\`),"
             echo "arm64 is generic \`aarch64\`. Each zip unpacks to its own \`spdhost-arm32/\`"
             echo "or \`spdhost-arm64/\` tree."

@@ -509,10 +509,16 @@ package root, and only last in `ums9230/infinix/` (where the release keeps it
 beside `fdl1-dl.bin`) — and that last place only while the selected model
 really is that ums9230/Infinix pair. Another model's `fdl2-cboot.bin` must
 never be picked up: this file is written to `uboot` right after `splloader`
-is erased, so the wrong phone's image is a brick. `fdl2-cboot.bin` is a
-vendor blob and is not derivable
-from anything else in the tree, so one copy ships for ums9230/Infinix and
-other models have to supply their own. `spl-unlock.bin` is generated from
+is erased, so the wrong phone's image is a brick. That is why the lookup does
+not climb out of an `alternatif/<model>/` folder to the brand-level copy: the
+sub-models are different phones, and the brand image would be the wrong one.
+`fdl2-cboot.bin` is a vendor blob — the model's own `fdl2-dl.bin` with some
+`NOP`s patched into branches — and is not derivable
+from anything else in the tree, so one copy ships per chip and brand
+(`fdl/<chip>/<brand>/`), covering every model the menu offers. The
+`alternatif/` sub-models ship none, because the vendor package has none for
+them; unlock refuses there rather than substitute the brand image.
+`spl-unlock.bin` is generated from
 your own splloader dump. The unlock is several sessions: it reads splloader
 as 256 KiB, erases only after that backup exists, and the last session loads
 `parts` before writing splloader and the active uboot name back. A failed

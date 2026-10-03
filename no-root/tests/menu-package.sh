@@ -67,6 +67,11 @@ for soc in ums9230 sc9863a ums512; do
 		mapfile -t pair < <(shipped_fdl_pair "$(pkg_fdl_root)" "$soc" "$brand" "" || true)
 		[[ ${#pair[@]} == 2 && -f ${pair[0]} && -f ${pair[1]} ]]
 		ck "[3] $soc/$brand has fdl1-dl.bin + fdl2-dl.bin" $?
+		# unlock [8] writes this to uboot, so a brand the menu offers without
+		# one is a brand whose unlock refuses. The reference ships one per
+		# model and the menu offers exactly its chip+brand set.
+		[[ -f $(dirname "${pair[0]}")/fdl2-cboot.bin ]]
+		ck "[8] $soc/$brand has fdl2-cboot.bin for unlock" $?
 	done < <(soc_brands "$soc")
 	soc_profile "$soc"
 	exec_stub_present "$EXEC_ADDR_DEFAULT"
@@ -113,6 +118,31 @@ FDL1=$(pkg_fdl_root)/ums9230/infinix/fdl1-dl.bin
 c=$(find_user_file fdl2-cboot.bin || true)
 [[ -n $c && -f $c ]]
 ck "[8] fdl2-cboot.bin is reachable from the default ums9230/infinix loaders" $?
+
+# An alternatif sub-model is its own phone. c53 is not c31 and neither is the
+# brand-level realme image, so the lookup must NOT climb out of the sub-model's
+# folder and answer with the generic one: that image is what unlock writes to
+# uboot, and the wrong one is a brick. It has to come back empty and refuse.
+mapfile -t alts < <(shipped_alt_models "$(pkg_fdl_root)" ums9230 realme || true)
+mapfile -t altpair < <(shipped_fdl_pair "$(pkg_fdl_root)" ums9230 realme "${alts[0]}" || true)
+altsub=$(dirname "${altpair[0]}")
+[[ -n $altsub && -d $altsub ]]
+ck "[8] an alternatif sub-model resolves a loader directory" $?
+# find_user_file reads these three globals; the harness has already sourced the
+# menu, so set them the way select_shipped_model would and call it directly.
+_soc=$SOC _dev=$DEVICE _f1=$FDL1 _f2=$FDL2
+SOC=ums9230 DEVICE="realme/${alts[0]}" FDL1="${altpair[0]}" FDL2="${altpair[1]}"
+got=$(find_user_file fdl2-cboot.bin || true)
+[[ -z $got || $got == "$altsub"/* ]]
+ck "[8] an alternatif sub-model never inherits the brand-level fdl2-cboot.bin" $?
+# ...but the same lookup from the brand-level loaders still finds it, so the
+# rule above cannot have been met by refusing the lookup outright.
+mapfile -t bpair < <(shipped_fdl_pair "$(pkg_fdl_root)" ums9230 realme || true)
+SOC=ums9230 DEVICE=realme FDL1="${bpair[0]}" FDL2="${bpair[1]}"
+got=$(find_user_file fdl2-cboot.bin || true)
+[[ $got == "$(dirname "${bpair[0]}")/fdl2-cboot.bin" ]]
+ck "[8] the brand-level loaders still find their own fdl2-cboot.bin" $?
+SOC=$_soc DEVICE=$_dev FDL1=$_f1 FDL2=$_f2
 
 # The startup wizard's [1] answer, and the vendor set it comes from.
 echo
