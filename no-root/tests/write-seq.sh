@@ -67,6 +67,75 @@ awk '/^SEQ 0b /{print; exit}' sh_rep.seq > b_rep
 check "repartition packet matches spd_dump (rc $sdrc/$shrc)" \
 	bash -c '[ -s a_rep ] && diff -q a_rep b_rep >/dev/null && [ '"$shrc"' = 0 ]'
 
+# spd_dump's scan_xml_partitions() rewrites its in-memory table from the XML, so
+# the command after a repartition in the same session -- a write to the
+# partition just enlarged, which is the whole reason to repartition -- uses the
+# NEW layout. Keeping the pre-repartition table refused a file the device would
+# now take, and refused a partition the XML had just added by name.
+python3 - << 'PY'
+open('grow.xml','w').write(
+'''<Partitions>
+    <Partition id="metadata" size="8"/>
+    <Partition id="userdata" size="0xffffffff"/>
+    <Partition id="newpart" size="2048"/>
+</Partitions>
+''')
+PY
+printf 'N' > newpart.img
+# metadata is 1 MiB in pt; the XML grows it to 8 MiB, so a 2 MiB file only fits
+# under the new table. The mock refuses the START (its table still says 1 MiB),
+# but the frame has to be sent -- with the stale table it never was.
+head -c 2097152 /dev/zero | tr '\0' 'G' > grow.img
+sh grow parts pt.txt repartition grow.xml write-part metadata grow.img; rc=$?
+check "a write after a repartition uses the new size, not the old one (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'write metadata: 2097152 bytes' sh_grow.log &&
+		! grep -q 'nothing sent' sh_grow.log"
+sh add parts pt.txt repartition grow.xml write-part newpart newpart.img; rc=$?
+check "a partition added by the repartition resolves in the same session (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'write newpart: ' sh_add.log &&
+		! grep -q 'not in the live partition table' sh_add.log"
+
+# spd_dump hands scan_xml_partitions 0xffff as a BYTE budget and then overruns
+# its own 128-entry ptable past 128 entries. The real ceiling is the 16-bit BSL
+# frame length: the payload is n * 0x4c, so 862 entries is the last that fits.
+python3 - << 'PY'
+for n in (129, 863):
+    open('n%d.xml' % n, 'w').write('<Partitions>\n' +
+        ''.join('    <Partition id="p%03d" size="16"/>\n' % i for i in range(n)) +
+        '</Partitions>\n')
+PY
+sh n129 repartition n129.xml; rc=$?
+check "129 entries: past spd_dump's 128-entry table, and still sent (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -qE '^SEQ 0b len=9804 ' sh_n129.seq"
+sh n863 repartition n863.xml; rc=$?
+check "863 entries: refused before sending anything, at the frame limit (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_n863.seq &&
+		grep -q 'more than 862' sh_n863.log"
+
+# The XML repartition reads is the XML spd_dump's partition_list writes, and now
+# the XML partition-list writes too: dumping the table gives a starting point
+# that is accepted back. The two writers must agree byte for byte, so this
+# compares ours against the vendored tool on the same device table.
+sh xml parts pt.txt partition-list ours.xml; shrc=$?
+sd xml2 skip_confirm 1 partition_list theirs.xml reset; sdrc=$?
+check "partition-list is byte-identical to spd_dump partition_list (rc $shrc/$sdrc)" \
+	bash -c '[ '"$shrc"' = 0 ] && [ '"$sdrc"' = 0 ] && cmp -s ours.xml theirs.xml'
+# And what we wrote must be accepted back by our own parser -- the round trip.
+sh round repartition ours.xml; rc=$?
+check "the dumped XML is accepted back by repartition (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'SEQ 0b len=' sh_round.seq"
+# A table whose unit is not KiB, and one holding a zero-size row. fetch_ptab's
+# divisor loop skips zero entries; spd_dump's own loop spins on one, which is
+# why ours is written to survive the table that would hang the reference.
+printf '%s\n' 'tiny 1' 'boot_a 4096' > tinypt
+MOCK_PTABLE=$tmp/tinypt sh tiny partition-list tiny.xml; rc=$?
+check "a table in another unit dumps as whole MiB, not rounded to 0 (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"tiny\" size=\"1\"' tiny.xml"
+printf '%s\n' 'zero 0' 'boot_a 4096' > zeropt
+MOCK_PTABLE=$tmp/zeropt sh zero partition-list zero.xml; rc=$?
+check "a zero-size row dumps as size=\"0\" instead of hanging (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"zero\" size=\"0\"' zero.xml"
+
 rm -f misc.out
 MOCK_MISC_OUT=$tmp/misc_sd_slot.bin sd slot set_active a; sdrc=$?
 MOCK_MISC_OUT=$tmp/misc_sh_slot.bin sh slot parts pt.txt set-active a; shrc=$?
@@ -480,6 +549,69 @@ if bad:
 PY
 bash -n "$root/scripts/menu.sh"
 check "menu.sh syntax" test $? -eq 0
+
+# 'new' at the repartition prompt dumps the phone's own table as the XML to
+# start from. That step must be a READ: the menu used to demand an XML the tool
+# could not produce, and the obvious wrong wiring here would be to send the
+# table it had just read straight back as a repartition.
+check "menu 'new' dumps the table as XML and sends no repartition" python3 - "$root" "$tmp" << 'PY'
+import os, pty, select, subprocess, sys, time, pathlib
+root = pathlib.Path(sys.argv[1])
+work = pathlib.Path(sys.argv[2]) / "rep"
+work.mkdir()
+(work / "backup").mkdir()
+rec = work / "ran"
+runner = work / "run"
+runner.write_text("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> \"%s\"\nexit 0\n" % rec)
+runner.chmod(0o755)
+script = """
+source "%s/scripts/menu.sh"
+FDL1="%s"
+FDL1_ADDR=0x65000800
+FDL2="%s"
+FDL2_ADDR=0x9efffe00
+repartition_menu
+""" % (root, root / "fdl/ums9230/infinix/fdl1-dl.bin", root / "fdl/ums9230/infinix/fdl2-dl.bin")
+env = os.environ.copy()
+env.update(SPDHOST_MENU_LIB="1", SPDHOST_MENU_RUNNER=str(runner),
+           SPDHOST_DUMP_DIR=str(work / "backup"))
+master, slave = pty.openpty()
+p = subprocess.Popen(["bash", "-c", script], stdin=slave, stdout=slave,
+                     stderr=slave, cwd=work, env=env)
+os.close(slave)
+os.write(master, b"new\n")
+out = b""
+deadline = time.time() + 20
+while time.time() < deadline and p.poll() is None:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if r:
+        try:
+            out += os.read(master, 4096)
+        except OSError:
+            break
+        # Any later prompt (ready's pause) just gets an empty line.
+        try:
+            os.write(master, b"\n")
+        except OSError:
+            break
+if p.poll() is None:
+    p.kill()
+    raise SystemExit("repartition menu hung")
+rc = p.wait()
+text = out.decode("utf-8", "replace")
+ran = rec.read_text() if rec.exists() else ""
+bad = []
+if rc != 0:
+    bad.append("rc %s" % rc)
+if "partition-list" not in ran or ".xml" not in ran:
+    bad.append("no partition-list dump: %r" % ran)
+if "repartition" in ran:
+    bad.append("sent a repartition: %r" % ran)
+if "Nothing was sent to the phone" not in text:
+    bad.append("did not say it only read: %r" % text)
+if bad:
+    raise SystemExit("; ".join(bad))
+PY
 
 # Ctrl-C stops the run whatever --keep-going says. An interrupted read leaves
 # the loader waiting for the rest of a transfer that was never ended, so the

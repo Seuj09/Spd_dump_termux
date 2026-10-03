@@ -87,6 +87,10 @@ static void usage(void)
 		"                               next to spdhost. ADDR 0 disables.\n"
 		"  fdl FILE ADDR                send one loader and execute it\n"
 		"  parts [FILE]                 list partitions (FILE or '-' optional)\n"
+		"  partition-list [FILE]        the same table as the XML repartition\n"
+		"                               reads back, size in MiB, last row\n"
+		"                               0xffffffff ('take the rest'). Dump it,\n"
+		"                               edit it, feed it to repartition.\n"
 		"  read-part NAME OFF SIZE OUT  SIZE may be - or full (or 0xffffffff) for\n"
 		"                               the whole partition, like spd_dump read_part\n"
 		"  check-part NAME              print the byte size from the live table\n"
@@ -405,6 +409,7 @@ static int is_command(const char *s)
 	return strcmp(s, "ping") == 0 || strcmp(s, "fdl") == 0 ||
 		strcmp(s, "exec_addr") == 0 ||
 		strcmp(s, "parts") == 0 || strcmp(s, "read-part") == 0 ||
+		strcmp(s, "partition-list") == 0 || strcmp(s, "partition_list") == 0 ||
 		strcmp(s, "check-part") == 0 ||
 		strcmp(s, "write-part") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "verity") == 0 || strcmp(s, "frp-reset") == 0 ||
@@ -1298,6 +1303,16 @@ int main(int argc, char **argv)
 			if (spd_repartition_xml(io, argv[i + 1]))
 				return 1;
 			i += 2;
+		} else if (strcmp(cmd, "partition-list") == 0 || strcmp(cmd, "partition_list") == 0) {
+			const char *out = NULL;
+			need_fdl2(io, "partition-list");
+			if (i + 1 < argc && !is_command(argv[i + 1])) {
+				out = argv[i + 1];
+				i++;
+			}
+			if (spd_part_xml(io, out))
+				return 1;
+			i++;
 		} else if (strcmp(cmd, "set-active") == 0) {
 			need(argc, i, 1, "set-active");
 			need_fdl2(io, "set-active");

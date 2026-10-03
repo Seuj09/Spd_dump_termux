@@ -1496,9 +1496,14 @@ int spd_repartition_xml(struct spd *io, const char *path)
 {
 	FILE *fi;
 	char *src, *p, *end;
-	uint8_t *buf, *w;
+	uint8_t *buf, *w, *sent;
 	off_t sz;
-	int n = 0, cap = 128;
+	int n = 0, cap, i;
+	/* The payload is n * 0x4c and the BSL frame length is 16 bits, so the
+	 * protocol itself stops at 862 entries. spd_dump passes 0xffff as a byte
+	 * budget and then overruns its own 128-entry ptable for anything past
+	 * 128; refusing cleanly at the real limit is better than either. */
+	cap = 0xffff / 0x4c;
 
 	fi = fopen(path, "rb");
 	if (!fi) {
@@ -1580,7 +1585,7 @@ int spd_repartition_xml(struct spd *io, const char *path)
 			return -1;
 		}
 		if (n >= cap) {
-			fprintf(stderr, "repartition: more than %d partitions\n", cap);
+			fprintf(stderr, "repartition: more than %d partitions (frame limit)\n", cap);
 			free(buf);
 			free(src);
 			return -1;
@@ -1600,20 +1605,46 @@ int spd_repartition_xml(struct spd *io, const char *path)
 		free(buf);
 		return -1;
 	}
-	spd_encode(io, BSL_CMD_REPARTITION, buf, (size_t)n * 0x4c);
-	free(buf);
+	sent = buf;
+	spd_encode(io, BSL_CMD_REPARTITION, sent, (size_t)n * 0x4c);
 	if (spd_check_ok(io)) {
 		fprintf(stderr, "repartition: device refused the table; partition layout unchanged by this ack\n");
+		free(buf);
 		return -1;
 	}
-	fprintf(stderr, "repartition: sent %d entries. Run parts again before another write; the cached table is stale.\n", n);
+	/* spd_dump scan_xml_partitions() rewrites io->ptable from the XML, so a
+	 * command after the repartition in the same session -- a `write-part
+	 * <name> FILE` for the partition just enlarged, which is the reason to
+	 * repartition at all -- resolves against the NEW layout. Without this the
+	 * next write answered "not in the live partition table" for an added
+	 * partition, and refused a file the enlarged partition now holds.
+	 * The XML's size is MiB and ptab holds bytes, as spd_dump's size << 20. */
+	free(io->ptab);
+	io->ptab = calloc((size_t)n, sizeof(*io->ptab));
+	if (!io->ptab)
+		die("out of memory");
+	io->nparts = n;
+	for (i = 0; i < n; i++) {
+		const uint8_t *rec = sent + (size_t)i * 0x4c;
+		unsigned k;
+		for (k = 0; k < 36 && rec[k * 2]; k++)
+			io->ptab[i].name[k] = (char)rec[k * 2];
+		io->ptab[i].name[k] = 0;
+		io->ptab[i].size = (uint64_t)rd32le(rec + 0x48) << 20;
+	}
+	free(buf);
+	fprintf(stderr, "repartition: sent %d entries; this session now resolves names and sizes against the new layout. `parts` re-reads the table from the device, which need not match it until the phone restarts.\n", n);
 	return 0;
 }
 
-int spd_list_parts(struct spd *io, const char *out_path)
+/* Ask the device for its partition table and rebuild io->ptab from it.
+ * The raw payload and its entry count go back through the out-parameters.
+ * 0 = ok, -1 = refused or
+ * malformed. The one place the fetch lives: `parts` prints it as text and
+ * `partition-list` writes it as the XML `repartition` reads back. */
+static int fetch_ptab(struct spd *io, const uint8_t **raw, unsigned *count)
 {
-	FILE *fo = NULL;
-	unsigned t, plen = 0, i, count;
+	unsigned t, plen = 0, i;
 	const uint8_t *p;
 
 	spd_encode(io, BSL_CMD_READ_PARTITION, NULL, 0);
@@ -1636,31 +1667,24 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		fprintf(stderr, "partition table length %u is not a multiple of 0x4c\n", plen);
 		return -1;
 	}
-	if (out_path && strcmp(out_path, "-") != 0) {
-		fo = fopen(out_path, "w");
-		if (!fo) {
-			fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
-			return -1;
-		}
-	}
-	count = plen / 0x4c;
 	/* spd_dump partition_list() (common.c ~1109-1124): divisor starts at 10
 	 * and drops while any entry >> divisor is 0; bytes = units << (20 -
 	 * divisor). spd_dump would loop forever on a 0-size entry; skip those. */
 	{
 		int divisor = 10;
+		unsigned n = plen / 0x4c;
 		free(io->ptab);
-		io->ptab = calloc(count ? count : 1, sizeof(*io->ptab));
+		io->ptab = calloc(n ? n : 1, sizeof(*io->ptab));
 		if (!io->ptab)
 			die("out of memory");
-		io->nparts = (int)count;
-		for (i = 0; i < count; i++) {
+		io->nparts = (int)n;
+		for (i = 0; i < n; i++) {
 			uint32_t u = rd32le(p + i * 0x4c + 0x48);
 			while (u && divisor > 0 && !(u >> divisor))
 				divisor--;
 		}
 		io->ptab_shift = 20 - divisor;
-		for (i = 0; i < count; i++) {
+		for (i = 0; i < n; i++) {
 			const uint8_t *rec = p + i * 0x4c;
 			unsigned k;
 			for (k = 0; k < 36 && rec[k * 2]; k++)
@@ -1669,7 +1693,80 @@ int spd_list_parts(struct spd *io, const char *out_path)
 			io->ptab[i].size = (uint64_t)rd32le(rec + 0x48) << io->ptab_shift;
 		}
 		fprintf(stderr, "parts: %u entries, units << %d = bytes (spd_dump divisor %d)\n",
-			count, io->ptab_shift, divisor);
+			n, io->ptab_shift, divisor);
+		*count = n;
+	}
+	*raw = p;
+	return 0;
+}
+
+/* The table as the XML `repartition` accepts, byte-for-byte the format
+ * spd_dump's partition_list writes for the same table: one <Partitions> list,
+ * size in MiB, and the last row 0xffffffff. That last row is why a dumped
+ * table can be fed straight back -- the device reads ~0 as "take the rest". */
+int spd_part_xml(struct spd *io, const char *out_path)
+{
+	const uint8_t *p;
+	unsigned count = 0, i;
+	FILE *fo;
+
+	if (fetch_ptab(io, &p, &count))
+		return -1;
+	if (count < 1) {
+		fprintf(stderr, "partition-list: the device reported an empty table\n");
+		return -1;
+	}
+	/* The size column is whole MiB (spd_dump repartition does size << 20) and
+	 * every nonzero entry survives the round trip exactly: fetch_ptab picks
+	 * the shift so the smallest entry is >= 2^shift units, so bytes are never
+	 * under 1 MiB and never round to 0. A row the device reports as 0 is
+	 * written as 0, which is what it read -- the reference writes the same. */
+	fo = (!out_path || !strcmp(out_path, "-")) ? stdout : fopen(out_path, "w");
+	if (!fo) {
+		fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
+		return -1;
+	}
+	fprintf(fo, "<Partitions>\n");
+	for (i = 0; i < count; i++) {
+		fprintf(fo, "    <Partition id=\"%s\" size=\"", io->ptab[i].name);
+		if (i + 1 == count)
+			fprintf(fo, "0x%x\"/>\n", ~0u);
+		else
+			fprintf(fo, "%llu\"/>\n", (unsigned long long)(io->ptab[i].size >> 20));
+	}
+	/* No trailing newline: spd_dump writes the closing tag bare, and its
+	 * repartition reads either. Byte-identical is easier to assert. */
+	fprintf(fo, "</Partitions>");
+	if (fo != stdout) {
+		/* Same as the parts table file: a short write must not leave a file
+		 * the next repartition reads as the real table. */
+		if (fclose(fo) != 0) {
+			fprintf(stderr, "write %s: %s\n", out_path, strerror(errno));
+			remove(out_path);
+			return -1;
+		}
+	} else if (fflush(fo) != 0) {
+		fprintf(stderr, "partition-list: write failed: %s\n", strerror(errno));
+		return -1;
+	}
+	fprintf(stderr, "partition-list: %u entries written as the repartition XML format\n", count);
+	return 0;
+}
+
+int spd_list_parts(struct spd *io, const char *out_path)
+{
+	FILE *fo = NULL;
+	const uint8_t *p;
+	unsigned i, count = 0;
+
+	if (fetch_ptab(io, &p, &count))
+		return -1;
+	if (out_path && strcmp(out_path, "-") != 0) {
+		fo = fopen(out_path, "w");
+		if (!fo) {
+			fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
+			return -1;
+		}
 	}
 	/* The index printed here is the index spd_lookup_part() accepts, which is
 	 * spd_dump's scheme: the first table entry is 1 -> ptab[0] (and 0, which

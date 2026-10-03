@@ -190,6 +190,11 @@ Partition table and reads:
   convert with `bytes = units << (20 - divisor)`, where `divisor` starts at
   10 and drops while any non-zero entry is smaller than `1 << divisor`. The
   menu does this and writes `backup/partition_bytes.txt`.
+- `partition-list [FILE]` — the same table as the XML `repartition` reads,
+  byte for byte what spd_dump's `partition_list` writes for it: one
+  `<Partitions>` list, size in whole MiB, last row `0xffffffff` ("take the
+  rest"). This is how you get an XML to edit: dump the phone's own table and
+  change the rows you need. Dumping a table is not a write — no `yes`.
 - `check-part NAME` — print the byte size from the live table (0 when the
   name is absent). Needs `parts`.
 - `read-part NAME OFF SIZE OUT` — `SIZE` may be `-` or `full` for the whole
@@ -225,9 +230,15 @@ Writes:
   with `0xED26FF3A`) is sent as that container and each chunk may wait up to
   100 seconds. Junk names (`*.txt`, `SHA256SUMS`, `misc-slotinfo`,
   `misc-before-*`, `*_bak`) are skipped.
-- `repartition FILE.xml` — `<Partition id="name" size="N"/>` rows, `N` in
-  MiB or `0xffffffff` for the last row. Asks for `yes`. Run `parts` again
-  afterwards; the cached table is stale.
+- `repartition FILE.xml` — replace the phone's partition map with
+  `<Partition id="name" size="N"/>` rows, `N` in MiB or `0xffffffff` for the
+  last row ("take the rest"). Asks for `yes`; the menu never passes `--yes`
+  to it. Get the starting XML with `partition-list` above rather than writing
+  one by hand. The rest of the session resolves names and sizes against the
+  new table, as spd_dump does, so `repartition grow.xml write-part boot
+  boot.img` in one session writes against the enlarged boot. A later `parts`
+  re-reads the table from the device, which need not match until the phone
+  restarts. Up to 862 rows — the 16-bit frame length.
 
 Slots and misc:
 
@@ -381,7 +392,7 @@ is labeled dangerous. Use only on a sacrificial device.
 [5] Smoke test (safe checks, no writes)
 [6] Flash images from the flash folder (Download/, or input/ in the package)
 [7] Restore a backup folder
-[8] Repartition from XML
+[8] Repartition from XML ('new' dumps the phone's own table first)
 [9] Copy dumped images into the flash folder
 [10] Extra (slot, hex mode, DANGEROUS unlock / verity / FRP)
 [0] Quit

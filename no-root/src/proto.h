@@ -76,6 +76,8 @@ int spd_write_nv(struct spd *io, const char *name, const char *path);
 /* 0 when PATH frames as an NV image. -1 when it is unreadable or broken.
  * Sends nothing. A restore skips a broken file; a single write-part still fails. */
 int spd_nv_image_ok(const char *path);
+/* Write the live table as the XML repartition FILE.xml accepts. */
+int spd_part_xml(struct spd *io, const char *out_path);
 /* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
 int spd_repartition_xml(struct spd *io, const char *path);
 int spd_erase_part(struct spd *io, const char *name);

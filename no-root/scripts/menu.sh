@@ -2639,12 +2639,31 @@ repartition_xml_preview() {
 }
 
 repartition_menu() {
-	local xml
+	local xml out
 	need_loaders || return
-	read -r -p "Partition XML path: " xml
+	echo "Repartition replaces the phone's partition map from an XML:"
+	echo '    <Partitions><Partition id="boot_a" size="64"/>...</Partitions>'
+	echo "Size is MiB, and the last row is normally 0xffffffff (\"take the rest\")."
+	echo "If you do not have one, spdhost can write the phone's current table as a"
+	echo "starting point; edit that copy rather than writing one by hand."
+	read -r -p "Partition XML path, or 'new' to dump the current table first: " xml
 	if [[ -z ${xml:-} ]]; then
 		echo "Cancelled."
 		return 1
+	fi
+	if [[ $xml == new ]]; then
+		# The XML repartition reads is the XML partition-list writes, so the
+		# phone can always supply its own starting point. Timestamped, so a
+		# copy the user has edited is never overwritten by the next dump.
+		out=$DUMP_DIR/partitions-$(date +%Y%m%d-%H%M%S).xml
+		echo "Reading the table off the phone and writing $out."
+		ready || return 1
+		run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+			partition-list "$out" "$BOOT_AFTER" || return 1
+		echo
+		echo "Wrote $out. Edit a copy of it, then run this option again and give"
+		echo "that path. Nothing was sent to the phone: this only read the table."
+		return 0
 	fi
 	repartition_xml_preview "$xml" || return 1
 	if ! confirm_action "type yes to repartition from this XML: "; then
