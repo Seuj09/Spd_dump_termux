@@ -226,7 +226,10 @@ void find_endpoints(libusb_device_handle *dev_handle, int result[2]) {
 }
 #endif
 
-#define RECV_BUF_LEN (0x8000)
+/* 16384, not 32768. usbfs scatter-gather starts above USB_SG_SIZE. A 32 KiB
+ * bulk IN on a 4.14 host does not complete on the short packet a BootROM
+ * sends (LIBUSB_ERROR_TIMEOUT). Kernel 3.10 never submits that URB. */
+#define RECV_BUF_LEN (0x4000)
 
 char fn_partlist[40] = { 0 };
 char savepath[ARGV_LEN] = { 0 };

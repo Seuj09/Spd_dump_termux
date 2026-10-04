@@ -29,7 +29,7 @@
 volatile sig_atomic_t spd_interrupted = 0;
 
 static const uint8_t *feed;
-static int feed_len, feed_pos;
+static int feed_len, feed_pos, bulk_calls;
 
 int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 {
@@ -37,6 +37,7 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 
 	(void)u;
 	(void)timeout_ms;
+	bulk_calls++;
 	if (n <= 0)
 		return 0; /* the real one returns 0 on timeout */
 	if (n > cap)
@@ -109,6 +110,44 @@ static void prefixed(const char *name, const uint8_t *prefix, int plen)
 	spd_free(io);
 }
 
+/* A frame bigger than the bulk-IN cap must survive being read in pieces.
+ * The cap stays at 16384 so a 4.14 host never sees a 32 KiB URB. */
+static void split_read(void)
+{
+	struct spd *io = spd_new(0, 0x1000);
+	enum { PAY = 20000 };
+	uint8_t *payload = calloc(1, PAY);
+	uint8_t *stream;
+	unsigned plen = 0;
+	int n;
+
+	case_name = "split-read";
+	if (!payload) {
+		ok(0, "out of memory");
+		return;
+	}
+	spd_encode(io, BSL_REP_ACK_V, payload, PAY);
+	free(payload);
+	stream = malloc((size_t)io->enc_len);
+	if (!stream) {
+		ok(0, "out of memory");
+		spd_free(io);
+		return;
+	}
+	memcpy(stream, io->enc, (size_t)io->enc_len);
+	feed = stream;
+	feed_len = io->enc_len;
+	feed_pos = 0;
+	bulk_calls = 0;
+	n = spd_recv(io, 1000);
+	ok(bulk_calls >= 2, "read was not split; the 16384 cap is gone");
+	ok(n > 6 && spd_type(io) == BSL_REP_ACK_V, "split frame was not read");
+	spd_payload(io, &plen);
+	ok(plen == PAY, "split frame payload length");
+	free(stream);
+	spd_free(io);
+}
+
 /* Two frames in one buffer: both must come back, in order. */
 static void two_frames(void)
 {
@@ -155,6 +194,8 @@ int main(int argc, char **argv)
 		prefixed("junk-esc-junk", p, (int)sizeof p);
 	} else if (!strcmp(which, "two-frames")) {
 		two_frames();
+	} else if (!strcmp(which, "split-read")) {
+		split_read();
 	} else {
 		fprintf(stderr, "unknown case: %s\n", which);
 		return 2;

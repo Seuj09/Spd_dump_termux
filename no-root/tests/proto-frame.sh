@@ -19,7 +19,7 @@ gcc -O2 -Wall -Wextra -std=c11 -D_FILE_OFFSET_BITS=64 -I"$root/src" -I"$root/tes
 
 # clean and two-frames are the control: the frame itself must still be read,
 # so a fix that simply swallows everything cannot pass.
-for c in clean junk-then-esc esc-then-frame esc-esc-then-frame junk-esc-junk two-frames; do
+for c in clean junk-then-esc esc-then-frame esc-esc-then-frame junk-esc-junk two-frames split-read; do
 	out=$("$tmp/pf" "$c" 2>&1); rc=$?
 	if (( rc == 0 )) && [[ $out == "ok $c" ]]; then
 		ok "framing: $c"

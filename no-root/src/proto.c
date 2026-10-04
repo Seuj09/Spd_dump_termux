@@ -12,7 +12,11 @@
 
 #define HDLC_MARK 0x7e
 #define HDLC_ESC 0x7d
-#define RECV_CAP 0x8000
+/* usbfs starts scatter-gather above USB_SG_SIZE (16384). A 32 KiB bulk IN
+ * is two segments on a 4.14 host and does not complete when the reply is a
+ * short packet, so libusb reports TIMEOUT. Kernel 3.10 has no such cap and
+ * libusb already splits there. Frames larger than this are read in pieces. */
+#define RECV_CAP 0x4000
 #define RAW_CAP (4 + 0x10000 + 2)
 
 #define BSL_CMD_CONNECT 0x00

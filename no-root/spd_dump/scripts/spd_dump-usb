@@ -14,6 +14,10 @@
 #                             experiments only). Default keeps -r so Android
 #                             shows Allow after every replug.
 #   SPD_USB_LIST_TIMEOUT=N    timeout seconds for each termux-usb -l (default 8)
+#   SPD_USB_NO_SYSFS=1        do not read idVendor under /sys/bus/usb/devices.
+#                             Default tries. A host that blocks sysfs keeps
+#                             the path-only choice (one new path, or the
+#                             single already-attached path).
 #   SPD_USB_ANY=1             (read by spd_dump) skip the 1782:4d00 ID check
 #   SPD_USB_BUS               set by this script to the chosen /dev/bus/usb path
 #
@@ -28,6 +32,20 @@
 # accepts both and hands it to spd_dump as --usb-fd <fd> (next-arg form —
 # spd_dump supports next-arg + env; not last-argv).
 set -euo pipefail
+
+_here=$(cd "$(dirname "$0")" && pwd)
+_usb_pick=
+if [[ -f $_here/usb-pick.sh ]]; then
+	_usb_pick=$_here/usb-pick.sh
+elif [[ -f $_here/../../scripts/usb-pick.sh ]]; then
+	_usb_pick=$_here/../../scripts/usb-pick.sh
+fi
+if [[ -z $_usb_pick ]]; then
+	echo "usb-pick.sh not found next to spd_dump-usb" >&2
+	exit 1
+fi
+# shellcheck source=../../scripts/usb-pick.sh
+source "$_usb_pick"
 
 run= rcfile= wl=0
 cleanup() {
@@ -193,17 +211,21 @@ list_timeouts=0
 poll_devs() {
 	local out rc=0
 	out=$(bounded "${SPD_USB_LIST_TIMEOUT:-8}" termux-usb -l 2>/dev/null) || rc=$?
-	if (( rc == 124 )); then
+	# 124: the list hung. Any other non-zero with no text is the API missing.
+	# A list that did print devices is still parsed. Three in a row abort.
+	if (( rc == 124 )) || { (( rc != 0 )) && [[ -z $out ]]; }; then
 		list_timeouts=$((list_timeouts + 1))
+		USB_PATHS=()
+		USB_VIDS=()
 		devs=()
 		return 0
 	fi
 	list_timeouts=0
+	usb_parse_list "$out"
 	devs=()
-	local line
-	while IFS= read -r line; do
-		[[ -n $line ]] && devs+=("$line")
-	done < <(printf '%s\n' "$out" | tr -d '[]",' | awk '/\/dev\/bus\/usb\// { print $1 }')
+	if (( ${#USB_PATHS[@]} )); then
+		devs=("${USB_PATHS[@]}")
+	fi
 	return 0
 }
 
@@ -224,50 +246,51 @@ if [[ -z $dev ]]; then
 	echo "Hold its download-mode keys (volume down) until this line changes." >&2
 	echo "When the permission dialog appears, tap OK immediately." >&2
 
+	# Snapshot only. Deciding on this poll would open a charger that is
+	# already plugged in and miss the phone that shows up on the next one.
 	poll_devs
+	USB_BASE=("${USB_PATHS[@]+"${USB_PATHS[@]}"}")
 	base=("${devs[@]+"${devs[@]}"}")
 	if (( ${#base[@]} > 0 )); then
-		printf 'already attached (ignored unless it is the only one): %s\n' "${base[*]}" >&2
+		printf 'already attached (a single device with no vendor id, or the only vendor 1782, can be used): %s\n' "${base[*]}" >&2
 	fi
 
 	start=$SECONDS
+	USB_START=$start
+	USB_GRACE=$attached_grace
 	deadline=$((SECONDS + wait_s))
 	while (( SECONDS < deadline )); do
+		poll_at=$(usb_now_ms)
 		poll_devs
 		if (( list_timeouts >= 3 )); then
 			echo >&2
 			api_hint
 			exit 1
 		fi
-		new=()
-		for d in ${devs[@]+"${devs[@]}"}; do
-			seen=0
-			for b in ${base[@]+"${base[@]}"}; do [[ $b == "$d" ]] && seen=1; done
-			(( seen )) || new+=("$d")
-		done
-		if (( ${#new[@]} == 1 )); then
-			dev=${new[0]}
+		usb_decide
+		if [[ $USB_ACTION == take ]]; then
+			dev=$USB_CHOSEN
 			echo >&2
-			echo "found $dev" >&2
+			case $USB_TAKE_WHY in
+				unisoc)
+					echo "found $dev (vendor 1782; other USB devices left alone)" >&2
+					;;
+				warm)
+					echo "using already attached $dev" >&2
+					;;
+				*)
+					echo "found $dev" >&2
+					;;
+			esac
 			break
 		fi
-		if (( ${#new[@]} > 1 )); then
-			echo >&2
-			printf 'more than one new USB device; pass the path:\n' >&2
-			printf '  %s\n' "${new[@]}" >&2
+		if [[ $USB_ACTION == fail ]]; then
+			usb_print_fail "spd_dump-usb"
 			exit 1
-		fi
-		# Nothing new. If exactly one device was attached from the start (for
-		# example re-running at the FDL1 stage), use it after grace (default 0).
-		if (( ${#base[@]} == 1 && ${#devs[@]} == 1 && SECONDS - start >= attached_grace )); then
-			dev=${devs[0]}
-			echo >&2
-			echo "using already attached $dev" >&2
-			break
 		fi
 		left=$((deadline - SECONDS))
 		printf '\rstill waiting (%ds) ' "$left" >&2
-		sleep 0.3
+		usb_pace_since "$poll_at" 300
 	done
 	echo >&2
 	if [[ -z $dev ]]; then
@@ -275,9 +298,15 @@ if [[ -z $dev ]]; then
 			echo "several USB devices are attached and none is new:" >&2
 			printf '  %s\n' "${base[@]}" >&2
 			echo "pass the right one: spd_dump-usb /dev/bus/usb/N/M -- <commands>" >&2
+			if (( ${USB_SAW_OTHER:-0} )); then
+				echo "A device that did appear is not vendor 1782 (not the download-mode phone)." >&2
+			fi
 		else
 			echo "no USB device appeared. The BootROM only stays up a few seconds;" >&2
 			echo "run this again and plug in while this wait is counting." >&2
+			if (( ${USB_SAW_OTHER:-0} )); then
+				echo "A device that did appear is not vendor 1782 (not the download-mode phone)." >&2
+			fi
 		fi
 		exit 1
 	fi

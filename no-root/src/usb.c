@@ -560,59 +560,108 @@ int spd_usb_emit_fd(const char *sock_path, const char *argv_fd)
 	return 0;
 }
 
-/* Fill out with a single usable bus path. Prefer prefer[] when several
- * devices are present (remembered path from a prior successful open).
- * Returns device count; out is set only when exactly one path is chosen. */
-static int list_one_device(char *out, size_t cap, const char *prefer)
+/* Whole stdout, capped at 64 KiB. A 256-byte fgets splits one JSON line
+ * and glues or drops paths. Caller frees. NULL if popen or malloc fails. */
+static char *read_cmd(const char *cmd)
 {
 	FILE *p;
-	char line[256];
-	char paths[8][128];
-	int count = 0, i;
-	out[0] = 0;
-	p = popen("termux-usb -l 2>/dev/null", "r");
+	char *buf, *grown;
+	size_t n = 0, bcap = 4096, got;
+
+	p = popen(cmd, "r");
 	if (!p)
-		return -1;
-	while (fgets(line, sizeof(line), p))
-		count = spd_usb_collect_bus_paths(line, paths, 8, count);
-	pclose(p);
-	if (count == 1) {
-		snprintf(out, cap, "%s", paths[0]);
-		return 1;
+		return NULL;
+	buf = malloc(bcap);
+	if (!buf) {
+		pclose(p);
+		return NULL;
 	}
-	if (count > 1 && prefer && prefer[0]) {
-		for (i = 0; i < count && i < 8; i++) {
-			if (strcmp(paths[i], prefer) == 0) {
-				snprintf(out, cap, "%s", prefer);
-				return 1;
-			}
+	while (n + 1 < bcap) {
+		got = fread(buf + n, 1, bcap - n - 1, p);
+		if (!got)
+			break;
+		n += got;
+		if (n + 1 >= bcap && bcap < 65536) {
+			grown = realloc(buf, bcap * 2);
+			if (!grown)
+				break;
+			buf = grown;
+			bcap *= 2;
 		}
+	}
+	buf[n] = 0;
+	pclose(p);
+	return buf;
+}
+
+/* Fill out with one usable bus path. The remembered path wins when it is
+ * still listed. Otherwise one vendor-1782 node wins over mice and hubs.
+ * A lone path with no vendor id is still taken. A list longer than the
+ * stored prefix is not guessed, except for that remembered path.
+ * Returns -1 on a list failure, 1 when out is set, or the device count
+ * when nothing is chosen. */
+static int list_one_device(char *out, size_t cap, const char *prefer)
+{
+	char *buf;
+	struct spd_usb_dev devs[16];
+	int count, stored, t = 8;
+	const char *e;
+	char cmd[192];
+
+	out[0] = 0;
+	e = getenv("SPD_USB_LIST_TIMEOUT");
+	if (e && e[0]) {
+		t = atoi(e);
+		if (t < 1)
+			t = 8;
+		if (t > 60)
+			t = 60;
+	}
+	/* Same bound as the wrapper. Without `timeout`, fall back to a plain
+	 * list so a host that has no coreutils still reacquires. */
+	snprintf(cmd, sizeof(cmd),
+		"if command -v timeout >/dev/null 2>&1; then "
+		"timeout %d termux-usb -l 2>/dev/null; "
+		"else termux-usb -l 2>/dev/null; fi", t);
+	buf = read_cmd(cmd);
+	if (!buf)
+		return -1;
+	count = spd_usb_collect_devs(buf, devs, 16, 0);
+	free(buf);
+	stored = count < 16 ? count : 16;
+	if (count <= 16)
+		spd_usb_fill_sysfs(devs, stored);
+	if (spd_usb_choose_bounded(devs, stored, count, prefer, out, cap)) {
+		if (count > 1)
+			fprintf(stderr, "reacquire: using %s (%d USB devices listed)\n",
+				out, count);
+		return 1;
 	}
 	return count;
 }
 
 static void print_bus_paths(void)
 {
-	FILE *p;
-	char line[256];
-	int n = 0;
-	p = popen("termux-usb -l 2>/dev/null", "r");
-	if (!p)
-		return;
-	while (fgets(line, sizeof(line), p)) {
-		char found[8][SPD_USB_PATH_CAP];
-		int c = spd_usb_collect_bus_paths(line, found, 8, 0);
-		int i;
-		for (i = 0; i < c && i < 8; i++) {
-			fprintf(stderr, "  %s\n", found[i]);
-			n++;
-		}
-		if (c > 8)
-			n += c - 8;
-	}
-	pclose(p);
-	if (!n)
+	char *buf;
+	struct spd_usb_dev devs[16];
+	int count, shown, i;
+
+	buf = read_cmd("termux-usb -l 2>/dev/null");
+	if (!buf) {
 		fprintf(stderr, "  (none)\n");
+		return;
+	}
+	count = spd_usb_collect_devs(buf, devs, 16, 0);
+	free(buf);
+	if (count <= 0) {
+		fprintf(stderr, "  (none)\n");
+		return;
+	}
+	shown = count < 16 ? count : 16;
+	for (i = 0; i < shown; i++)
+		fprintf(stderr, "  %s\n", devs[i].path);
+	if (count > 16)
+		fprintf(stderr, "  ... and %d more\n", count - 16);
 }
 
 /* Does the installed termux-usb understand -E (export TERMUX_USB_FD)?

@@ -710,10 +710,21 @@ later tries stickier without a replug.
 Nothing that talks to Termux:API *blocks* between "the device was found" and
 `termux-usb` being spawned. That gap is the whole window, and every API call
 is a broadcast round trip through the same app that has to raise the
-permission dialog. Detection is a poll (`termux-usb -l`, then 0.3 s), so
-"found" already lands up to a poll interval after the device appeared;
-`usb: listed … @Xms` and `usb: child start fd=N @Zms` in the wrapper output
-are the two timestamps to compare when a session dies right after detection.
+permission dialog. Detection is a poll of `termux-usb -l` about every 0.3 s.
+A list that itself took longer is not followed by another full pause, so a
+slow answer does not stack on top of the interval. "found" still lands up to
+one poll after the device appeared; `usb: listed … @Xms` and
+`usb: child start fd=N @Zms` in the wrapper output are the two timestamps to
+compare when a session dies right after detection.
+
+The first poll is only a snapshot. A phone that appears on the next poll,
+while a charger was already listed, is the device that gets opened. When the
+listing names `vendor_id`, or when `/sys/bus/usb/devices` is readable, vendor
+1782 is the download-mode phone (BootROM and diag both use it) and any other
+vendor is left alone. One new path with no vendor, and a single
+already-attached path with no vendor, stay the old rules, so a Termux:API
+that prints only paths is unchanged. `SPD_USB_NO_SYSFS=1` skips the sysfs
+read. An explicit `/dev/bus/usb/N/M` argument skips the wait entirely.
 
 The wake lock is taken *after* detection, not before the wait — that is the
 known-good build's order, and the wrapper's job while waiting is to be ready
@@ -775,6 +786,7 @@ binary directly; the command words after that are the same.
 | `SPDHOST_BROM_TRACE` | 0 | `1` = breadcrumb timestamps without `--verbose` |
 | `SPD_USB_ATTACHED_GRACE` | 0 | wrapper grace before it gives up on the device |
 | `SPD_USB_SKIP_REQUEST` | 0 | `1` = omit `-r` on a warm, already-authorized run |
+| `SPD_USB_NO_SYSFS` | 0 | `1` = do not read `idVendor` from sysfs when the listing has no vendor |
 
 **Warn:** `SPD_USB_SKIP_REQUEST=1` fails open if the grant was never given
 (permission denied / never started). Keep the default `-r` for a cold first
