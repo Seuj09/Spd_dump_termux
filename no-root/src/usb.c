@@ -17,6 +17,41 @@
 
 #include <libusb-1.0/libusb.h>
 
+/* SPDHOST_USB_CAPS=1: the usbfs capability probe (usb_caps_probe below). The
+ * ioctl and the flag values are the kernel's uapi (linux/usbdevice_fs.h);
+ * each one is defined here when a toolchain's headers lack it, so the arm32
+ * and arm64 musl cross builds compile either way. */
+#include <sys/ioctl.h>
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/usbdevice_fs.h>)
+#include <linux/usbdevice_fs.h>
+#endif
+#endif
+#ifndef USBDEVFS_GET_CAPABILITIES
+#define USBDEVFS_GET_CAPABILITIES _IOR('U', 26, unsigned int)
+#endif
+#ifndef USBDEVFS_CAP_ZERO_PACKET
+#define USBDEVFS_CAP_ZERO_PACKET 0x01
+#endif
+#ifndef USBDEVFS_CAP_BULK_CONTINUATION
+#define USBDEVFS_CAP_BULK_CONTINUATION 0x02
+#endif
+#ifndef USBDEVFS_CAP_NO_PACKET_SIZE_LIM
+#define USBDEVFS_CAP_NO_PACKET_SIZE_LIM 0x04
+#endif
+#ifndef USBDEVFS_CAP_BULK_SCATTER_GATHER
+#define USBDEVFS_CAP_BULK_SCATTER_GATHER 0x08
+#endif
+#ifndef USBDEVFS_CAP_REAP_AFTER_DISCONNECT
+#define USBDEVFS_CAP_REAP_AFTER_DISCONNECT 0x10
+#endif
+#ifndef USBDEVFS_CAP_MMAP
+#define USBDEVFS_CAP_MMAP 0x20
+#endif
+#ifndef USBDEVFS_CAP_DROP_PRIVILEGES
+#define USBDEVFS_CAP_DROP_PRIVILEGES 0x40
+#endif
+
 static void die_usb(const char *what, int err)
 {
 	fprintf(stderr, "%s: %s\n", what, libusb_error_name(err));
@@ -303,6 +338,58 @@ static int init_ctx(struct spd_usb *u, int no_scan)
 	return 0;
 }
 
+/* SPDHOST_USB_CAPS=1: ask usbfs what it supports (USBDEVFS_GET_CAPABILITIES,
+ * the same ioctl libusb's linux backend runs when it opens a device) and say
+ * which bulk path that puts libusb on. libusb splits a bulk transfer into
+ * MAX_BULK_BUFFER_LENGTH (16384) URBs unless the kernel reports
+ * BULK_SCATTER_GATHER or NO_PACKET_SIZE_LIM; split URBs carry
+ * BULK_CONTINUATION only when the kernel has it. When the ioctl fails libusb
+ * assumes BULK_CONTINUATION (linux_usbfs.c:1344). Diagnostic only: it sends
+ * nothing to the device, changes no transfer, and prints only when the
+ * variable is set. FD is the usbfs descriptor termux-usb handed over; the
+ * vid:pid path has none to ask. */
+static void usb_caps_probe(int fd)
+{
+	const char *env = getenv("SPDHOST_USB_CAPS");
+	unsigned int caps = 0;
+	int rc, e;
+
+	if (!env || strcmp(env, "1"))
+		return;
+	if (fd < 0) {
+		fprintf(stderr, "usbfs caps: no --usb-fd descriptor to ask (opened by vid:pid);"
+			" libusb ran its own probe (on failure it assumes BULK_CONTINUATION,"
+			" linux_usbfs.c:1344)\n");
+		return;
+	}
+	rc = ioctl(fd, USBDEVFS_GET_CAPABILITIES, &caps);
+	e = errno;
+	if (rc < 0) {
+		fprintf(stderr, "usbfs caps: USBDEVFS_GET_CAPABILITIES failed: errno %d (%s)\n", e,
+			strerror(e));
+		fprintf(stderr, "usbfs caps: libusb then assumes BULK_CONTINUATION only"
+			" (linux_usbfs.c:1344): bulk is split into 16384-byte URBs, with continuation\n");
+		return;
+	}
+	fprintf(stderr, "usbfs caps: 0x%08x%s%s%s%s%s%s%s\n", caps,
+		(caps & USBDEVFS_CAP_ZERO_PACKET) ? " ZERO_PACKET" : "",
+		(caps & USBDEVFS_CAP_BULK_CONTINUATION) ? " BULK_CONTINUATION" : "",
+		(caps & USBDEVFS_CAP_NO_PACKET_SIZE_LIM) ? " NO_PACKET_SIZE_LIM" : "",
+		(caps & USBDEVFS_CAP_BULK_SCATTER_GATHER) ? " BULK_SCATTER_GATHER" : "",
+		(caps & USBDEVFS_CAP_REAP_AFTER_DISCONNECT) ? " REAP_AFTER_DISCONNECT" : "",
+		(caps & USBDEVFS_CAP_MMAP) ? " MMAP" : "",
+		(caps & USBDEVFS_CAP_DROP_PRIVILEGES) ? " DROP_PRIVILEGES" : "");
+	if (caps & (USBDEVFS_CAP_BULK_SCATTER_GATHER | USBDEVFS_CAP_NO_PACKET_SIZE_LIM))
+		fprintf(stderr, "usbfs caps: libusb bulk path: a single URB per transfer (%s)\n",
+			(caps & USBDEVFS_CAP_BULK_SCATTER_GATHER) ? "scatter-gather" : "no packet size limit");
+	else if (caps & USBDEVFS_CAP_BULK_CONTINUATION)
+		fprintf(stderr, "usbfs caps: libusb bulk path: split into 16384-byte URBs, with"
+			" BULK_CONTINUATION\n");
+	else
+		fprintf(stderr, "usbfs caps: libusb bulk path: split into 16384-byte URBs, WITHOUT"
+			" continuation\n");
+}
+
 int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int timeout_ms)
 {
 	libusb_device_handle *h = NULL;
@@ -346,6 +433,7 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	/* A descriptor the user already chose (termux-usb) may come back as a
 	 * different product id after a loader stage. Scanning still requires
 	 * the requested product id. */
+	usb_caps_probe(fd);
 	if (adopt(u, h, fd < 0))
 		exit(1);
 	g_live_usb = u;

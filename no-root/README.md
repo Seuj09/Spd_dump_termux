@@ -754,6 +754,26 @@ BootROM hello send/recv uses `SPDHOST_BROM_TIMEOUT` only, not
 Each BootROM start prints a line like
 `brom: hello hello_to=250..3000(x6) wall=46000(auto) tries=15`.
 
+`SPDHOST_USB_CAPS=1` asks usbfs what the host kernel supports
+(`USBDEVFS_GET_CAPABILITIES` on the termux-usb descriptor, the same ioctl
+libusb runs when it opens the device) and prints the raw mask, the decoded
+flags (`ZERO_PACKET`, `BULK_CONTINUATION`, `NO_PACKET_SIZE_LIM`,
+`BULK_SCATTER_GATHER`, `REAP_AFTER_DISCONNECT`, `MMAP`, `DROP_PRIVILEGES`)
+and the bulk path that puts libusb on:
+
+- `BULK_SCATTER_GATHER` or `NO_PACKET_SIZE_LIM`: a single URB per transfer;
+- otherwise the transfer is split into 16384-byte (`MAX_BULK_BUFFER_LENGTH`)
+  URBs, with `BULK_CONTINUATION` when the kernel has it and without it when
+  it does not.
+
+If the ioctl fails it prints the errno; libusb then assumes
+`BULK_CONTINUATION` only (linux_usbfs.c:1344). It is read-only and sends
+nothing to the phone; with the variable unset (or anything but `1`) it does
+nothing at all. spdhost caps every bulk IN at 16 KiB, which is a single URB
+in every one of those branches. Why bigger reads failed on the Android 10 Go
+host is not proven yet: run once with `SPDHOST_USB_CAPS=1
+SPDHOST_BROM_TRACE=1` and keep the output to settle it.
+
 The floor of that ramp is `SPDHOST_BROM_TIMEOUT_MIN`, default **250 ms** —
 the value the known-good build (`spdhost-exp-write-a6cb72d`, the one a real
 phone was detected and flashed with) ships, and what this menu's own smoke
@@ -794,6 +814,7 @@ binary directly; the command words after that are the same.
 | `SPDHOST_NO_SET_CONFIG` | 0 | `1` = omit `SET_CONFIGURATION(1)` when the device reads as config 0 |
 | `SPDHOST_NO_SEND_ZLP` | 0 | `1` = omit the zero-length OUT packet after a 512-byte-multiple bulk write |
 | `SPDHOST_BROM_TRACE` | 0 | `1` = breadcrumb timestamps without `--verbose` |
+| `SPDHOST_USB_CAPS` | 0 | `1` = print the usbfs capability mask and the libusb bulk path it implies (read-only) |
 | `SPD_USB_ATTACHED_GRACE` | 0 | wrapper grace before it gives up on the device |
 | `SPD_USB_SKIP_REQUEST` | 0 | `1` = omit `-r` on a warm, already-authorized run |
 | `SPD_USB_NO_SYSFS` | 0 | `1` = do not read `idVendor` from sysfs when the listing has no vendor |
