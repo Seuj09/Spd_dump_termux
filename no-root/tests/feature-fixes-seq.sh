@@ -65,5 +65,56 @@ MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-reset r1persist.img;
 check "R1: frp-reset on a guessed unit backs up the device's 1 MiB persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s r1persist.img) = 1048576 ] && grep -q \"using the device's size for persist\" sh_r1p2.log"
 
+# ---- R2: repartition checks ------------------------------------------------------------------
+# KiB rows: misc 1, prodnv 1, boot 4, super 8, userdata 16 MiB = 30 MiB in all.
+printf '%s\n' 'misc 1024' 'prodnv 1024' 'boot 4096' 'super 8192' 'userdata 16384' > ptr
+xml() { local f=$1; shift; { echo '<Partitions>'; for r in "$@"; do
+	echo "    <Partition id=\"${r% *}\" size=\"${r#* }\"/>"; done; echo '</Partitions>'; } > "$f"; }
+xml same.xml 'misc 1' 'prodnv 1' 'boot 4' 'super 8' 'userdata 0xffffffff'
+xml grow.xml 'misc 1' 'prodnv 1' 'boot 8' 'super 8' 'userdata 0xffffffff'
+xml dup.xml 'misc 1' 'boot 4' 'boot 4' 'super 8' 'userdata 0xffffffff'
+xml bytes.xml 'misc 1' 'prodnv 1' 'boot 4194304' 'super 8' 'userdata 0xffffffff'
+xml full.xml 'misc 1' 'prodnv 1' 'boot 4' 'super 24' 'userdata 0xffffffff'
+xml lastbig.xml 'misc 1' 'prodnv 1' 'boot 4' 'super 8' 'userdata 17'
+export MOCK_PTABLE=$tmp/ptr
+mkdir -p bk
+sh r2same --yes --part-xml=bk repartition same.xml; rc=$?
+check "R2: an XML equal to the live table is sent, diff says every row matches (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(grep -cE '^SEQ 0b ' sh_r2same.seq) = 1 ] && grep -q 'every row before the last matches' sh_r2same.log &&
+		grep -qE '^  3 +boot 4 @2 +boot 4 @2 +same' sh_r2same.log && grep -q 'backup of the current table: bk/partition_' sh_r2same.log"
+sh r2grow --yes --part-xml=bk repartition grow.xml; rc=$?
+check "R2: a grown row shows old/new size and start, and the rows it moves (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -qE '^  3 +boot 4 @2 +boot 8 @2 +SIZE CHANGED' sh_r2grow.log &&
+		grep -qE '^  4 +super 8 @6 +super 8 @10 +MOVED' sh_r2grow.log && grep -q 'WARNING 2 row(s) before the last differ' sh_r2grow.log"
+sh r2dup --yes --part-xml=bk repartition dup.xml; rc=$?
+check "R2: duplicate names are refused, nothing sent (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q \"rows 2 and 3 are both named 'boot'\" sh_r2dup.log && ! grep -qE '^SEQ 0b ' sh_r2dup.seq"
+sh r2bytes --yes --part-xml=bk repartition bytes.xml; rc=$?
+check "R2: a byte count typed as MiB is over the capacity: refused (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'live table adds up to 30 MiB' sh_r2bytes.log && ! grep -qE '^SEQ 0b ' sh_r2bytes.seq"
+sh r2full --yes --part-xml=bk repartition full.xml; rc=$?
+check "R2: rows before a 'rest' last row that use all 30 MiB are refused (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'which would get nothing' sh_r2full.log && ! grep -qE '^SEQ 0b ' sh_r2full.seq"
+sh r2last --yes --part-xml=bk repartition lastbig.xml; rc=$?
+check "R2: an explicit last row that takes the total past capacity is refused (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'needs 31 MiB' sh_r2last.log && ! grep -qE '^SEQ 0b ' sh_r2last.seq"
+sh r2nobk --yes repartition same.xml; rc=$?
+check "R2: no XML backup of the current table this session: refused (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'no backup of the current table was written' sh_r2nobk.log && ! grep -qE '^SEQ 0b ' sh_r2nobk.seq"
+SPDHOST_PART_XML_DIR= sh r2nobk2 --yes repartition same.xml; rc=$?
+check "R2: SPDHOST_PART_XML_DIR= (copy off) also blocks the send (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_r2nobk2.seq"
+sh r2plist --yes parts pt.txt partition-list pl.xml repartition same.xml; rc=$?
+check "R2: a partition-list FILE in the same session counts as the backup (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'backup of the current table: pl.xml' sh_r2plist.log && [ \$(grep -cE '^SEQ 0b ' sh_r2plist.seq) = 1 ]"
+MOCK_PTABLE=$tmp/pt9 sh r2unit --yes --part-xml=bk repartition same.xml; rc=$?
+check "R2: an unverified table unit blocks the repartition (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'unit is unverified' sh_r2unit.log && ! grep -qE '^SEQ 0b ' sh_r2unit.seq"
+# No --yes and no terminal: the confirm refuses -- and the diff was printed first.
+sh r2ask --part-xml=bk repartition grow.xml; rc=$?
+check "R2: the diff is printed before the confirm question (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_r2ask.seq &&
+		awk '/SIZE CHANGED/{d=NR} /refusing repartition from/{q=NR} END{exit !(d && q && d < q)}' sh_r2ask.log"
+
 echo "feature-fixes-seq: $pass passed, $fail failed"
 (( fail == 0 ))

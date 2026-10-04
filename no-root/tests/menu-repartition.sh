@@ -101,5 +101,28 @@ check "an over-1-MiB XML is refused" bash -c '[[ $1 == *"rc=1"* ]]' _ "$out"
 check "…with its size" bash -c '[[ $1 == *"over 1 MiB"* ]]' _ "$out"
 
 echo
+echo "== R2: a name used twice is refused before any session =="
+printf '%s\n' '<Partitions>' '<Partition id="boot" size="4"/>' '<Partition id="boot" size="4"/>' \
+	'<Partition id="userdata" size="0xffffffff"/>' '</Partitions>' >"$tmp/dup.xml"
+out=$(preview "$tmp/dup.xml")
+check "R2: duplicate names are refused" bash -c '[[ $1 == *"rc=1"* && $1 == *"twice: id=\"boot\""* ]]' _ "$out"
+
+echo
+echo "== R2: no writable backup folder stops the menu before the session =="
+printf '%s\n' '<Partitions>' '<Partition id="boot" size="4"/>' '<Partition id="userdata" size="0xffffffff"/>' '</Partitions>' >"$tmp/r2.xml"
+out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_PART_XML_DIR= bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+	need_loaders() { :; }; confirm_action() { echo ASKED; return 0; }; ready() { :; }
+	run_session() { echo SESSION; }
+	repartition_menu <<<"$2"; echo "rc=$?"' _ "$root" "$tmp/r2.xml")
+check "R2: empty SPDHOST_PART_XML_DIR refuses, no confirm, no session" \
+	bash -c '[[ $1 == *"rc=1"* && $1 == *"pre-repartition backup"* && $1 != *SESSION* && $1 != *ASKED* ]]' _ "$out"
+out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_PART_XML_DIR=$tmp/bkd bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+	need_loaders() { :; }; confirm_action() { return 0; }; ready() { :; }
+	run_session() { echo "SESSION $*"; }
+	repartition_menu <<<"$2"; echo "rc=$?"' _ "$root" "$tmp/r2.xml")
+check "R2: with a backup folder the session runs repartition (no --yes)" \
+	bash -c '[[ $1 == *"SESSION "*"repartition $2"* && $1 != *"--yes"* ]]' _ "$out" "$tmp/r2.xml"
+
+echo
 echo "menu-repartition: $pass passed, $fail failed"
 (( fail == 0 ))

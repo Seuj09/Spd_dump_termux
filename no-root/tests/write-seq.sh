@@ -20,6 +20,10 @@ cd "$tmp"
 printf '%s\n' 'misc 1024' 'uboot_a 1024' 'uboot_b 1024' 'boot_a 4096' 'boot_b 4096' \
 	'l_fixnv1 1024' 'l_fixnv2 1024' 'metadata 1024' 'super 8192' > pt
 export MOCK_PTABLE=$tmp/pt MOCK_SLOT=a
+# R2: repartition compares the XML with the live table and refuses a total over
+# its capacity, so the repartition cases run on pt plus a 32 GiB userdata, and
+# pass --part-xml=bk so this session leaves the backup a send needs.
+cp pt ptbig; echo 'userdata 33554432' >> ptbig; mkdir -p bk
 LOAD=(fdl fdl1-dl.bin 0x65000800 fdl fdl2-dl.bin 0x9efffe00)
 sd() { local L=$1; shift; MOCK_LOG=sd_$L.seq TERMUX_USB_FD=7 timeout 20 ./sd exec_addr 0x65015f08 "${LOAD[@]}" exec "$@" 7</dev/null </dev/null >sd_$L.log 2>&1; }
 sh() { local L=$1 o=(); shift; while [[ ${1:-} == --* ]]; do o+=("$1"); shift; done
@@ -60,8 +64,8 @@ awk 'f&&/SEQ 02/{print; exit} /6c005f006600690078006e0076003100/{f=1}' sd_wnv.se
 awk 'f&&/SEQ 02/{print; exit} /6c005f006600690078006e0076003100/{f=1}' sh_wnv.seq > b_mid
 check "fixnv1 MIDST matches spd_dump" bash -c '[ -s a_mid ] && diff -q a_mid b_mid >/dev/null'
 
-sd rep skip_confirm 1 repartition parts.xml; sdrc=$?
-sh rep repartition parts.xml; shrc=$?
+MOCK_PTABLE=$tmp/ptbig sd rep skip_confirm 1 repartition parts.xml; sdrc=$?
+MOCK_PTABLE=$tmp/ptbig sh rep --part-xml=bk repartition parts.xml; shrc=$?
 awk '/^SEQ 0b /{print; exit}' sd_rep.seq > a_rep
 awk '/^SEQ 0b /{print; exit}' sh_rep.seq > b_rep
 check "repartition packet matches spd_dump (rc $sdrc/$shrc)" \
@@ -76,8 +80,8 @@ python3 - << 'PY'
 open('grow.xml','w').write(
 '''<Partitions>
     <Partition id="metadata" size="2048"/>
-    <Partition id="userdata" size="0xffffffff"/>
     <Partition id="newpart" size="2048"/>
+    <Partition id="userdata" size="0xffffffff"/>
 </Partitions>
 ''')
 PY
@@ -92,11 +96,11 @@ sh old parts pt.txt write-part metadata grow.img; rc=$?
 check "the same file is refused before the repartition, so the growth is what fits it (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_old.log &&
 		! grep -q 'write metadata: 2097152 bytes from' sh_old.log"
-sh grow parts pt.txt repartition grow.xml write-part metadata grow.img; rc=$?
+MOCK_PTABLE=$tmp/ptbig sh grow --part-xml=bk parts pt.txt repartition grow.xml write-part metadata grow.img; rc=$?
 check "a write after a repartition uses the new size, not the old one (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'write metadata: 2097152 bytes' sh_grow.log &&
 		grep -qE '^SEQ 01 len=76 ' sh_grow.seq"
-sh add parts pt.txt repartition grow.xml write-part newpart newpart.img; rc=$?
+MOCK_PTABLE=$tmp/ptbig sh add --part-xml=bk parts pt.txt repartition grow.xml write-part newpart newpart.img; rc=$?
 check "a partition added by the repartition resolves in the same session (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'write newpart: ' sh_add.log &&
 		! grep -q 'not in the live partition table' sh_add.log"
@@ -110,10 +114,10 @@ for n in (129, 863):
         ''.join('    <Partition id="p%03d" size="16"/>\n' % i for i in range(n)) +
         '</Partitions>\n')
 PY
-sh n129 repartition n129.xml; rc=$?
+MOCK_PTABLE=$tmp/ptbig sh n129 --part-xml=bk repartition n129.xml; rc=$?
 check "129 entries: past spd_dump's 128-entry table, and still sent (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -qE '^SEQ 0b len=9804 ' sh_n129.seq"
-sh n863 repartition n863.xml; rc=$?
+MOCK_PTABLE=$tmp/ptbig sh n863 --part-xml=bk repartition n863.xml; rc=$?
 check "863 entries: refused before sending anything, at the frame limit (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_n863.seq &&
 		grep -q 'more than 862' sh_n863.log"
@@ -200,7 +204,7 @@ check "a phone's MiB row is dumped as its own number, not shifted (super=5120)" 
 		grep -q "Partition id=\"misc\" size=\"1\"" ours.xml'
 # And what we wrote must be accepted back by our own parser -- the round trip,
 # with the numbers the device would see unchanged.
-sh round repartition ours.xml; rc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept sh round --part-xml=bk repartition ours.xml; rc=$?
 check "the dumped XML is accepted back by repartition, super still 5120 (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'SEQ 0b len=456 ' sh_round.seq &&
 		grep -q 'repartition: \[5\] super size=5120' sh_round.log"
@@ -269,7 +273,7 @@ check "the unit normalises to MiB (boot_a 4096 KiB -> 4, super 8192 KiB -> 8)" \
 	bash -c "grep -q 'Partition id=\"boot_a\" size=\"4\"' ours10.xml &&
 		grep -q 'Partition id=\"super\" size=\"8\"' ours10.xml &&
 		grep -q 'Partition id=\"userdata\" size=\"0xffffffff\"' ours10.xml"
-sh unitrt repartition ours10.xml; rc=$?
+MOCK_PTABLE=$tmp/unitspt sh unitrt --part-xml=bk repartition ours10.xml; rc=$?
 check "the same dump fed back carries the MiB numbers (super 8) (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'repartition: \[2\] super size=8' sh_unitrt.log"
 # A table whose unit is not KiB, and one holding a zero-size row. fetch_ptab's
@@ -294,7 +298,7 @@ check "a zero-size row is refused with a clear error instead of hanging (rc $rc)
 # and it has to parse whole: 73 entries is 5548 bytes, well inside the 862 the
 # 16-bit frame allows, and none of its names or sizes may be dropped.
 cp "$root/tests/repart-super10g.xml" .
-sh real repartition repart-super10g.xml; rc=$?
+MOCK_PTABLE=$tmp/ptbig sh real --part-xml=bk repartition repart-super10g.xml; rc=$?
 check "the real 5 GB -> 10 GB super table is sent whole (73 entries, rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -qE '^SEQ 0b len=5548 ' sh_real.seq &&
 		grep -q 'repartition: \[46\] super size=10000' sh_real.log &&

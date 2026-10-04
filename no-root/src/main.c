@@ -183,6 +183,10 @@ static void usage(void)
 		"                          does not change the active slot.\n"
 		"  repartition FILE.xml    replace the partition table from XML\n"
 		"                          <Partition id=\"..\" size=\"..\"/>. Destructive.\n"
+		"                          Prints the XML against the live table first;\n"
+		"                          refuses duplicate names, a total past the live\n"
+		"                          capacity, and any session that did not save the\n"
+		"                          current table as XML (--part-xml DIR).\n"
 		"  set-active a|b [--bcb recovery|fastboot]\n"
 		"                          one session: read misc, patch the slot block at\n"
 		"                          0x800 (and with --bcb the BCB at 0), write the\n"
@@ -2158,6 +2162,10 @@ int main(int argc, char **argv)
 				fprintf(stderr, "repartition: file does not exist: %s\n", argv[i + 1]);
 				return 1;
 			}
+			/* R2: the diff and every refusal come before the question, so
+			 * the answer is given to what will actually be sent. */
+			if (spd_repartition_preview(io, argv[i + 1], NULL))
+				return 1;
 			confirm(yes, "repartition from", argv[i + 1]);
 			if (spd_repartition_xml(io, argv[i + 1]))
 				return 1;

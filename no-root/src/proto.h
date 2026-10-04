@@ -59,6 +59,13 @@ struct spd {
 	 * Cleared by a confirmed probe and by any table not built from a guess
 	 * (divisor 10, GPT, an XML repartition). */
 	int ptab_unit_bad;
+	/* R2: where this session saved the device's own table as repartition XML
+	 * (the auto partition_<time>.xml, or a partition-list FILE) before any
+	 * repartition. Empty = no backup; `repartition` refuses then. */
+	char ptab_backup[512];
+	/* 1 once io->ptab is a table this session sent (repartition), not one it
+	 * read: a later partition-list is then not a backup of the device's. */
+	int ptab_from_xml;
 	/* spd_dump's gpt_failed latch (spd_dump.c:144 `int gpt_failed = 1`, cleared
 	 * by a successful partition_list at common.c:1143, set to -1 by a refusal at
 	 * common.c:1088/1095). Every call site reads `if (gpt_failed == 1)` before
@@ -190,6 +197,13 @@ int spd_xml_partitions(const char *path, const char *what, struct spd_xml_part *
 
 /* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
 int spd_repartition_xml(struct spd *io, const char *path);
+/* R2: parse PATH and run every repartition check against the live table --
+ * duplicate names, a 0 row before the last, total over the live capacity, no
+ * pre-repartition XML backup in this session -- and print the row-by-row diff
+ * (old/new name, size and start). Nothing is sent. 0 = would be sent, -1 =
+ * refused. *MOVED (may be NULL) = rows before the last whose name, size or
+ * start differ from the live table. */
+int spd_repartition_preview(struct spd *io, const char *path, int *moved);
 /* Send the live table with row IDX renamed to NEWNAME (IDX < 0 = unchanged).
  * spd_dump's load_partition_force() pair for a force write. 0 = accepted,
  * -1 = refused by the device, -2 = refused before sending (H1). */

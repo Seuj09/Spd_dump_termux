@@ -2263,6 +2263,163 @@ bad:
 	return -1;
 }
 
+static void repart_cell(char *out, size_t cap, const char *name, uint64_t mib, int rest, uint64_t start)
+{
+	if (rest)
+		snprintf(out, cap, "%s rest @%llu", name, (unsigned long long)start);
+	else
+		snprintf(out, cap, "%s %llu @%llu", name, (unsigned long long)mib,
+			(unsigned long long)start);
+}
+
+/* R2: every check a repartition XML has to pass before it is sent, against
+ * the table this session read. VERBOSE prints the diff; errors always print.
+ * Returns 0 = may be sent, -1 = refused (nothing sent). */
+static int repart_check(struct spd *io, const struct spd_xml_part *list, int n, int verbose, int *moved_out)
+{
+	int i, j, moved = 0, first_moved = -1, nold;
+	uint64_t cap_mib = 0, used_mib = 0, ostart = 0, nstart = 0;
+	int cap_known = 1;
+
+	if (moved_out)
+		*moved_out = 0;
+	/* H1: a 0 before the last row is a partition of nothing, and every one
+	 * after it moves down. The last row may be anything ("take the rest"). */
+	for (i = 0; i + 1 < n; i++) {
+		if (list[i].size == 0) {
+			fprintf(stderr, "repartition: row %d %s has size 0; only the last row may be 0"
+				" or 0xffffffff. Refused; nothing was sent.\n", i + 1, list[i].name);
+			return -1;
+		}
+	}
+	for (i = 0; i < n; i++)
+		for (j = i + 1; j < n; j++)
+			if (!strcmp(list[i].name, list[j].name)) {
+				fprintf(stderr, "repartition: rows %d and %d are both named '%s'; a table"
+					" cannot carry one name twice. Refused; nothing was sent.\n",
+					i + 1, j + 1, list[i].name);
+				return -1;
+			}
+	if (io->nparts <= 0 || !io->ptab) {
+		fprintf(stderr, "repartition: this session has no live partition table to compare"
+			" the XML with (the device did not give one). Refused; nothing was sent.\n");
+		return -1;
+	}
+	if (io->ptab_unit_bad) {
+		fprintf(stderr, "repartition: the live table's unit is unverified (see the size probe"
+			" above), so its sizes cannot be compared or backed up. Refused; nothing was sent.\n");
+		return -1;
+	}
+	if (!io->ptab_backup[0]) {
+		fprintf(stderr, "repartition: no backup of the current table was written in this"
+			" session (the automatic partition_<time>.xml was skipped or no folder was"
+			" named: --part-xml DIR or SPDHOST_PART_XML_DIR). Without it a wrong layout"
+			" cannot be put back. Refused; nothing was sent.\n");
+		return -1;
+	}
+	/* Capacity: the live rows, last row included, are what the storage holds.
+	 * A last row the device reports as 0 or ~0 has no size, so the total is
+	 * not known then. */
+	nold = io->nparts;
+	for (i = 0; i < nold; i++) {
+		uint64_t b = io->ptab[i].size;
+		if (i + 1 == nold && (b == 0 || b >= (0xffffffffull << 10)))
+			cap_known = 0;
+		cap_mib += b >> 20;
+	}
+	for (i = 0; i < n; i++) {
+		if (i + 1 == n && (list[i].size == 0 || list[i].size == 0xffffffffu))
+			break; /* "take the rest" */
+		used_mib += list[i].size;
+	}
+	if (cap_known && (used_mib > cap_mib ||
+		(used_mib == cap_mib && (list[n - 1].size == 0 || list[n - 1].size == 0xffffffffu)))) {
+		fprintf(stderr, "repartition: the XML needs %llu MiB%s, but the live table adds up"
+			" to %llu MiB (last row %s included). A byte count typed where MiB belongs"
+			" does this. Refused; nothing was sent.\n", (unsigned long long)used_mib,
+			(list[n - 1].size == 0 || list[n - 1].size == 0xffffffffu) ?
+				" before its last row, which would get nothing" : "",
+			(unsigned long long)cap_mib, io->ptab[nold - 1].name);
+		return -1;
+	}
+	if (verbose) {
+		fprintf(stderr, "repartition: the XML against the live table (MiB, @start in MiB from the first row):\n");
+		fprintf(stderr, "  %-4s %-36s %-36s %s\n", "row", "live", "xml", "");
+	}
+	for (i = 0; i < (n > nold ? n : nold); i++) {
+		char a[80] = "-", b[80] = "-";
+		const char *what;
+		uint64_t omib = 0, nmib = 0;
+		int orest = 0, nrest = 0, changed;
+		if (i < nold) {
+			omib = io->ptab[i].size >> 20;
+			orest = (i + 1 == nold);
+			repart_cell(a, sizeof(a), io->ptab[i].name, omib, 0, ostart);
+		}
+		if (i < n) {
+			nmib = list[i].size;
+			nrest = (i + 1 == n) && (nmib == 0 || nmib == 0xffffffffu);
+			repart_cell(b, sizeof(b), list[i].name, nmib, nrest, nstart);
+		}
+		if (i >= n)
+			what = "REMOVED";
+		else if (i >= nold)
+			what = "ADDED";
+		else if (strcmp(io->ptab[i].name, list[i].name))
+			what = "NAME CHANGED";
+		else if (!(orest && nrest) && omib != nmib)
+			what = (ostart != nstart) ? "MOVED, SIZE CHANGED" : "SIZE CHANGED";
+		else if (ostart != nstart)
+			what = "MOVED";
+		else
+			what = "same";
+		changed = strcmp(what, "same") != 0;
+		/* Rows before the last of either table are the ones whose change moves
+		 * a partition that holds data; the last row is "the rest". */
+		if (changed && (i + 1 < n || i + 1 < nold)) {
+			moved++;
+			if (first_moved < 0)
+				first_moved = i;
+		}
+		if (verbose)
+			fprintf(stderr, "  %-4d %-36s %-36s %s\n", i + 1, a, b, what);
+		ostart += omib;
+		nstart += nmib;
+	}
+	if (verbose) {
+		if (moved)
+			fprintf(stderr, "repartition: WARNING %d row(s) before the last differ from the live"
+				" table, starting at row %d; every partition after that row moves, and any"
+				" data in a moved row (prodnv, miscdata, l_fixnv*, persist: IMEI and"
+				" calibration) is lost or misread.\n", moved, first_moved + 1);
+		else
+			fprintf(stderr, "repartition: every row before the last matches the live table.\n");
+		if (cap_known)
+			fprintf(stderr, "repartition: %llu of %llu MiB used before the last row.\n",
+				(unsigned long long)used_mib, (unsigned long long)cap_mib);
+		else
+			fprintf(stderr, "repartition: the live last row has no size, so the total capacity"
+				" is unknown and was not checked.\n");
+		fprintf(stderr, "repartition: backup of the current table: %s\n", io->ptab_backup);
+	}
+	if (moved_out)
+		*moved_out = moved;
+	return 0;
+}
+
+int spd_repartition_preview(struct spd *io, const char *path, int *moved)
+{
+	struct spd_xml_part *list = NULL;
+	int n, rc;
+
+	n = spd_xml_partitions(path, "repartition", &list);
+	if (n < 0)
+		return -1;
+	rc = repart_check(io, list, n, 1, moved);
+	free(list);
+	return rc;
+}
+
 int spd_repartition_xml(struct spd *io, const char *path)
 {
 	uint8_t *buf, *w, *sent;
@@ -2272,21 +2429,16 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	n = spd_xml_partitions(path, "repartition", &list);
 	if (n < 0)
 		return -1;
+	/* The same checks spd_repartition_preview printed, again here so that no
+	 * caller can send a table that skipped them. */
+	if (repart_check(io, list, n, 0, NULL)) {
+		free(list);
+		return -1;
+	}
 	buf = calloc((size_t)n, 0x4c);
 	if (!buf) {
 		free(list);
 		return -1;
-	}
-	/* H1: a 0 before the last row is a partition of nothing, and every one
-	 * after it moves down. The last row may be anything ("take the rest"). */
-	for (i = 0; i + 1 < n; i++) {
-		if (list[i].size == 0) {
-			fprintf(stderr, "repartition: row %d %s has size 0; only the last row may be 0"
-				" or 0xffffffff. Refused; nothing was sent.\n", i + 1, list[i].name);
-			free(list);
-			free(buf);
-			return -1;
-		}
 	}
 	w = buf;
 	for (i = 0; i < n; i++) {
@@ -2331,6 +2483,7 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	 * the same unit the XML did. fetch_ptab sets it from the wire instead. */
 	io->ptab_shift = 20;
 	io->ptab_unit_bad = 0; /* the XML's rows are MiB by format, not a guess */
+	io->ptab_from_xml = 1;
 	/* The session has a table (the one just sent), so the latch is "asked and
 	 * answered": spd_dump's gpt_failed is already 0 here and scan_xml_partitions
 	 * rewrites io->ptable in place, so a later partition_list prints the new
@@ -2527,6 +2680,8 @@ static void part_xml_auto(struct spd *io, unsigned count)
 		return;
 	}
 	fprintf(stderr, "partition xml: %s (%u entries)\n", path, count);
+	if (!io->ptab_from_xml && !io->ptab_backup[0])
+		snprintf(io->ptab_backup, sizeof(io->ptab_backup), "%s", path);
 }
 
 /* The device's raw table packet, as "sprdpart.bin" in the dump folder (or the
@@ -2992,6 +3147,8 @@ int spd_part_xml(struct spd *io, const char *out_path)
 		return -1;
 	}
 	fprintf(stderr, "partition-list: %u entries written as the repartition XML format\n", count);
+	if (fo != stdout && !io->ptab_from_xml && !io->ptab_backup[0])
+		snprintf(io->ptab_backup, sizeof(io->ptab_backup), "%s", out_path);
 	return 0;
 }
 

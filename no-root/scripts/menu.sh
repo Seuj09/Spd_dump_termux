@@ -2815,6 +2815,13 @@ repartition_xml_preview() {
 		echo "No <Partition id=\"...\" size=\"...\"> entries."
 		return 1
 	fi
+	# R2: one name twice is not a table spdhost will send; say so here too.
+	local dups
+	dups=$(printf '%s' "$tags" | grep -oE 'id="[^"]*"' | sort | uniq -d | tr '\n' ' ')
+	if [[ -n $dups ]]; then
+		echo "XML names a partition twice: $dups-- refused."
+		return 1
+	fi
 	echo "Repartition replaces the on-device partition map ($n entries). A wrong XML can brick the phone."
 	printf '%s\n' "$tags" | grep -E 'id="[^"]*"[^>]*size="|size="[^"]*"[^>]*id="' || true
 }
@@ -2867,10 +2874,22 @@ repartition_menu() {
 		return 0
 	fi
 	repartition_xml_preview "$xml" || return 1
+	# R2: spdhost refuses to send unless this same session saved the current
+	# table as partition_<time>.xml first, and that copy goes to
+	# SPDHOST_PART_XML_DIR (the dump folder). Stop here if it cannot.
+	local bkdir=${SPDHOST_PART_XML_DIR-$DUMP_DIR}
+	if [[ -z $bkdir ]] || ! mkdir -p "$bkdir" 2>/dev/null || [[ ! -w $bkdir ]]; then
+		echo "No writable folder for the pre-repartition backup of the current table"
+		echo "(SPDHOST_PART_XML_DIR / dump folder: '${bkdir}'). Refused; nothing sent."
+		return 1
+	fi
 	if ! confirm_action "type yes to repartition from this XML: "; then
 		return 1
 	fi
-	echo "spdhost asks once more on the terminal before it sends the table."
+	echo "spdhost first saves the current table to $bkdir/partition_<time>.xml, then"
+	echo "prints the XML against the live table row by row (old and new size and start)."
+	echo "It refuses duplicate names, a total past the phone's capacity, or a missing"
+	echo "backup. Read the diff, then answer its question on the terminal."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		repartition "$xml" "$BOOT_AFTER"

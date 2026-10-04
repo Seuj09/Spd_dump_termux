@@ -70,12 +70,12 @@ check "H1 auto XML: skipped with a warning, the session still succeeds (rc $rc)"
 	bash -c "[ $rc = 0 ] && ! ls xmldir/partition_*.xml >/dev/null 2>&1 && grep -q 'auto partition xml: .* not written' sh_h1auto.log"
 printf '%s\n' '<Partitions>' '    <Partition id="boot" size="0"/>' \
 	'    <Partition id="userdata" size="0xffffffff"/>' '</Partitions>' > zero.xml
-sh h1zero repartition zero.xml; rc=$?
+mkdir -p bk; sh h1zero --part-xml=bk repartition zero.xml; rc=$?
 check "H1 repartition XML: a 0 row before the last is refused, nothing sent (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_h1zero.seq && grep -q 'has size 0' sh_h1zero.log"
 printf '%s\n' '<Partitions>' '    <Partition id="boot" size="4"/>' \
 	'    <Partition id="userdata" size="0"/>' '</Partitions>' > lastzero.xml
-sh h1last repartition lastzero.xml; rc=$?
+sh h1last --part-xml=bk repartition lastzero.xml; rc=$?
 check "H1 repartition XML: 0 on the last row is still allowed (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -qE '^SEQ 0b ' sh_h1last.seq"
 
