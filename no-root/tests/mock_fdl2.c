@@ -26,6 +26,14 @@
  *                     the read is NACKed before any of it is reached.
  *   READ_FLASH/read_mem bytes are part_byte("flash", absolute address), so
  *   `gen_expected flash ADDR SIZE` is what both must return.
+ *   MOCK_MISC_BLOCK=N a loader that programs misc in N-byte units: at END_DATA
+ *                     the rest of the last unit (wr_off up to the next N) is
+ *                     zero-filled, so a bare 2048-byte BCB write wipes
+ *                     [0x800,N) -- the A/B slot block (H3).
+ *   MOCK_RESET_GONE=1 NORMAL_RESET (0x05) / POWER_OFF (0x17) get no reply and
+ *                     every later IN read is LIBUSB_ERROR_NO_DEVICE: the
+ *                     loader reset before its ack left (H1).
+ *   MOCK_RESET_SILENT=1 those two get no reply at all (a timeout).
  * Data bytes are pattern_byte(offset) ^ name_seed(name) (see mock_pattern.h).
  *
  * Stateful fake libusb: BootROM -> FDL1 -> FDL2 with partition reads.
@@ -49,6 +57,7 @@ static uint64_t cur_size;
 static int connects;
 static int midst_count;
 static uint8_t *miscmem; static uint64_t misclen;
+static int bus_gone;
 static char wr_part[40]; static uint64_t wr_off, wr_size; static int wr_on; static int wmid_count;
 static void misc_init(void);
 static void misc_save(void)
@@ -289,7 +298,18 @@ static void log_out(const uint8_t *buf, int len)
 		if (miscmem && wr_off + plen <= misclen) memcpy(miscmem + wr_off, raw + 4, plen); }
 		if (wr_on) wr_off += plen;
 		make_reply(0x80, NULL, 0, crc); return;
-	case 0x03: if (wr_on && !strcmp(wr_part, "misc")) misc_save(); wr_on = 0;
+	case 0x03: if (wr_on && !strcmp(wr_part, "misc") && getenv("MOCK_MISC_BLOCK") && miscmem) {
+			uint64_t blk = strtoull(getenv("MOCK_MISC_BLOCK"), NULL, 0), e;
+			if (blk && wr_off % blk) {
+				e = (wr_off / blk + 1) * blk;
+				if (e > misclen) e = misclen;
+				memset(miscmem + wr_off, 0, e - wr_off);
+			} }
+		if (wr_on && !strcmp(wr_part, "misc")) misc_save(); wr_on = 0;
+		make_reply(0x80, NULL, 0, crc); return;
+	case 0x05: case 0x17:
+		if (getenv("MOCK_RESET_GONE")) { bus_gone = 1; reply_len = reply_pos = 0; return; }
+		if (getenv("MOCK_RESET_SILENT")) { reply_len = reply_pos = 0; return; }
 		make_reply(0x80, NULL, 0, crc); return;
 	default: make_reply(0x80, NULL, 0, crc); return;
 	}
@@ -344,6 +364,7 @@ int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned cha
 {
 	(void)h; (void)t;
 	if (!(ep & 0x80)) { log_out(d, len); *got = len; return 0; }
+	if (bus_gone) { *got = 0; return LIBUSB_ERROR_NO_DEVICE; }
 	if (reply_pos >= reply_len) { *got = 0; return LIBUSB_ERROR_TIMEOUT; }
 	if (len > reply_len - reply_pos) len = reply_len - reply_pos;
 	memcpy(d, reply + reply_pos, len); *got = len; reply_pos += len; return 0;

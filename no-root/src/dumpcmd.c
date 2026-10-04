@@ -63,6 +63,54 @@ int spd_fill_slot_abc(uint8_t abc[32], char which)
 	return 0;
 }
 
+/* M1: the slot block a switch to WHICH writes, built on the block misc
+ * already holds (CUR, 32 bytes at misc+0x800). spd_dump's set_active writes a
+ * fresh block every time (spd_fill_slot_abc): the target slot priority 15,
+ * tries 6, and the OTHER slot priority 14, tries 1, successful 0 -- so a
+ * known-good slot loses its successful_boot and is left one try. This keeps
+ * what the bootloader and Android recorded instead, the way AOSP's
+ * boot_control setActiveBootSlot does: the target becomes priority 15, tries
+ * 6, successful 0, verity_corrupted 0; any other slot at priority 15 drops to
+ * 14 and keeps its tries and successful_boot; version, nb_slot,
+ * recovery_tries and merge_status are left as they are.
+ *
+ * Only a block that is really a bootloader_control (magic "BCAB", a slot
+ * count of 1..4 and a matching CRC32) is kept. Anything else -- zeros, a
+ * vendor format, a stale CRC -- gets spd_dump's fresh block, as does COMPAT
+ * (spdhost --spd-dump-slot). Returns 1 when CUR was kept, 0 for the fresh
+ * block, -1 for a bad WHICH. */
+int spd_slot_abc_switch(uint8_t abc[32], const uint8_t cur[32], char which, int compat)
+{
+	uint32_t c;
+	int slot, nb, i;
+	if (which != 'a' && which != 'b')
+		return -1;
+	nb = cur ? (cur[9] & 7) : 0;
+	c = cur ? crc32_le(cur, 0x1c) : 0;
+	if (compat || !cur || memcmp(cur + 4, "BCAB", 4) || nb < 2 || nb > 4 ||
+		(uint32_t)(cur[28] | cur[29] << 8 | cur[30] << 16 | (uint32_t)cur[31] << 24) != c)
+		return spd_fill_slot_abc(abc, which) ? -1 : 0;
+	memcpy(abc, cur, 32);
+	abc[0] = '_';
+	abc[1] = (uint8_t)which;
+	abc[2] = 0;
+	abc[3] = 0;
+	slot = which - 'a';
+	for (i = 0; i < nb; i++) {
+		uint8_t *si = abc + 12 + i * 2;
+		if (i == slot) {
+			si[0] = (uint8_t)(15 | (6 << 4)); /* priority 15, tries 6, successful 0 */
+			si[1] &= (uint8_t)~1u;            /* verity_corrupted 0 */
+		} else if ((si[0] & 0x0f) == 15) {
+			si[0] = (uint8_t)((si[0] & 0xf0) | 14);
+		}
+	}
+	c = crc32_le(abc, 0x1c);
+	for (i = 0; i < 4; i++)
+		abc[28 + i] = (uint8_t)(c >> (8 * i));
+	return 1;
+}
+
 int spd_pack_slot_file(char which, const char *in_path, const char *out_path)
 {
 	FILE *fi, *fo;
@@ -727,6 +775,16 @@ fail:
 int spd_misc_guard_armed(void)
 {
 	return guard_before != NULL;
+}
+
+/* The misc image the session last read or verified (the misc-backup read,
+ * moved forward by every verified write), so a read-modify-write splices into
+ * what is on the device now. NULL when no backup was taken. */
+const uint8_t *spd_misc_guard_image(size_t *len)
+{
+	if (len)
+		*len = guard_before ? guard_len : 0;
+	return guard_before;
 }
 
 /* After writing BUF (LEN bytes at offset 0) to misc: read the whole misc

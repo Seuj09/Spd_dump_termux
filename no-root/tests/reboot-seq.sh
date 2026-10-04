@@ -9,7 +9,7 @@
 # Usage (from no-root/): tests/reboot-seq.sh
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d); [ -n "${KEEP:-}" ] && echo "tmp=$tmp" || trap 'rm -rf "$tmp"' EXIT
 pass=0 fail=0
 ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*"; fail=$((fail + 1)); }
@@ -107,10 +107,10 @@ check "guard: write not stored -> read-back mismatch, NO reset (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'misc read-back mismatch' sh_guard_bad.log && ! grep -q '^SEQ 05 ' sh_guard_bad.seq"
 MOCK_FAIL_MID=misc sh guard_fail parts pt.txt misc-backup before3.img reboot-recovery; rc=$?
 check "guard: failed backup read -> session stops, no misc write, no reset (rc $rc)" \
-	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' sh_guard_fail.log && ! grep -qE '^SEQ (01 len=7[6-9]|02 len=2048|05 )' sh_guard_fail.seq && [ ! -s before3.img ]"
+	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' sh_guard_fail.log && ! grep -qE '^SEQ (01 len=7[6-9]|02 len=(2048|4096)|05 )' sh_guard_fail.seq && [ ! -s before3.img ]"
 MOCK_FAIL_MID=misc sh guard_fail_kg --keep-going parts pt.txt misc-backup before4.img reboot-recovery; rc=$?
 check "guard: --keep-going does not skip past a failed backup (rc $rc)" \
-	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ (02 len=2048|05 )' sh_guard_fail_kg.seq"
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ (02 len=(2048|4096)|05 )' sh_guard_fail_kg.seq"
 # restore path: write-part misc FILE with the guard
 cp orig restore.img; printf 'X' | dd of=restore.img bs=1 seek=100 conv=notrunc status=none
 MOCK_MISC_OUT=$tmp/misc_restore.bin sh restore parts pt.txt misc-backup before5.img write-part misc restore.img reset; rc=$?

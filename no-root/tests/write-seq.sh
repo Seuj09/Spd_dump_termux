@@ -358,13 +358,15 @@ check "slot change mid-session: boot resolves boot_a then boot_b (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \"\$(tr '\n' ' ' < slotflip.names)\" = 'read boot_a: read boot_b: ' ]"
 
 # write-parts: slot a image is sent, slot b is not, metadata erased when super is present.
+# M1: misc already says slot a (MOCK_SLOT=a), so the slot block is left alone
+# (it used to be rewritten every time, resetting tries and the other slot).
 mkdir -p imgs
 printf 'A' > imgs/boot_a.img
 printf 'B' > imgs/boot_b.img
 printf 'S' > imgs/super.img
 sh restore parts pt.txt write-parts imgs; rc=$?
 check "write-parts writes boot_a, skips boot_b, erases metadata (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_restore.seq && ! grep -q '62006f006f0074005f006200' sh_restore.seq && grep -q 'erasing metadata' sh_restore.log && grep -q 'set-active: slot a' sh_restore.log"
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_restore.seq && ! grep -q '62006f006f0074005f006200' sh_restore.seq && grep -q 'erasing metadata' sh_restore.log && grep -q 'slot a is already active; not touching the slot block' sh_restore.log && ! grep -q 'set-active: slot' sh_restore.log"
 mkdir -p flashdir
 printf 'A' > flashdir/boot_a.img
 printf 'B' > flashdir/boot_b.img
@@ -586,7 +588,7 @@ check "menu verity and FRP refuse without a TTY" menu_danger_notty
 # Release menu endings: recovery and fastbootd after the images.
 sh after parts pt.txt write-parts imgs reboot-recovery; rc=$?
 check "write-parts then reboot-recovery writes the BCB (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_after.seq && grep -q 'writing 2048-byte BCB' sh_after.log && grep -q 'reboot-recovery' sh_after.log"
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_after.seq && grep -q 'writing the whole misc (1048576 bytes: BCB at offset 0' sh_after.log && grep -q 'reboot-recovery' sh_after.log"
 # SPDHOST_MENU_CONFIG: boot_after_menu now persists the choice, and without
 # this it would write over the developer's real ~/.spdhost-menu.conf.
 ba=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_MENU_CONFIG="$tmp/none.conf" \

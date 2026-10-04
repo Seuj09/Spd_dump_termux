@@ -7,6 +7,10 @@ int spd_active_slot(struct spd *io);
  * needs them before this layer's table is loaded. */
 /* spd_dump set_active's 32 bytes for 'a' or 'b' (CRC-32 of the first 0x1C). */
 int spd_fill_slot_abc(uint8_t abc[32], char which);
+/* M1: the block a switch to WHICH writes, keeping CUR's other-slot state when
+ * CUR is a valid bootloader_control (1 = kept, 0 = spd_dump's fresh block,
+ * also used when COMPAT is set; -1 = bad WHICH). */
+int spd_slot_abc_switch(uint8_t abc[32], const uint8_t cur[32], char which, int compat);
 /* Offline: copy IN and patch offset 0x800. No USB. */
 int spd_pack_slot_file(char which, const char *in_path, const char *out_path);
 /* 0 = found (out/size set). -1 = not in the live table. -2 = no table yet
@@ -45,6 +49,9 @@ int spd_read_parts(struct spd *io, const char *xml_path, const char *dir, int co
 int spd_resolve_part(struct spd *io, const char *name, char *out, size_t cap, uint64_t *size);
 uint64_t spd_misc_size(struct spd *io);
 int spd_misc_backup(struct spd *io, const char *out);
+/* The session's current misc image (backup read, moved forward by every
+ * verified write), or NULL before a backup. */
+const uint8_t *spd_misc_guard_image(size_t *len);
 int spd_misc_guard_armed(void);
 int spd_misc_verify(struct spd *io, const uint8_t *buf, size_t len);
 #endif

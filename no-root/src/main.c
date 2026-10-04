@@ -77,6 +77,8 @@ static void usage(void)
 		"                      folder). env SPDHOST_PART_XML_DIR when unset.\n"
 		"  --verbose\n"
 		"  --self-test         framing check, no device\n"
+		"  --spd-dump-slot     set-active/write-parts write spd_dump's exact slot\n"
+		"                      block (other slot tries 1, successful 0)\n"
 		"  --dry-run           no USB: fake ACK/VER replies, print each packet\n"
 		"                      (DRY <cmd> addr/len) to stdout; for sequence tests\n"
 		"\n"
@@ -176,7 +178,14 @@ static void usage(void)
 		"                          does not change the active slot.\n"
 		"  repartition FILE.xml    replace the partition table from XML\n"
 		"                          <Partition id=\"..\" size=\"..\"/>. Destructive.\n"
-		"  set-active a|b          rewrite misc slot bytes (backup + verify)\n"
+		"  set-active a|b [--bcb recovery|fastboot]\n"
+		"                          one session: read misc, patch the slot block at\n"
+		"                          0x800 (and with --bcb the BCB at 0), write the\n"
+		"                          whole misc, verify; with --bcb also reset. Keeps\n"
+		"                          the other slot's tries/successful (see\n"
+		"                          --spd-dump-slot). Refused without uboot_a/uboot_b.\n"
+		"                          --confirm-token = sha256 of the line\n"
+		"                          'spdhost-set-active <a|b> <BCB sha256|none>\\n'.\n"
 		"  pack-slot a|b IN OUT    offline: patch a misc image at offset 0x800\n"
 		"  gen-spl-unlock IN OUT   offline: patch a dumped splloader into an\n"
 		"                          unlock image (DHTB, aarch64). Ported from the\n"
@@ -217,7 +226,8 @@ static void usage(void)
 		"                          splloader, splloader_bak. erase-part still refuses\n"
 		"                          those names. --yes is not enough.\n"
 		"  chip-uid\n"
-		"  reboot-recovery            write 2048-byte BCB to misc, then reset\n"
+		"  reboot-recovery            2048-byte BCB spliced into misc, whole misc\n"
+		"                             written + verified, then reset\n"
 		"  reboot-fastboot            same with --fastboot recovery arg\n"
 		"  reset\n"
 		"  power-off                  also accepted as poweroff (release menu)\n"
@@ -273,6 +283,9 @@ bad:
  * its own terminal (scripts/menu.sh): --confirm-token SHA256 authorizes ONE
  * write to partition "misc" whose exact bytes hash to SHA256. Nothing else. */
 static const char *confirm_token;
+/* --spd-dump-slot: set-active / write-parts write spd_dump's fresh slot block
+ * (other slot priority 14, tries 1, successful 0) instead of keeping it (M1). */
+static int spd_dump_slot;
 static int confirm_token_used;
 
 /* Read one line from FD (raw read(2), no stdio buffering). Returns bytes read
@@ -692,47 +705,6 @@ enum { SPD_MISC_BCB_LEN = 0x800 };
 
 static int ensure_misc_backup(struct spd *io);
 
-/* kind: 0 = recovery only, 1 = recovery + --fastboot at 0x40. */
-static int do_reboot_bcb(struct spd *io, int yes, int kind)
-{
-	uint8_t buf[SPD_MISC_BCB_LEN];
-	const char *label = kind ? "misc (reboot-fastboot)" : "misc (reboot-recovery)";
-
-	/* Compile-time guard: never enlarge this write window. */
-	_Static_assert(sizeof(buf) == 0x800, "misc BCB must be exactly 2048 bytes");
-
-	memset(buf, 0, sizeof(buf));
-	memcpy(buf, "boot-recovery", 13);
-	if (kind)
-		memcpy(buf + 0x40, "recovery\n--fastboot\n", 20);
-
-	authorize_write(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", "misc", buf, sizeof(buf));
-	/* One full-misc read, and only if this session has not already backed up.
-	 * The menu's misc-backup arms the guard, so this does not read twice. */
-	if (ensure_misc_backup(io))
-		return -1;
-	fprintf(stderr, "%s: writing %zu-byte BCB\n", label, sizeof(buf));
-	if (sizeof(buf) != (size_t)SPD_MISC_BCB_LEN) {
-		fprintf(stderr, "internal error: misc BCB length %zu != 2048\n", sizeof(buf));
-		return -1;
-	}
-	{
-		/* spd_dump reboot-* uses w_mem_to_part_offset(..., 0x1000): the
-		 * chunk is 0x1000 whatever blk_size/--step is (one 2048-byte MIDST). */
-		int saved = io->step, rc;
-		io->step = 0x1000;
-		rc = spd_write_part_buf(io, "misc", buf, sizeof(buf));
-		io->step = saved;
-		if (rc)
-			return -1;
-	}
-	if (spd_misc_verify(io, buf, sizeof(buf))) {
-		fprintf(stderr, "misc read-back mismatch: NOT resetting. Restore misc from the backup.\n");
-		return -1;
-	}
-	return spd_simple(io, 0x05); /* BSL_CMD_NORMAL_RESET */
-}
-
 /* Backup misc once per session before any misc write. The file lands in the
  * current directory so a bare reboot-* or write-part misc can be restored. */
 static int ensure_misc_backup(struct spd *io)
@@ -761,14 +733,197 @@ static int have_part(struct spd *io, const char *name)
 	return 0;
 }
 
+/* SPDHOST_STATUS_FILE=PATH: one "key=value" line per result the menu reports
+ * on its own (misc-verify, then the ending), appended as they happen, so a
+ * misc that verified is not reported as failed when only the reset ack was
+ * lost, and the other way round. */
+static void status_note(const char *key, const char *val)
+{
+	const char *p = getenv("SPDHOST_STATUS_FILE");
+	FILE *f;
+	if (!p || !p[0] || !(f = fopen(p, "a")))
+		return;
+	fprintf(f, "%s=%s\n", key, val);
+	fclose(f);
+}
+
+/* misc is written whole, always (H3). A 2048-byte BCB used to go out as one
+ * 2048-byte MIDST, the way spd_dump's reboot-* does it; but a loader that
+ * programs misc in 4 KiB (or larger) units fills the rest of the unit itself,
+ * and on these phones the rest is the A/B slot block at 0x800. Here the BCB
+ * (HEAD, HLEN bytes at 0) and/or the slot switch (WHICH, 32 bytes at 0x800)
+ * are spliced into the session's current misc image -- the misc-backup read,
+ * moved forward by every verified write -- and the whole partition goes back,
+ * then the whole partition is read back and compared. Returns 0 only when the
+ * read-back matched. */
+static int misc_rmw_write(struct spd *io, const uint8_t *head, size_t hlen, char which,
+	const char *label)
+{
+	const uint8_t *cur;
+	uint8_t *img;
+	size_t full = 0;
+	int rc;
+	if (ensure_misc_backup(io))
+		return -1;
+	cur = spd_misc_guard_image(&full);
+	if (!cur || full < 0x820 || hlen > full) {
+		fprintf(stderr, "%s: misc is %zu bytes; refusing (need at least 0x820)\n", label, full);
+		return -1;
+	}
+	img = malloc(full);
+	if (!img)
+		return -1;
+	memcpy(img, cur, full);
+	if (head && hlen)
+		memcpy(img, head, hlen);
+	if (which) {
+		uint8_t abc[32];
+		int kept = spd_slot_abc_switch(abc, cur + 0x800, which, spd_dump_slot);
+		if (kept < 0) {
+			free(img);
+			return -1;
+		}
+		memcpy(img + 0x800, abc, 32);
+		fprintf(stderr, "%s: slot %c; %s\n", label, which,
+			kept ? "kept the other slot's tries/successful_boot (valid bootloader_control)"
+			     : spd_dump_slot ? "spd_dump's fresh slot block (--spd-dump-slot)"
+					     : "spd_dump's fresh slot block (misc had no valid bootloader_control)");
+	}
+	fprintf(stderr, "%s: writing the whole misc (%zu bytes: %s%s%s at offset 0, rest as read)\n",
+		label, full, head && hlen ? "BCB" : "", head && hlen && which ? " + " : "",
+		which ? "slot block at 0x800" : "");
+	rc = spd_write_part_buf(io, "misc", img, full);
+	if (rc) {
+		status_note("misc-verify", "not-reached");
+	} else if (spd_misc_verify(io, img, full)) {
+		fprintf(stderr, "misc read-back mismatch (misc-verify FAILED): NOT resetting. Restore misc from the backup.\n");
+		status_note("misc-verify", "failed");
+		rc = -1;
+	} else {
+		status_note("misc-verify", "ok");
+	}
+	free(img);
+	return rc ? -1 : 0;
+}
+
+/* H1: the last frame of a session (NORMAL_RESET 0x05, POWER_OFF 0x17). A
+ * loader that resets at once often drops off the bus before its ACK gets out;
+ * libusb then answers the read with NO_DEVICE or IO. Once the frame WAS sent,
+ * that is what a reset looks like, so it counts as success. A timeout (device
+ * still there, no answer) or a frame that never went out stays a failure. */
+static int end_session(struct spd *io, unsigned type)
+{
+	const char *what = type == 0x17 ? "power-off" : "reset";
+	int n;
+	spd_encode(io, type, NULL, 0);
+	if (spd_send(io) < 0) {
+		fprintf(stderr, "%s: FAILED: the frame was not sent\n", what);
+		status_note(what, "not-sent");
+		return -1;
+	}
+	n = spd_recv(io, io->usb.timeout_ms);
+	if (n < 0) {
+		if (io->usb.gone) {
+			fprintf(stderr, "%s: device left the bus on %s (expected)\n", what,
+				type == 0x17 ? "power-off" : "reset");
+			status_note(what, "left-bus");
+			return 0;
+		}
+		fprintf(stderr, "%s: FAILED: USB error waiting for the ack\n", what);
+		status_note(what, "usb-error");
+		return -1;
+	}
+	if (n == 0) {
+		fprintf(stderr, "%s: FAILED: timeout waiting for the ack (the device is still on the bus)\n", what);
+		status_note(what, "timeout");
+		return -1;
+	}
+	if (spd_type(io) != 0x80) { /* BSL_REP_ACK */
+		fprintf(stderr, "%s: FAILED: reply 0x%04x instead of an ack\n", what, spd_type(io));
+		status_note(what, "nack");
+		return -1;
+	}
+	fprintf(stderr, "%s: acknowledged\n", what);
+	status_note(what, "ack");
+	return 0;
+}
+
+/* M5: before an ending that boots recovery (or fastbootd) on slot SLOT (0 =
+ * not A/B), look at the first 4 KiB of the images that boot has to load. A
+ * slot whose boot or vbmeta was never flashed (slot b on many phones) will
+ * not start recovery, whatever misc says. Warnings only; nothing refused.
+ * Unisoc signed images start with a DHTB header and carry the Android header
+ * at 0x200, so that offset counts too. */
+static void warn_boot_images(struct spd *io, int slot)
+{
+	static const char *const base[3] = { "boot", "recovery", "vbmeta" };
+	int k;
+	for (k = 0; k < 3; k++) {
+		char name[40];
+		uint8_t buf[4096];
+		const uint8_t *p = buf;
+		int ok;
+		snprintf(name, sizeof(name), "%s%s", base[k], slot == 1 ? "_a" : slot == 2 ? "_b" : "");
+		if (!have_part(io, name)) {
+			if (k != 1)
+				fprintf(stderr, "check: %s is not in the table\n", name);
+			continue;
+		}
+		if (spd_read_part_mem(io, name, 0, sizeof(buf), buf)) {
+			fprintf(stderr, "WARNING: could not read the first 4 KiB of %s\n", name);
+			continue;
+		}
+		if (!memcmp(buf, "DHTB", 4))
+			p = buf + 0x200;
+		if (k == 2)
+			ok = !memcmp(p, "AVB0", 4);
+		else
+			ok = !memcmp(p, "ANDROID!", 8) || !memcmp(p, "VNDRBOOT", 8);
+		if (ok)
+			fprintf(stderr, "check: %s has its %s magic\n", name, k == 2 ? "AVB0" : "boot image");
+		else
+			fprintf(stderr,
+				"WARNING: %s has no %s magic in its first 4 KiB -- it looks empty or erased; "
+				"recovery on this slot may not boot\n",
+				name, k == 2 ? "AVB0" : "ANDROID!/VNDRBOOT");
+	}
+}
+
+static void build_bcb(uint8_t buf[SPD_MISC_BCB_LEN], int kind)
+{
+	memset(buf, 0, SPD_MISC_BCB_LEN);
+	memcpy(buf, "boot-recovery", 13);
+	if (kind)
+		memcpy(buf + 0x40, "recovery\n--fastboot\n", 20);
+}
+
+/* kind: 0 = recovery only, 1 = recovery + --fastboot at 0x40. The token (and
+ * the typed confirm) cover the 2048 BCB bytes; what goes on the wire is the
+ * whole misc with those bytes at 0 (misc_rmw_write). */
+static int do_reboot_bcb(struct spd *io, int yes, int kind)
+{
+	uint8_t buf[SPD_MISC_BCB_LEN];
+	const char *label = kind ? "misc (reboot-fastboot)" : "misc (reboot-recovery)";
+
+	_Static_assert(sizeof(buf) == 0x800, "misc BCB must be exactly 2048 bytes");
+	build_bcb(buf, kind);
+	authorize_write(yes, kind ? "reboot-fastboot via" : "reboot-recovery via", "misc", buf, sizeof(buf));
+	warn_boot_images(io, spd_active_slot(io));
+	if (misc_rmw_write(io, buf, sizeof(buf), 0, label))
+		return -1;
+	return end_session(io, 0x05); /* BSL_CMD_NORMAL_RESET */
+}
+
 /* 2048-byte BCB or a full-partition misc image. Backup, write, read back.
+ * A BCB is spliced into the current misc and the whole partition is written
+ * (H3); a full image is written as it is.
  * gate=0 means the caller already confirmed this session (write-parts). */
 static int write_misc_image(struct spd *io, int yes, const char *path, int gate)
 {
 	size_t n = 0;
 	uint64_t full = spd_misc_size(io);
 	uint8_t *w = load_small_file(path, &n, (size_t)full);
-	int saved, rc;
+	int rc;
 	if (!w)
 		return -1;
 	if (n != SPD_MISC_BCB_LEN && n != full) {
@@ -785,30 +940,56 @@ static int write_misc_image(struct spd *io, int yes, const char *path, int gate)
 		return -1;
 	}
 	fprintf(stderr, "write misc: %zu bytes from %s\n", n, path);
-	saved = io->step;
-	if (n == SPD_MISC_BCB_LEN)
-		io->step = 0x1000;
+	if (n == SPD_MISC_BCB_LEN && n != full) {
+		rc = misc_rmw_write(io, w, n, 0, "write misc");
+		free(w);
+		return rc;
+	}
 	rc = spd_write_part_buf(io, "misc", w, n);
-	io->step = saved;
 	if (rc) {
+		status_note("misc-verify", "not-reached");
 		free(w);
 		return -1;
 	}
 	if (spd_misc_verify(io, w, n)) {
 		free(w);
 		fprintf(stderr, "misc read-back mismatch: stopping (no reset). Restore misc from the backup.\n");
+		status_note("misc-verify", "failed");
 		return -1;
 	}
+	status_note("misc-verify", "ok");
 	free(w);
 	return 0;
 }
 
-/* spd_dump set_active: 32-byte bootloader_control at misc+0x800, then the
- * whole misc image is written back. Backup and read-back stay in front. */
-static int set_active_slot(struct spd *io, int yes, char which, int gate)
+/* What `set-active` asks --confirm-token to cover: the patch, not the image.
+ * "spdhost-set-active <a|b> <sha256 of the 2048-byte BCB | none>\n"; the token
+ * is the sha256 of that line. The image around the patch is whatever misc
+ * holds when the session reads it, so a token over the image could only come
+ * from an earlier session's read -- which is the race this replaces. */
+static void set_active_desc(char which, int bcb_kind, char *out, size_t cap)
+{
+	char h[65];
+	if (bcb_kind >= 0) {
+		uint8_t buf[SPD_MISC_BCB_LEN];
+		build_bcb(buf, bcb_kind);
+		sha256_hex(buf, sizeof(buf), h);
+	} else {
+		snprintf(h, sizeof(h), "none");
+	}
+	snprintf(out, cap, "spdhost-set-active %c %s\n", which, h);
+}
+
+/* set-active a|b [--bcb recovery|fastboot]: one session, one misc write.
+ * Reads misc (misc-backup), patches the slot block at 0x800 (keeping the other
+ * slot's state, see spd_slot_abc_switch) and, with BCB_KIND >= 0, the BCB at
+ * [0,0x800); writes the whole misc; reads it back. The caller resets when a
+ * BCB was written. gate=0: write-parts, already confirmed. */
+static int set_active_slot(struct spd *io, int yes, char which, int gate, int bcb_kind)
 {
 	uint64_t full;
-	uint8_t *img, abc[32];
+	uint8_t bcb[SPD_MISC_BCB_LEN];
+	int slot = which == 'a' ? 1 : 2;
 	if (which != 'a' && which != 'b') {
 		fprintf(stderr, "set-active: want a or b\n");
 		return -1;
@@ -817,44 +998,38 @@ static int set_active_slot(struct spd *io, int yes, char which, int gate)
 		fprintf(stderr, "set-active: run parts first (misc must be in the table)\n");
 		return -1;
 	}
+	/* M6: the test select_ab trusts -- a phone without both uboot copies is
+	 * not A/B, and its bootloader never reads the slot block. */
+	if (!have_part(io, "uboot_a") || !have_part(io, "uboot_b")) {
+		fprintf(stderr, "set-active: refusing: the table has no uboot_a/uboot_b, so this phone is not A/B; nothing written\n");
+		return -1;
+	}
 	full = spd_misc_size(io);
 	if (full < 0x820 || full > (uint64_t)SIZE_MAX) {
 		fprintf(stderr, "set-active: misc size %llu is not usable\n", (unsigned long long)full);
 		return -1;
 	}
-	img = malloc((size_t)full);
-	if (!img)
-		return -1;
-	if (spd_read_part_mem(io, "misc", 0, full, img)) {
-		free(img);
-		return -1;
+	if (have_part(io, "super"))
+		fprintf(stderr,
+			"set-active: note: this phone has a dynamic 'super' partition; slot %c's system/vendor "
+			"may be EMPTY if it was never updated (OTA/flash on that slot), and a normal boot on it fails\n",
+			which);
+	if (gate) {
+		char desc[128];
+		set_active_desc(which, bcb_kind, desc, sizeof(desc));
+		fprintf(stderr, "set-active: authorizing the patch: %s", desc);
+		authorize_write(yes, "set-active", "misc", (const uint8_t *)desc, strlen(desc));
 	}
-	if (spd_fill_slot_abc(abc, which)) {
-		free(img);
-		return -1;
+	if (bcb_kind >= 0) {
+		build_bcb(bcb, bcb_kind);
+		warn_boot_images(io, slot);
 	}
-	memcpy(img + 0x800, abc, 32);
-	if (gate)
-		authorize_write(yes, "set-active", "misc", img, (size_t)full);
-	if (ensure_misc_backup(io)) {
-		free(img);
+	if (misc_rmw_write(io, bcb_kind >= 0 ? bcb : NULL, bcb_kind >= 0 ? sizeof(bcb) : 0, which,
+		"set-active"))
 		return -1;
-	}
-	fprintf(stderr, "set-active: slot %c (32 bytes at misc+0x800, %llu-byte rewrite)\n",
-		which, (unsigned long long)full);
-	if (spd_write_part_buf(io, "misc", img, (size_t)full)) {
-		free(img);
-		return -1;
-	}
-	if (spd_misc_verify(io, img, (size_t)full)) {
-		free(img);
-		fprintf(stderr, "misc read-back mismatch: slot was NOT confirmed. Restore misc from the backup.\n");
-		return -1;
-	}
 	/* The write above dropped the cached slot; we know what it is now, so
 	 * say so rather than spending three frames re-reading misc. */
-	spd_slot_set(io, which == 'a' ? 1 : 2);
-	free(img);
+	spd_slot_set(io, slot);
 	return 0;
 }
 
@@ -1046,7 +1221,15 @@ static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab
 				return -1;
 			}
 		} else if (ops[k].kind == SPD_OP_SET_SLOT) {
-			if (set_active_slot(io, yes, ops[k].slot, 0)) {
+			int want = ops[k].slot == 'a' ? 1 : 2;
+			if (spd_active_slot(io) == want) {
+				/* M1: misc already says this slot; a rewrite would only
+				 * reset its tries and the other slot's state. */
+				fprintf(stderr, "write-parts: slot %c is already active; not touching the slot block\n",
+					ops[k].slot);
+				continue;
+			}
+			if (set_active_slot(io, yes, ops[k].slot, 0, -1)) {
 				free(ops);
 				return -1;
 			}
@@ -1125,6 +1308,7 @@ int main(int argc, char **argv)
 		{"no-line-state", no_argument, NULL, 'L'},
 		{"self-test", no_argument, NULL, 'T'},
 		{"dry-run", no_argument, NULL, 'D'},
+		{"spd-dump-slot", no_argument, NULL, 'S'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
@@ -1240,6 +1424,9 @@ int main(int argc, char **argv)
 		case 'D':
 			dry = 1;
 			break;
+		case 'S':
+			spd_dump_slot = 1;
+			break;
 		default:
 			usage();
 			return c == 'h' ? 0 : 2;
@@ -1273,6 +1460,24 @@ int main(int argc, char **argv)
 				spd_fill_slot_abc(abc, 'b') || memcmp(abc, slot_b, 32)) {
 				fprintf(stderr, "self-test: set-active slot block differs from spd_dump\n");
 				return 1;
+			}
+			/* M1: switching a valid block keeps the old slot (priority 15 -> 14,
+			 * tries and successful kept); --spd-dump-slot and an invalid block
+			 * give spd_dump's bytes. */
+			{
+				uint8_t bad[32];
+				if (spd_slot_abc_switch(abc, slot_a, 'b', 0) != 1 || abc[1] != 'b' ||
+					abc[12] != 0x6e || abc[14] != 0x6f ||
+					spd_slot_abc_switch(abc, slot_a, 'b', 1) != 0 || memcmp(abc, slot_b, 32)) {
+					fprintf(stderr, "self-test: set-active keep-slot block wrong\n");
+					return 1;
+				}
+				memcpy(bad, slot_a, 32);
+				bad[31] ^= 1;
+				if (spd_slot_abc_switch(abc, bad, 'b', 0) != 0 || memcmp(abc, slot_b, 32)) {
+					fprintf(stderr, "self-test: set-active bad-crc block not replaced\n");
+					return 1;
+				}
 			}
 		}
 		/* Pure computation over synthetic buffers: the header math and the
@@ -1930,8 +2135,26 @@ int main(int argc, char **argv)
 				fprintf(stderr, "set-active: want a or b\n");
 				return 1;
 			}
-			if (set_active_slot(io, yes, argv[i + 1][0], 1))
-				return 1;
+			{
+				int bcb_kind = -1;
+				if (i + 2 < argc && !strcmp(argv[i + 2], "--bcb")) {
+					if (i + 3 >= argc || (strcmp(argv[i + 3], "recovery") && strcmp(argv[i + 3], "fastboot"))) {
+						fprintf(stderr, "set-active: --bcb wants recovery or fastboot\n");
+						return 1;
+					}
+					bcb_kind = !strcmp(argv[i + 3], "fastboot");
+				}
+				if (set_active_slot(io, yes, argv[i + 1][0], 1, bcb_kind))
+					return 1;
+				if (bcb_kind >= 0) {
+					/* The BCB is on misc and verified; the reset is its own
+					 * result (H1), so the menu can report both. */
+					if (end_session(io, 0x05))
+						return 1;
+					i += 4;
+					break;
+				}
+			}
 			i += 2;
 		} else if (strcmp(cmd, "erase-part") == 0) {
 			char ename[40];
@@ -2062,13 +2285,13 @@ int main(int argc, char **argv)
 			break;
 		} else if (strcmp(cmd, "reset") == 0) {
 			need_fdl1(io, "reset");
-			if (spd_simple(io, 0x05))
+			if (end_session(io, 0x05))
 				return 1;
 			i++;
 			break; /* spd_dump: `if (!send_and_check(io)) break;` */
 		} else if (strcmp(cmd, "power-off") == 0 || strcmp(cmd, "poweroff") == 0) {
 			need_fdl1(io, "power-off");
-			if (spd_simple(io, 0x17))
+			if (end_session(io, 0x17))
 				return 1;
 			i++;
 			break;
