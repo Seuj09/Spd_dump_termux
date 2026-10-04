@@ -53,7 +53,7 @@ bash scripts/menu.sh
 ## 4. Connect the target
 
 1. Pick a menu option and press Enter.
-2. Hold the target's download-mode keys and plug it in through OTG.
+2. Hold the target's download-mode keys and plug it in through OTG. On most Unisoc phones that is volume down, but some models use volume up, both volume keys, or a boot key; use whatever your model needs to reach download mode.
 3. Tap **Allow** on the USB prompt as fast as you can.
 4. If the first try times out, unplug, wait about 5 seconds, and retry. Later runs usually skip the prompt.
 
@@ -71,6 +71,35 @@ bash scripts/spdhost-usb exec_addr 0x65015f08 fdl/ums9230/custom_exec_no_verify_
 
 - For another brand, swap `infinix` for its folder under `fdl/ums9230/` (universal, tecno, realme, itel, or an `alternatif/<model>` pair).
 - Swap `boot_a` for any name from the `parts` list, and the last argument for the output file.
+
+## Other chips: ums512 and sc9863a
+
+The FDL1 address and the exec stub belong to the chip. Menu option 3 sets all of them when you pick a chip and brand. spdhost refuses a stub that doesn't match the FDL1 address.
+
+| Chip | FDL1 address | Exec stub (hex mode 2) | FDL2 address |
+|---|---|---|---|
+| ums9230 | `0x65000800` | `0x65015f08` (`0x65015f48`) | `0x9efffe00` |
+| ums512 | `0x5500` | `0x3ee8` (`0x3f48`) | `0x9efffe00` |
+| sc9863a | `0x5000` | `0x4ee8` (`0x4f48`) | `0x9efffe00` |
+
+ums512 (Infinix; `realme` works the same way):
+
+```sh
+bash scripts/spdhost-usb exec_addr 0x3ee8 fdl/ums512/custom_exec_no_verify_3ee8.bin fdl fdl/ums512/infinix/fdl1-dl.bin 0x5500 fdl fdl/ums512/infinix/fdl2-dl.bin 0x9efffe00 parts
+```
+
+sc9863a (realme; `itel` works the same way):
+
+```sh
+bash scripts/spdhost-usb exec_addr 0x4ee8 fdl/sc9863a/custom_exec_no_verify_4ee8.bin fdl fdl/sc9863a/realme/fdl1-dl.bin 0x5000 fdl fdl/sc9863a/realme/fdl2-dl.bin 0x9efffe00 parts
+```
+
+## Slot changes and recovery
+
+- Menu Extra [2] changes the active slot in **one** session. spdhost reads misc, patches the slot block, writes the whole misc back and checks it. The other slot keeps its tries and its successful-boot flag.
+- Slot **b** is often empty on these phones. Before a recovery ending, spdhost checks `boot_b`/`vbmeta_b` and warns if they look blank.
+- **fastbootd** lives inside recovery and needs an Android 10+ recovery. Older phones only have plain recovery.
+- If the menu says misc verified OK but the reset didn't complete, misc already holds the change. Hold power to restart.
 
 ## Detection timing out?
 

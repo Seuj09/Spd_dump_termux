@@ -192,6 +192,30 @@ That line is three steps: send FDL1 to BootROM and execute it, send FDL2 to
 FDL1 and execute it, then print the partition list. On a PC drop
 `spdhost-usb` and call `./spdhost` directly.
 
+"Download-mode keys" depend on the model. Volume down is the most common,
+but some phones use volume up, both volume keys, or a boot key. The FDL1
+address and the exec stub are per chip. Menu option 3 sets them together when
+you pick a chip and brand, and spdhost refuses a stub whose chip doesn't
+match the FDL1 address (`6501xxxx` goes with `0x65000800`, `3ee8`/`3f48`
+with `0x5500`, `4ee8`/`4f48` with `0x5000`). Without a chosen chip the menu
+sends no exec stub at all. The stub is only looked up in `fdl/<chip>/`.
+
+```sh
+# ums9230 (Infinix)
+spdhost-usb exec_addr 0x65015f08 fdl/ums9230/custom_exec_no_verify_65015f08.bin fdl fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 fdl fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 parts
+# ums512 (Infinix)
+spdhost-usb exec_addr 0x3ee8 fdl/ums512/custom_exec_no_verify_3ee8.bin fdl fdl/ums512/infinix/fdl1-dl.bin 0x5500 fdl fdl/ums512/infinix/fdl2-dl.bin 0x9efffe00 parts
+# sc9863a (realme)
+spdhost-usb exec_addr 0x4ee8 fdl/sc9863a/custom_exec_no_verify_4ee8.bin fdl fdl/sc9863a/realme/fdl1-dl.bin 0x5000 fdl fdl/sc9863a/realme/fdl2-dl.bin 0x9efffe00 parts
+```
+
+The partition table's size unit is spd_dump's guess. On eMMC it's KiB
+(divisor 10). When any row is under 1 MiB, or on UFS, the divisor drops and
+spdhost warns, then checks one row of 2 MiB or more with spd_dump's
+`check_partition` probe. Read-only menu sessions (table fetch, misc read,
+chip UID, partition size) end with the configured ending, or power-off when
+that ending would write misc, so the phone isn't left sitting in FDL2.
+
 ### Commands
 
 Handshake and loaders:
@@ -386,14 +410,33 @@ spd_dump does.
 
 Slots and misc:
 
-- `set-active a|b` — rewrite the 32-byte slot block at misc `0x800` and
-  write the whole misc image back (backup and read-back, below).
+- `set-active a|b [--bcb recovery|fastboot]` — one session: read misc,
+  patch the 32-byte slot block at `0x800` (and with `--bcb` the 2048-byte
+  BCB at 0), write the whole misc back, read it back; with `--bcb` it then
+  resets. A switch keeps the other slot's tries and `successful_boot` when
+  misc holds a valid `bootloader_control` (magic `BCAB` and CRC). Otherwise,
+  or with the global `--spd-dump-slot`, it writes spd_dump's fresh block
+  (other slot priority 14, tries 1, successful 0). Refused unless the table
+  has `uboot_a` and `uboot_b`. Warns that slot b's system may be empty when
+  `super` exists. `--confirm-token` covers the patch, not the image: it is the
+  sha256 of the line `spdhost-set-active <a|b> <BCB sha256|none>\n`.
+  `write-parts` no longer rewrites the slot block when the target slot is
+  already active.
 - `misc-backup FILE` — read all of misc to FILE and read it back. Any
   failure stops the session before a write, even with `--keep-going`.
 - `reboot-recovery` / `reboot-fastboot` — synthesize the 2048-byte Android
-  BCB, write exactly those bytes to `misc`, then `reset`. See
+  BCB, splice it into misc at 0, write the **whole** misc back and verify it,
+  then `reset`. Before that, spdhost reads 4 KiB of the active slot's
+  `boot`, `recovery` (if present) and `vbmeta` and warns if the
+  `ANDROID!`/`VNDRBOOT`/`AVB0` magic is missing. fastbootd needs an
+  Android 10+ recovery. See
   [misc BCB images](#misc-bcb-images-phone-data-not-host-isa).
-- `reset`, `power-off` (also `poweroff`).
+- `reset`, `power-off` (also `poweroff`). If the device drops off the bus
+  (USB `NO_DEVICE`/`IO`) after the frame was sent, the command counts as
+  success: `device left the bus on reset (expected)`. A timeout is still a
+  failure. With `SPDHOST_STATUS_FILE=PATH`, spdhost appends `misc-verify=`
+  and `reset=`/`power-off=` lines, which the menu uses to report the two
+  results separately.
 - `chip-uid` — read-only.
 
 Anything that writes misc reads the whole partition first, unless the same
@@ -525,13 +568,19 @@ arm32 and arm64 Termux hosts.
 | `misc/misc-fastbootd.bin` | + `recovery\n--fastboot\n` @0x40 | `d5e5251516f466735c7bdd54b470902260bfc70c3d1aa7fe7b0092d76413ac26` |
 | `misc/misc-wipe.bin` | + `recovery\n--wipe_data\n` @0x40 | `bd6b67e852d6072e6fb87040f2ac40216d5b661b7fa661e7024569ecf8ddb3a7` |
 
-Each file is exactly 2048 (`0x800`) bytes. Do not write more than that at
-offset 0 — A/B `bootloader_control` lives at `0x800` — and do not
-`erase-part misc` as a shortcut. A 2048-byte BCB is written as one MIDST
-(`--step` is forced to `0x1000` for that write).
+Each file is exactly 2048 (`0x800`) bytes; A/B `bootloader_control` lives at
+`0x800`. Do not `erase-part misc` as a shortcut. spdhost never sends a bare
+2048-byte write. A BCB, whether from `reboot-*` or `write-part misc
+<2048-byte file>`, is spliced into the misc image the session just read, and
+the whole partition is written and read back. spd_dump writes the 2048 bytes
+alone, so a loader that programs misc in 4 KiB (or larger) units zero-fills
+`0x800..0xfff` and loses the slot block. The `--confirm-token` for a BCB is
+still the sha256 of those 2048 bytes.
 
 `reboot-recovery` and `reboot-fastboot` synthesize the same BCB TomKing
-uses after two matching loaders, write it to `misc`, then reset. They ask
+uses after two matching loaders, write it into `misc` (whole-partition
+read-modify-write), then reset. fastbootd is part of recovery and only exists
+on an Android 10+ recovery image. They ask
 you to type `yes` unless you pass `--yes` (CLI automation only); the menu
 uses `--confirm-token` instead, as described above.
 
@@ -680,20 +729,22 @@ status.
 Unlock `[8]` sends nothing until it can see `fdl2-cboot.bin` and some way to
 build `spl-unlock.bin`: the built-in `gen-spl-unlock`, or the release's
 x86-64 binary as a fallback. `fdl2-cboot.bin` is searched for next to the
-loaders of the model you selected, then in the current directory and the
-package root, and only last in `ums9230/infinix/` (where the release keeps it
-beside `fdl1-dl.bin`) — and that last place only while the selected model
-really is that ums9230/Infinix pair. Another model's `fdl2-cboot.bin` must
-never be picked up: this file is written to `uboot` right after `splloader`
-is erased, so the wrong phone's image is a brick. That is why the lookup does
-not climb out of an `alternatif/<model>/` folder to the brand-level copy: the
-sub-models are different phones, and the brand image would be the wrong one.
-`fdl2-cboot.bin` is a vendor blob — the model's own `fdl2-dl.bin` with some
-`NOP`s patched into branches — and is not derivable
-from anything else in the tree, so one copy ships per chip and brand
-(`fdl/<chip>/<brand>/`), covering every model the menu offers. The
-`alternatif/` sub-models ship none, because the vendor package has none for
-them; unlock refuses there rather than substitute the brand image.
+loaders of the model you selected. Once a model is selected (`DEVICE` set),
+that folder is the only place searched; the current directory and the
+package root are only tried before any model is chosen. Another model's
+`fdl2-cboot.bin` must never be picked up: this file is written to `uboot` right
+after `splloader` is erased, so the wrong phone's image is a brick. That is
+why the lookup doesn't climb out of an `alternatif/<model>/` folder to the
+brand-level copy.
+`fdl2-cboot.bin` is a vendor blob (the model's own `fdl2-dl.bin` with some
+`NOP`s patched into branches) and can't be derived from anything else in
+the tree. One copy ships per chip and brand (`fdl/<chip>/<brand>/`) and per
+ums9230 `alternatif/<model>/` (11 models, taken from the root release package
+after checking that each model's `fdl1-dl.bin`/`fdl2-dl.bin` match ours byte for
+byte). The generic `universal` set ships none: the vendor zip's copy there was
+byte-identical to its `fdl2-dl.bin`, so it isn't an unlock image, and unlock
+refuses `universal`. Before unlocking, the menu prefers `uboot_<active
+slot>.img` from the dump.
 `spl-unlock.bin` is generated from
 your own splloader dump. The unlock is several sessions: it reads splloader
 as 256 KiB, erases only after that backup exists, and the last session loads

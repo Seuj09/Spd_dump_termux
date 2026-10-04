@@ -265,7 +265,7 @@ if [[ -z $dev ]]; then
 	wait_s=${SPD_USB_WAIT:-90}
 	[[ $wait_s =~ ^[0-9]+$ ]] || wait_s=90
 	echo "Waiting up to ${wait_s} seconds. Plug the target in NOW." >&2
-	echo "Hold its download-mode keys (volume down) until this line changes." >&2
+	echo "Hold its download-mode keys (volume down on most models; some use volume up, both, or a boot key) until this line changes." >&2
 	echo "When the permission dialog appears, tap OK immediately." >&2
 
 	# Snapshot only. Deciding on this poll would open a charger that is

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Test menu: dump one partition, or reboot into a mode.
-# Default loaders: ums9230 Infinix fdl1-dl.bin and fdl2-dl.bin.
+# Loaders, addresses and the exec stub come from the chip/brand picked in
+# option 3 (ums9230, ums512, sc9863a); no chip chosen = no exec stub.
 set -u
 
 CONFIG="${SPDHOST_MENU_CONFIG:-$HOME/.spdhost-menu.conf}"
@@ -1007,7 +1008,8 @@ ready() {
 	echo
 	echo "Power the target off. Leave it unplugged. This phone is the USB host (OTG)."
 	echo "Press Enter. The next step waits 90 seconds."
-	echo "Only after it says 'Plug the target in NOW', hold volume down and connect the cable."
+	echo "Only after it says 'Plug the target in NOW', hold the download-mode keys and connect the cable"
+	echo "(volume down on most Unisoc phones; some use volume up, both volume keys, or a boot key)."
 	echo "Tap OK on the permission dialog as soon as it appears."
 	echo "The first try often misses the BootROM window. Unplug, run the same action, and plug in again."
 	echo "Cold-unplug ≥5 s between sessions. Success once does not make later tries stickier without a replug."
@@ -2384,7 +2386,7 @@ reboot_mode() {
 	echo "Reboot mode"
 	echo "[1] system"
 	echo "[2] recovery"
-	echo "[3] fastbootd"
+	echo "[3] fastbootd (needs an Android 10+ recovery)"
 	echo "[4] power off"
 	echo "[5] wipe userdata (via recovery BCB; destructive)"
 	echo "[6] restore misc from a backup (backup/misc-before-*.img)"
@@ -2952,14 +2954,17 @@ boot_after_menu() {
 	local choice
 	echo "What to do after a flash, restore, repartition, slot change, or dump."
 	echo "Same four endings as the release menu."
-	echo "Recovery and fastbootd write the 2048-byte BCB after the other work, then reset."
-	echo "misc+0x800 (the slot) is past that 2048-byte write, so the slot stays."
-	echo "A slot change with a recovery/fastbootd ending writes the BCB and the"
-	echo "slot together in one misc write (one confirm token = one misc write)."
+	echo "Recovery and fastbootd put the 2048-byte BCB into misc after the other work"
+	echo "(the whole misc is rewritten and read back, so the slot at misc+0x800 stays),"
+	echo "then reset. A slot change with a recovery/fastbootd ending does the slot and"
+	echo "the BCB in one set-active session (one confirm token = one misc write)."
+	echo "fastbootd lives in recovery: it needs an Android 10+ recovery image."
+	echo "Read-only sessions end with reset/power off; with a recovery/fastbootd"
+	echo "ending they power off (a read-only session writes no misc)."
 	echo "Now: $BOOT_AFTER"
 	echo "[1] system (reset)"
 	echo "[2] recovery"
-	echo "[3] fastbootd"
+	echo "[3] fastbootd (Android 10+ recovery only)"
 	echo "[4] power off"
 	echo "[0] Back"
 	read -r -p "Choice: " choice
@@ -3140,7 +3145,7 @@ unlock_bootloader_menu() {
 	echo "and splloader_bak, write fdl2-cboot.bin to uboot, send spl-unlock.bin as FDL1"
 	echo "(no FDL2), read 64 bytes at miscdata+8192, then write the backup back."
 	echo "After the erase the phone will not boot until that last write."
-	echo "Hold volume down and stay in download mode between the pauses."
+	echo "Hold the download-mode keys and stay in download mode between the pauses."
 	if ! confirm_dangerous "type dangerous to unlock the bootloader: "; then
 		return 1
 	fi
@@ -3265,7 +3270,7 @@ unlock_restore_help() {
 		write-part splloader "$spl" write-part uboot "$uboot" reset)
 	echo
 	echo "splloader may still be erased. An erased SPL should still drop into BootROM download mode"
-	echo "(power off, hold volume down, plug in), so it is recoverable with this tool."
+	echo "(power off, hold the download-mode keys, plug in), so it is recoverable with this tool."
 	echo "Backups:"
 	echo "  splloader: $spl"
 	echo "  uboot:     $uboot"
@@ -3628,7 +3633,7 @@ extra_menu() {
 	echo "[4] DANGEROUS: verity (vbmeta byte 0x7B; type the word dangerous)"
 	echo "[5] DANGEROUS: reset FRP (backup persist, then erase it)"
 	echo "[6] Reboot recovery"
-	echo "[7] Reboot fastbootd"
+	echo "[7] Reboot fastbootd (Android 10+ recovery)"
 	echo "[8] DANGEROUS: unlock bootloader (erases splloader until the last step)"
 	echo "[9] Hex mode (exec_addr $EXEC_ADDR_DEFAULT / $EXEC_ADDR_ALT)"
 	echo "[10] Boot mode after flash / restore (now: $BOOT_AFTER)"
