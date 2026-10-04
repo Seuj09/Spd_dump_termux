@@ -1404,6 +1404,13 @@ fetch_parts_table() {
 	fi
 	load_parts_state || { echo "could not convert $raw to bytes" >&2; return 1; }
 	echo "parts: units -> bytes (shift $PARTS_SHIFT, like spd_dump); slot: ${ACTIVE_SLOT:-unknown}"
+	if [[ $PARTS_SHIFT != 10 ]]; then
+		# L1: only shift 10 (KiB rows, eMMC) is a known unit. Anything else is
+		# UFS or spd_dump's heuristic lowered by a row under 1 MiB; spdhost
+		# printed what its one-row check_partition probe answered above.
+		echo "WARNING: this table's unit is a guess (shift $PARTS_SHIFT, not 10: UFS or a row under 1 MiB)."
+		echo "Sizes may be off by a power of two; see spdhost's 'check:' line above before a full dump or restore."
+	fi
 	return 0
 }
 

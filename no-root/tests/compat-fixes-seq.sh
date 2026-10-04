@@ -231,6 +231,9 @@ check "L6: a stub in the working directory is not a default (fdl/<chip>/ only) (
 out=$(source ./menu_env.sh; BOOT_AFTER=reboot-recovery; RUNNER=(echo); fetch_parts_table 2>&1)
 check "L2: fetch_parts_table ends with power-off when the ending writes misc" \
 	bash -c '[[ $1 == *"misc-slotinfo.img power-off"* ]]' _ "$out"
+out=$(export M=3 MOCK_PTABLE=$tmp/pt512; source ./menu_env.sh; BOOT_AFTER=reset; fetch_parts_table 2>&1)
+check "L1 menu: a shift-11 table is called a guess after the table fetch" \
+	bash -c '[[ $1 == *"WARNING: this table'"'"'s unit is a guess (shift 11"* ]] && grep -q "WARNING: uboot_a is 2097152 bytes by the table" m3.err' _ "$out"
 out=$(source ./menu_env.sh; BOOT_AFTER=reset; RUNNER=(echo); chip_uid_action 2>&1)
 check "L2: chip-uid ends with the configured reset" bash -c '[[ $1 == *"chip-uid reset"* ]]' _ "$out"
 out=$(unset SPDHOST_EXEC_ADDR; source ./menu_env.sh; unset SPDHOST_EXEC_ADDR; SOC= EXEC_ADDR=; exec_addr_value; echo "[end]")
