@@ -5,6 +5,8 @@
 #   U2  splloader_bak is erased before splloader
 #   U4  the uboot backup is restored to the row it was dumped from
 #   U6  fdl2-cboot.bin / spl-unlock.bin come only from the model's own folder
+#   G2  non-A/B, an unverified table or an oversized cboot is refused before the
+#       erase; cboot goes to uboot only; the restore reports its two writes apart
 # The runner is a fake that records each session's argv and writes the files a
 # backup session would; confirm_dangerous/pause/ready are stubbed (the typed
 # word is the pty tests' job, in write-seq.sh).
@@ -19,10 +21,33 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 cd "$tmp"
 # The runner: SLOTFILE names the uboot row the "phone" dumps (uboot_a,
 # uboot_b or uboot); FAIL_ON is a glob of argv that exits 3.
+# G2: every session that names `parts FILE` gets a table written there (A/B by
+# default; SLOTFILE=uboot gives a non-A/B one with a uboot_bak twin; VERIFIED=0
+# marks the unit unconfirmed; UBOOT_KIB sizes the uboot rows). Each
+# write-part-plain NAME logs write-NAME=ok to SPDHOST_STATUS_FILE, except
+# FAIL_WRITE=NAME, which logs failed and ends the session like spdhost does.
 cat > run <<'R'
 #!/bin/bash
 printf '%s\n' "$*" >> "$REC"
 if [[ -n ${FAIL_ON:-} && "$*" == $FAIL_ON ]]; then exit 3; fi
+prev=; for a in "$@"; do
+  if [[ $prev == parts ]]; then
+    { echo "# spdhost-parts shift 10 verified ${VERIFIED:-1}"
+      if [[ ${SLOTFILE:-uboot_a} == uboot ]]; then echo "uboot ${UBOOT_KIB:-1024}"; echo "uboot_bak ${UBOOT_KIB:-1024}"
+      else echo "uboot_a ${UBOOT_KIB:-1024}"; echo "uboot_b ${UBOOT_KIB:-1024}"; fi
+      echo "misc 1024"; echo "miscdata 1024"; } > "$a"
+  fi
+  prev=$a
+done
+prev=; for a in "$@"; do
+  if [[ $prev == write-part-plain ]]; then
+    if [[ $a == "${FAIL_WRITE:-}" ]]; then
+      [[ -n ${SPDHOST_STATUS_FILE:-} ]] && echo "write-$a=failed" >> "$SPDHOST_STATUS_FILE"; exit 1
+    fi
+    [[ -n ${SPDHOST_STATUS_FILE:-} ]] && echo "write-$a=ok" >> "$SPDHOST_STATUS_FILE"
+  fi
+  prev=$a
+done
 case "$*" in
   *"read-part splloader 0 262144 "*)
     prev=; spl=; for a in "$@"; do [[ $prev == 262144 ]] && spl=$a; prev=$a; done
@@ -37,12 +62,15 @@ R
 chmod +x run
 M=fdl/ums9230/testphone
 mkdir -p $M && printf c > $M/fdl2-cboot.bin && printf u > $M/spl-unlock.bin && printf 1 > $M/fdl1.bin && printf 2 > $M/fdl2.bin
+B=fdl/ums9230/bigphone
+mkdir -p $B && head -c 2048 /dev/zero > $B/fdl2-cboot.bin && printf u > $B/spl-unlock.bin && printf 1 > $B/fdl1.bin && printf 2 > $B/fdl2.bin
 unlock_run() { # LABEL [VAR=value ...]: one unlock_bootloader_menu run in a fresh shell
 	local L=$1; shift
 	: > "rec_$L"
 	env "$@" REC="$tmp/rec_$L" SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER="$tmp/run" SPDHOST_MENU_CONFIG="$tmp/none.conf" \
 		bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
-		FDL1=$2/fdl/ums9230/testphone/fdl1.bin FDL1_ADDR=0x65000800 FDL2=$2/fdl/ums9230/testphone/fdl2.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 DEVICE=testphone
+		MD=${MODEL:-testphone}
+		FDL1=$2/fdl/ums9230/$MD/fdl1.bin FDL1_ADDR=0x65000800 FDL2=$2/fdl/ums9230/$MD/fdl2.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 DEVICE=$MD
 		ACTIVE_SLOT=${ACTIVE_SLOT:-a}
 		confirm_dangerous() { return 0; }; pause() { return 0; }; ready() { return 0; }; cls() { :; }
 		need_loaders() { return 0; }; exec_addr_value() { return 1; }
@@ -59,7 +87,7 @@ unlock_run u1
 check "U1: the backup session runs even though backup_spl/ looks complete" \
 	grep -q 'read-part splloader 0 262144 .*/backup_spl/unlock-[0-9-]*/splloader.img' rec_u1
 check "U1: the restore writes this run's files, never the stale ones" \
-	bash -c "grep 'write-part splloader' rec_u1 | grep -q '/backup_spl/unlock-[0-9-]*/splloader.img' && ! grep -q 'backup_spl/splloader.img\|backup_spl/uboot_a.img' rec_u1"
+	bash -c "grep 'write-part-plain splloader' rec_u1 | grep -q '/backup_spl/unlock-[0-9-]*/splloader.img' && ! grep -q 'backup_spl/splloader.img\|backup_spl/uboot_a.img' rec_u1"
 check "U1: the backup is dumped before the erase" \
 	bash -c "awk '/read-part splloader 0 262144/{b=NR} /danger-erase/{e=NR} END{exit !(b && e && b < e)}' rec_u1"
 check "U1: the stale backup is left alone" bash -c "head -c 9 backup_spl/splloader.img | grep -q STALE-SPL"
@@ -91,20 +119,39 @@ check "U2: the erase session names splloader_bak first, then splloader" \
 	bash -c "grep -q 'danger-erase splloader_bak danger-erase splloader reset' rec_u1"
 unlock_run u2fail FAIL_ON='*danger-erase*'
 check "U2: a failed erase session skips cboot and the unlock loader but still restores" \
-	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part splloader' rec_u2fail"
+	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part-plain splloader' rec_u2fail"
 
 # ---- U4 ---------------------------------------------------------------------------------
 # The phone dumped uboot_b (slot b active at backup time); the menu's own
 # ACTIVE_SLOT says a. The restore must go to uboot_b, not to the active name.
 unlock_run u4 SLOTFILE=uboot_b ACTIVE_SLOT=a
 check "U4: a uboot_b backup is restored to uboot_b" \
-	bash -c "grep 'write-part splloader' rec_u4 | grep -q 'write-part uboot_b .*/uboot_b.img'"
-unlock_run u4fail SLOTFILE=uboot_b ACTIVE_SLOT=a FAIL_ON='*write-part splloader*'
+	bash -c "grep 'write-part-plain splloader' rec_u4 | grep -q 'write-part-plain uboot_b .*/uboot_b.img'"
+unlock_run u4fail SLOTFILE=uboot_b ACTIVE_SLOT=a FAIL_ON='*write-part-plain splloader*'
 check "U4: the printed restore command also targets uboot_b" \
-	bash -c "grep -q 'RESTORE FAILED' out_u4fail && grep -A30 'Restore command' out_u4fail | grep -q 'write-part uboot_b .*uboot_b.img'"
-unlock_run u4nab SLOTFILE=uboot
-check "U4: a non-A/B uboot.img goes back to uboot" \
-	bash -c "grep 'write-part splloader' rec_u4nab | grep -q 'write-part uboot .*/uboot.img'"
+	bash -c "grep -q 'RESTORE FAILED' out_u4fail && grep -A30 'Restore command' out_u4fail | grep -q 'write-part-plain uboot_b .*uboot_b.img'"
+
+# ---- G2 ---------------------------------------------------------------------------------
+check "G2: cboot goes to uboot only (write-part-plain), never a twin write-part" \
+	bash -c "grep -q 'write-part-plain uboot .*fdl2-cboot.bin' rec_u1 && ! grep -q 'write-part uboot' rec_u1"
+unlock_run g2nab SLOTFILE=uboot
+check "G2: non-A/B (uboot + uboot_bak, no uboot_a/_b) is refused after the backup, before any erase or write" \
+	bash -c "grep -q 'UNLOCK REFUSED: this phone is not A/B' out_g2nab && grep -q 'rc=1' out_g2nab &&
+		grep -q 'read-part splloader 0 262144' rec_g2nab && ! grep -q 'danger-erase\|write-part\|spl-unlock.bin' rec_g2nab"
+unlock_run g2unv VERIFIED=0
+check "G2: a table whose unit is unverified is refused before the erase" \
+	bash -c "grep -q 'UNLOCK REFUSED: this table.s size unit is a guess' out_g2unv && ! grep -q 'danger-erase\|write-part' rec_g2unv"
+unlock_run g2big MODEL=bigphone UBOOT_KIB=1
+check "G2: a cboot bigger than the uboot row is refused before the erase, not after" \
+	bash -c "grep -q 'UNLOCK REFUSED: fdl2-cboot.bin is 2048 bytes and uboot_a is 1024 bytes' out_g2big && ! grep -q 'danger-erase\|write-part' rec_g2big"
+unlock_run g2ub FAIL_WRITE=uboot_a
+check "G2: restore reports splloader and uboot apart: splloader RESTORED, uboot_a not" \
+	bash -c "grep -q 'splloader: RESTORED' out_g2ub && grep -q 'uboot_a: NOT restored (the write was refused or failed)' out_g2ub &&
+		grep -q 'uboot_a may still hold fdl2-cboot.bin' out_g2ub && grep -q 'RESTORE INCOMPLETE' out_g2ub &&
+		! grep -q 'splloader is still erased' out_g2ub && grep -q 'rc=1' out_g2ub"
+unlock_run g2ok
+check "G2: a clean restore says both were written" \
+	bash -c "grep -q 'Restore: splloader written, uboot_a written.' out_g2ok && grep -q 'rc=0' out_g2ok"
 out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
 	unlock_uboot_row /x/uboot_a.img; unlock_uboot_row /x/uboot_b.img; unlock_uboot_row /x/uboot.img; unlock_uboot_row /x/other.img' _ "$root" | tr '\n' ' ')
 check "U4: unlock_uboot_row maps file names to rows [$out]" test "$out" = "uboot_a uboot_b uboot uboot "

@@ -383,6 +383,16 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 		io->storage == SPD_STORAGE_NAND || !strncmp(resolved, "splloader", 9) ||
 		io->nparts <= 0 || strlen(resolved) + 4 >= sizeof(bak))
 		return spd_write_part(io, resolved, path);
+	/* G2: write-part-plain. The _bak twin keeps its own image and nothing is
+	 * echoed to the table. Said out loud when a twin exists, because it is
+	 * the one difference from spd_dump's `w`. */
+	if (io->write_no_twin) {
+		snprintf(bak, sizeof(bak), "%s_bak", resolved);
+		if (spd_lookup_part(io, bak, 0, bak, sizeof(bak), &bsz) == 0)
+			fprintf(stderr, "write %s: plain write; %s is left as it is (no w_force,"
+				" no second copy)\n", resolved, bak);
+		return spd_write_part(io, resolved, path);
+	}
 	snprintf(bak, sizeof(bak), "%s_bak", resolved);
 	bk = spd_lookup_part(io, bak, 0, bak, sizeof(bak), &bsz);
 	if (bk != 0)

@@ -152,6 +152,8 @@ static void usage(void)
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
 		"                          the device is not A/B. Does not edit vbmeta.\n"
+		"  write-part-plain NAME FILE  write-part to NAME only: never the NAME_bak\n"
+		"                          copy, never a temporary repartition.\n"
 		"  wof NAME OFF FILE      spd_dump wof: put FILE into the partition at\n"
 		"                         OFF. At OFF 0 the partition becomes exactly\n"
 		"                         FILE; past 0 the whole partition is read to\n"
@@ -586,7 +588,8 @@ static int is_command(const char *s)
 		strcmp(s, "check-part") == 0 ||
 		strcmp(s, "part-size") == 0 || strcmp(s, "size_part") == 0 ||
 		strcmp(s, "part_size") == 0 ||
-		strcmp(s, "write-part") == 0 || strcmp(s, "w-force") == 0 ||
+		strcmp(s, "write-part") == 0 || strcmp(s, "write-part-plain") == 0 ||
+		strcmp(s, "w-force") == 0 ||
 		strcmp(s, "w_force") == 0 || strcmp(s, "erase-part") == 0 ||
 		strcmp(s, "wof") == 0 || strcmp(s, "wov") == 0 ||
 		strcmp(s, "firstmode") == 0 || strcmp(s, "path") == 0 ||
@@ -2011,10 +2014,23 @@ int main(int argc, char **argv)
 			}
 			fprintf(stderr, "misc-backup-expect: misc is unchanged (sha256 %s)\n", got);
 			i += 3;
-		} else if (strcmp(cmd, "write-part") == 0) {
-			need(argc, i, 2, "write-part");
-			need_fdl2(io, "write-part");
-			if (do_write_part(io, yes, argv[i + 1], argv[i + 2]))
+		} else if (strcmp(cmd, "write-part") == 0 || strcmp(cmd, "write-part-plain") == 0) {
+			/* G2: write-part-plain is write-part without the NAME_bak twin
+			 * (and its temporary repartition): the same confirm, the same
+			 * size and misc guards. SPDHOST_STATUS_FILE gets one
+			 * write-NAME=ok|failed line per write, so a session that
+			 * writes two images reports them apart. */
+			char key[64];
+			int wrc;
+			need(argc, i, 2, cmd);
+			need_fdl2(io, cmd);
+			io->write_no_twin = strcmp(cmd, "write-part-plain") == 0;
+			snprintf(key, sizeof(key), "write-%s", argv[i + 1]);
+			status_note(key, "started");
+			wrc = do_write_part(io, yes, argv[i + 1], argv[i + 2]);
+			io->write_no_twin = 0;
+			status_note(key, wrc ? "failed" : "ok");
+			if (wrc)
 				return 1;
 			i += 3;
 		} else if (strcmp(cmd, "wof") == 0 || strcmp(cmd, "wov") == 0) {

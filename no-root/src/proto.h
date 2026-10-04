@@ -73,6 +73,10 @@ struct spd {
 	/* 1 once io->ptab is a table this session sent (repartition), not one it
 	 * read: a later partition-list is then not a backup of the device's. */
 	int ptab_from_xml;
+	/* G2: set by `write-part-plain`: spd_write_named writes NAME only -- no
+	 * w_force rename, no NAME_bak copy -- so the second copy keeps what it
+	 * held (the unlock's cboot must not land in both uboot copies). */
+	int write_no_twin;
 	/* spd_dump's gpt_failed latch (spd_dump.c:144 `int gpt_failed = 1`, cleared
 	 * by a successful partition_list at common.c:1143, set to -1 by a refusal at
 	 * common.c:1088/1095). Every call site reads `if (gpt_failed == 1)` before

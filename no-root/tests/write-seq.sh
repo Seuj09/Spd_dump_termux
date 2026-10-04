@@ -714,6 +714,14 @@ rec = work / "ran"
 runner = work / "run"
 runner.write_text("""#!/bin/sh
 printf '%%s\\n' "$*" >> "%s"
+# G2: the unlock checks the live table before the erase, so a session that
+# names `parts FILE` leaves an A/B table there, as spdhost would.
+prev=; for a in "$@"; do
+  if [ "$prev" = parts ]; then
+    printf '# spdhost-parts shift 10 verified 1\nuboot_a 1024\nuboot_b 1024\nmisc 1024\nmiscdata 1024\n' > "$a"
+  fi
+  prev=$a
+done
 case "$*" in
   *read-part*splloader*|*dump*splloader*)
     # U1: the menu names a fresh folder each run; write where it says.
@@ -808,6 +816,14 @@ out = work / "out"
 runner = work / "run"
 runner.write_text("""#!/bin/sh
 printf '%%s\\n' "$*" >> "%s"
+# G2: the unlock checks the live table before the erase, so a session that
+# names `parts FILE` leaves an A/B table there, as spdhost would.
+prev=; for a in "$@"; do
+  if [ "$prev" = parts ]; then
+    printf '# spdhost-parts shift 10 verified 1\nuboot_a 1024\nuboot_b 1024\nmisc 1024\nmiscdata 1024\n' > "$a"
+  fi
+  prev=$a
+done
 case "$*" in
   *read-part" "splloader" "0" "262144*)
     prev=; spl=; for a in "$@"; do [ "$prev" = 262144 ] && spl=$a; prev=$a; done
@@ -816,7 +832,7 @@ case "$*" in
     printf ub > "$d/uboot_a.img"
     printf 'slot a\\nok uboot_a\\n' > "$d/dump-manifest.txt"
     ;;
-  *write-part" "splloader*uboot_a.img*)
+  *write-part-plain" "splloader*uboot_a.img*)
     exit 3
     ;;
 esac

@@ -3274,6 +3274,9 @@ unlock_bootloader_menu() {
 		return 1
 	fi
 	echo "Backup: $spl and $uboot."
+	# G2: every refusal that depends on the table happens HERE, before the
+	# erase -- not as a write refused after splloader is already gone.
+	unlock_preflight "$cboot" "$uboot" "$work" || return 1
 	if [[ -z $unlock ]]; then
 		unlock=$work/spl-unlock.bin
 		echo "Building spl-unlock.bin from $spl."
@@ -3298,14 +3301,16 @@ unlock_bootloader_menu() {
 		echo "The unlock loader is skipped. The last session still writes $work back."
 	fi
 	if (( erase_rc == 0 )); then
-	echo "Next session writes $cboot onto uboot (the active slot name)."
+	echo "Next session writes $cboot onto uboot (the active slot name) only."
 	echo "spdhost asks you to type yes for that write."
 	echo "A file larger than the uboot partition is refused, and the backup is written back."
 	pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
 	ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
 	rc=0
+	# G2: write-part-plain: uboot only. A NAME_bak twin (non-A/B) is never
+	# given the cboot image and the table is never re-sent for it.
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" write-part uboot "$cboot" reset || rc=$?
+		parts "$(parts_cache_path)" write-part-plain uboot "$cboot" reset || rc=$?
 	if [[ $rc != 0 ]]; then
 		echo "Modified uboot was not written (exit $rc). Skipping the unlock loader."
 	else
@@ -3338,20 +3343,105 @@ unlock_bootloader_menu() {
 	# nothing. Say it loudly instead, and point at the two files that fix it.
 	# U4: the uboot backup goes back to the row it was dumped from (its own
 	# file name: uboot_a, uboot_b or uboot), not to whatever slot is active now.
-	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+	# G2: the two writes are reported apart (SPDHOST_STATUS_FILE: one
+	# write-NAME=ok|failed|started line each), so a refused uboot write is
+	# not reported as "splloader is still erased" when splloader was written.
+	local st row wspl wub
+	row=$(unlock_uboot_row "$uboot")
+	st=$(mktemp "$(spd_tmpdir 2>/dev/null || echo /tmp)/spdhost-status.XXXXXX" 2>/dev/null) || st=
+	rc=0
+	SPDHOST_STATUS_FILE=$st run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" \
-		write-part splloader "$spl" write-part "$(unlock_uboot_row "$uboot")" "$uboot" reset; then
+		write-part-plain splloader "$spl" write-part-plain "$row" "$uboot" reset || rc=$?
+	wspl=$( [[ -n $st ]] && awk -F= '$1 == "write-splloader" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	wub=$( [[ -n $st ]] && awk -F= -v k="write-$row" '$1 == k { v = $2 } END { print v }' "$st" 2>/dev/null)
+	[[ -n $st ]] && rm -f "$st"
+	if (( rc == 0 )); then
+		echo "Restore: splloader written, $row written."
+		return 0
+	fi
+	echo
+	case $wspl in
+		ok) echo "splloader: RESTORED (written from $spl); the phone has its loader back." ;;
+		failed|started) echo "splloader: NOT restored (the write was refused or failed); it is still erased." ;;
+		*) echo "splloader: NOT restored (the session stopped before that write); it is still erased." ;;
+	esac
+	case $wub in
+		ok) echo "$row: restored from $uboot." ;;
+		failed|started) echo "$row: NOT restored (the write was refused or failed)." ;;
+		*) echo "$row: NOT restored (the session stopped before that write)." ;;
+	esac
+	if [[ $wub != ok ]]; then
+		if (( erase_rc == 0 )); then
+			echo "  $row may still hold $(basename "$cboot") from the unlock step, not your backup."
+		else
+			echo "  The unlock step never wrote $row, so it should still hold the stock image."
+		fi
+	fi
+	if [[ $wspl != ok ]]; then
 		echo
 		echo "RESTORE FAILED. splloader is still erased and the phone will not boot."
 		echo "Do not unplug. Keep it in download mode and run this session again"
 		echo "until it succeeds; the backups are still on disk:"
-		echo "  $spl"
-		echo "  $uboot"
-		echo "spdhost writes an image only after you type yes, so a lost USB"
-		echo "connection or an aborted prompt is the usual cause, not bad files."
-		unlock_restore_help "$spl" "$uboot"
+	else
+		echo
+		echo "RESTORE INCOMPLETE: only $row is left. Run the restore again for it;"
+		echo "the backups are still on disk:"
+	fi
+	echo "  $spl"
+	echo "  $uboot"
+	echo "spdhost writes an image only after you type yes, so a lost USB"
+	echo "connection or an aborted prompt is the usual cause, not bad files."
+	unlock_restore_help "$spl" "$uboot"
+	return 1
+}
+
+# G2: the unlock's checks that need the live table, run after the backup
+# session read it and BEFORE the erase. Each refusal leaves the phone as it
+# was: nothing erased, nothing written.
+#   - the table's unit must be known (a guessed unit cannot size uboot),
+#   - non-A/B (no uboot_a / uboot_b row) is refused outright: the reference's
+#     non-A/B write goes through a temporary repartition (w_force) and also
+#     overwrites uboot_bak, while splloader is erased, and a plain uboot write
+#     has not been proven on a real non-A/B phone yet,
+#   - fdl2-cboot.bin must fit the uboot row it will be written to.
+unlock_preflight() {
+	local cboot=$1 uboot=$2 work=$3 bytes row rowsz csz
+	bytes=$(parts_bytes_path)
+	if ! load_parts_state || [[ ! -s $bytes ]]; then
+		echo "UNLOCK REFUSED: the backup session left no partition table, so the menu"
+		echo "cannot check this phone's layout. Nothing was erased or written."
+		echo "The backup stays in $work."
 		return 1
 	fi
+	if [[ $PARTS_VERIFIED == 0 || ( -z $PARTS_VERIFIED && $PARTS_SHIFT != 10 ) ]]; then
+		echo "UNLOCK REFUSED: this table's size unit is a guess the device did not confirm"
+		echo "(shift $PARTS_SHIFT), so the uboot size cannot be checked."
+		echo "Nothing was erased or written. The backup stays in $work."
+		return 1
+	fi
+	if ! grep -qE '^uboot_[ab][[:space:]]' "$bytes"; then
+		echo "UNLOCK REFUSED: this phone is not A/B (its table has no uboot_a / uboot_b)."
+		echo "On a non-A/B phone the unlock would have to write uboot while splloader is"
+		echo "erased, and spd_dump does that with a temporary repartition that also"
+		echo "overwrites uboot_bak. That path has not been proven on a real non-A/B"
+		echo "phone, so it is not offered yet. Nothing was erased or written."
+		echo "The backup stays in $work."
+		return 1
+	fi
+	row=$(unlock_uboot_row "$uboot")
+	rowsz=$(awk -v n="$row" '$1 == n { print $2; exit }' "$bytes")
+	csz=$(stat -c %s "$cboot" 2>/dev/null || echo -1)
+	if [[ ! $rowsz =~ ^[0-9]+$ ]] || (( rowsz <= 0 )); then
+		echo "UNLOCK REFUSED: $row is not in the live table. Nothing was erased or written."
+		return 1
+	fi
+	if (( csz <= 0 || csz > rowsz )); then
+		echo "UNLOCK REFUSED: $(basename "$cboot") is $csz bytes and $row is $rowsz bytes;"
+		echo "it would be refused after the erase. Nothing was erased or written."
+		return 1
+	fi
+	return 0
 }
 
 # M4: after the erase session the phone has no splloader until the last
@@ -3368,7 +3458,7 @@ unlock_restore_help() {
 		cmd+=(exec_addr "$ea" "$stub")
 	fi
 	cmd+=(fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" parts "$(parts_cache_path)"
-		write-part splloader "$spl" write-part "$(unlock_uboot_row "$uboot")" "$uboot" reset)
+		write-part-plain splloader "$spl" write-part-plain "$(unlock_uboot_row "$uboot")" "$uboot" reset)
 	echo
 	echo "splloader may still be erased. An erased SPL should still drop into BootROM download mode"
 	echo "(power off, hold the download-mode keys, plug in), so it is recoverable with this tool."

@@ -338,6 +338,10 @@ Partition table and reads:
 
 Writes:
 
+- `write-part-plain NAME FILE` — `write-part` to `NAME` only: no `NAME_bak`
+  copy and no temporary repartition, even on a non-A/B phone. Same confirm.
+  With `SPDHOST_STATUS_FILE` set, each `write-part`/`write-part-plain` adds a
+  `write-NAME=started|ok|failed` line.
 - `write-part NAME FILE` — one partition, one file. `misc` accepts a
   2048-byte BCB or a file the size of the whole partition. A name containing
   `fixnv1` uses spd_dump's NV framing (checksum in the start packet);
@@ -767,6 +771,15 @@ your own splloader dump. The unlock is several sessions: it reads splloader
 as 256 KiB, erases only after that backup exists, and the last session loads
 `parts` before writing splloader and the active uboot name back. A failed
 erase skips the unlock loader and still writes that backup back.
+Right after the backup session, before anything is erased, the menu checks
+the table it just read and refuses the unlock (nothing erased or written) when
+the table's size unit is unverified, when `fdl2-cboot.bin` is bigger than the
+uboot row, or when the phone is **not A/B** (no `uboot_a`/`uboot_b`). Non-A/B
+is refused for now because spd_dump writes uboot there through a temporary
+repartition and also copies the image into `uboot_bak`, all while splloader
+is erased, and a plain `uboot` write has not been proven on a real non-A/B
+phone. The cboot image goes to `uboot` only (`write-part-plain`), and the
+final restore reports the splloader write and the uboot write separately.
 
 Smoke test `[5]` is a safe, read-only check: `--self-test`, an environment
 check, a summary of the current BootROM-hello settings, and — only if

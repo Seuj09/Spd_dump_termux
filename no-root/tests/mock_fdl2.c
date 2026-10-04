@@ -91,8 +91,12 @@ static void load_tab(void)
 	/* MOCK_PTABLE_MIB=1: the file's numbers are MiB, as a phone whose FDL2
 	 * reports MiB rows (spd_dump divisor 0) sends them. tab[] stays KiB, so
 	 * the size a probe finds agrees with the unit the table claims. */
-	while (ntab < 128 && fscanf(f, "%36s %llu", nm, &kb) == 2) {
-		strcpy(tab[ntab].n, nm); tab[ntab].kb = getenv("MOCK_PTABLE_MIB") ? kb << 10 : kb; ntab++; }
+	/* A `#` line is skipped: some tests hand `parts` the table file itself as
+	 * its output, and spdhost's parts file starts with a unit comment (G1). */
+	{ char line[256];
+	  while (ntab < 128 && fgets(line, sizeof line, f)) {
+		if (line[0] == '#' || sscanf(line, "%36s %llu", nm, &kb) != 2) continue;
+		strcpy(tab[ntab].n, nm); tab[ntab].kb = getenv("MOCK_PTABLE_MIB") ? kb << 10 : kb; ntab++; } }
 	fclose(f);
 }
 static int streq_env(const char *e, const char *n) { const char *v = getenv(e); return v && !strcmp(v, n); }
