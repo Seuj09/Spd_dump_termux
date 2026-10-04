@@ -105,8 +105,8 @@ sh m1none --dangerous parts pt.txt erase-part nosuch; rc=$?
 check "M1: a name not in the table is refused, nothing sent (rc $rc)" \
 	bash -c "[ $rc != 0 ] && [ -z \"\$(erase_frames sh_m1none.seq)\" ] && grep -q 'not in the live partition table' sh_m1none.log"
 ./sh --help > help.txt 2>&1
-check "M2: the help says erase-part userdata writes no wipe BCB and leaves persist" \
-	bash -c "grep -q 'does NOT write the wipe BCB' help.txt && grep -q 'does NOT erase persist' help.txt"
+check "M2: the help says erase-part userdata is refused (no wipe BCB, persist left)" \
+	bash -c "grep -q 'erase-part userdata is' help.txt && grep -q 'NOT write the wipe BCB' help.txt && grep -q 'does NOT erase' help.txt"
 
 # ------------------------------------------------------------------ M3
 sh m3a parts pt.txt misc-backup m3a.img; rc=$?
@@ -155,6 +155,29 @@ printf 'A' > l6/boot_a.img
 sh l6 parts pt.txt write-files l6; rc=$?
 check "L6: persist-before-*.img is not even considered (rc $rc)" \
 	bash -c "[ $rc = 0 ] && ! grep -q 'persist-before' sh_l6.log && grep -qE '^SEQ 01 .*$(u16 boot_a)' sh_l6.seq"
+
+# ------------------------------------------------- erase-part userdata (refused)
+for n in userdata; do
+	sh eud --dangerous parts pt.txt erase-part $n; rc=$?
+	check "erase-part $n is refused with the [10] -> [1] pointer, nothing erased (rc $rc)" \
+		bash -c "[ $rc != 0 ] && [ -z \"\$(erase_frames sh_eud.seq)\" ] && grep -q '\[10\] -> \[1\]' sh_eud.log && grep -q 'Nothing erased' sh_eud.log"
+done
+
+# ------------------------------------------------- --step clamp (spd_dump blk_size)
+for pair in 0xffff:0xf800 65024:0xf800 0x801:0x1000 100:0x800 0xf800:-; do
+	in=${pair%%:*} want=${pair#*:}
+	./sh --step "$in" --self-test > step_$in.log 2>&1; rc=$?
+	if [[ $want == - ]]; then
+		check "--step $in is kept as is (rc $rc)" bash -c "[ $rc = 0 ] && ! grep -q '^step: ' step_$in.log"
+	else
+		check "--step $in becomes $want (rc $rc)" bash -c "[ $rc = 0 ] && grep -q \"^step: $in -> $want\" step_$in.log"
+	fi
+done
+./sh --step 0 --self-test > step_0.log 2>&1; rc=$?
+check "--step 0 is rejected (rc $rc)" bash -c "[ $rc = 2 ] && grep -q 'bad --step' step_0.log"
+sh stp801 --step=0x801 parts pt.txt read-part boot_a 0 0x3000 stp801.bin
+sh stp1000 --step=0x1000 parts pt.txt read-part boot_a 0 0x3000 stp1000.bin
+check "--step 0x801 reads in the same frames as 0x1000" cmp -s sh_stp801.seq sh_stp1000.seq
 
 echo "audit-fixes-seq: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

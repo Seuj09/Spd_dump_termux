@@ -122,17 +122,23 @@ for name in persist splloader all; do
 	check "erase-part $name: refused by the menu, no session" test ! -s "$tmp/ran/log"
 done
 
+for name in userdata userdata_a userdata_b; do
+	tr=$(menu erase_part_action "Partition name to erase" "$name\r")
+	check "erase-part $name: refused by the menu, no session" test ! -s "$tmp/ran/log"
+	check "erase-part $name: the menu points at [10] -> [1]" pty_has "$tr" "[10] -> [1]"
+done
+
 tr=$(menu erase_part_action \
-	"Partition name to erase" 'userdata\r' \
-	"type dangerous to erase userdata" 'yes\r')
+	"Partition name to erase" 'cache\r' \
+	"type dangerous to erase cache" 'yes\r')
 check "erase-part: 'yes' is not accepted for erase" test ! -s "$tmp/ran/log"
 
 tr=$(menu erase_part_action \
-	"Partition name to erase" 'userdata\r' \
-	"type dangerous to erase userdata" 'dangerous\r' \
+	"Partition name to erase" 'cache\r' \
+	"type dangerous to erase cache" 'dangerous\r' \
 	"Press Enter to continue" '\r')
 check "erase-part: the typed word runs parts + erase-part + reset" \
-	ran_has "parts $tmp/dump/partition_list.txt erase-part userdata reset"
+	ran_has "parts $tmp/dump/partition_list.txt erase-part cache reset"
 check "erase-part: never passes --yes (spdhost asks itself)" ran_lacks --yes
 
 # ------------------------------------------ pack-slot (offline, for real)

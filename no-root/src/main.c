@@ -57,7 +57,8 @@ static void usage(void)
 "  env TERMUX_USB_FD / SPD_USB_FD  same as --usb-fd when unset\n"
 		"  --vid/--pid         desktop enumeration (default 1782:4d00)\n"
 		"  --timeout MS        bulk timeout (default 1000)\n"
-		"  --step N            partition chunk size, decimal or 0x hex\n"
+		"  --step N            partition chunk size, decimal or 0x hex; clamped to\n"
+		"                      0xf800 and rounded up to 0x800 (spd_dump blk_size)\n"
 		"                      (default 4096; 0xf800 after an fdl at 0x5500 or\n"
 		"                      0x65000800, like spd_dump's highspeed blk_size)\n"
 		"  --keep-going        a failed read-part is logged and the next command\n"
@@ -218,11 +219,12 @@ static void usage(void)
 		"  erase-part NAME         not persist, not splloader, not all. NAME is\n"
 		"                          resolved first, as spd_dump does: boot -> boot_a\n"
 		"                          on slot a, 0 -> splloader; the refusals apply to\n"
-		"                          the resolved name. erase-part userdata erases\n"
-		"                          the userdata partition itself; unlike spd_dump's\n"
-		"                          `e userdata` it does NOT write the wipe BCB to\n"
-		"                          misc and does NOT erase persist (factory reset is\n"
-		"                          write-part misc misc/misc-wipe.bin, menu [10]->[1]).\n"
+		"                          the resolved name. erase-part userdata is\n"
+		"                          refused: unlike spd_dump's `e userdata` it would\n"
+		"                          NOT write the wipe BCB to misc and does NOT erase\n"
+		"                          persist, so recovery would have nothing to format.\n"
+		"                          Factory reset is menu [10]->[1] (write-part misc\n"
+		"                          misc/misc-wipe.bin).\n"
 		"  verity 0|1 [DIR]        DANGEROUS. Byte 0x7B of vbmeta (spd_dump): the low\n"
 		"                          byte of the AVB header's big-endian flags at 0x78.\n"
 		"                          0 writes 0x01 (HASHTREE_DISABLED, dm-verity off),\n"
@@ -1429,9 +1431,18 @@ int main(int argc, char **argv)
 			unsigned long v;
 			errno = 0;
 			v = strtoul(optarg, &end, 0);
-			if (end == optarg || *end || errno || v < 64 || v > 65024) {
-				fprintf(stderr, "bad --step: %s (need 64..65024, e.g. 4096 or 0xf800)\n", optarg);
+			if (end == optarg || *end || errno || v == 0 || v > 0x7fffffffUL) {
+				fprintf(stderr, "bad --step: %s (need a positive size, e.g. 4096 or 0xf800)\n", optarg);
 				return 2;
+			}
+			/* spd_dump blk_size (spd_dump.c:1186-1192): clamp to 0xf800
+			 * and round up to a multiple of 0x800. */
+			{
+				unsigned long r = v > 0xf800UL ? 0xf800UL : ((v + 0x7ffUL) & ~0x7ffUL);
+				if (r != v)
+					fprintf(stderr, "step: %s -> 0x%lx (clamped to 0xf800, rounded up to 0x800, like spd_dump blk_size)\n",
+						optarg, r);
+				v = r;
 			}
 			step = (int)v;
 			step_set = 1;
@@ -1599,8 +1610,8 @@ int main(int argc, char **argv)
 		fd = (int)v;
 	}
 
-	if (step < 64 || step > 65024) {
-		fprintf(stderr, "--step must be between 64 and 65024\n");
+	if (step < 0x800 || step > 0xf800 || (step & 0x7ff)) {
+		fprintf(stderr, "--step must be a multiple of 0x800 between 0x800 and 0xf800\n");
 		return 2;
 	}
 
@@ -2244,6 +2255,14 @@ int main(int argc, char **argv)
 				fprintf(stderr, "erase-part: %s -> %s\n", argv[i + 1], ename);
 			if (erase_refused(ename))
 				return 1;
+			if (!strcmp(ename, "userdata") || !strcmp(ename, "userdata_a") || !strcmp(ename, "userdata_b")) {
+				fprintf(stderr,
+					"erase-part: refusing '%s'. Erasing userdata directly leaves recovery nothing to format\n"
+					"  (spd_dump's `e userdata` writes the wipe BCB to misc and erases persist instead).\n"
+					"  For a factory reset use menu [10] -> [1], or: write-part misc misc/misc-wipe.bin reset\n"
+					"  Nothing erased.\n", ename);
+				return 1;
+			}
 			confirm(yes, "erase", ename);
 			if (spd_erase_part(io, ename))
 				return 1;

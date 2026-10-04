@@ -483,12 +483,12 @@ Dangerous:
   erases `boot_a` on a slot-a phone, a number is a table index (`0` is
   `splloader`, so it is refused), and the refusals apply to the resolved
   name. A name the table does not know is refused, not sent literally.
-- **`erase-part userdata` is not spd_dump's `e userdata`.** spdhost erases the
-  userdata partition itself. spd_dump's `e userdata` (common.c
-  erase_partition, ~1170) never erases userdata: it writes the wipe BCB to
-  misc and erases `persist`. spdhost writes no BCB and leaves persist alone.
-  For a recovery-driven factory reset use `write-part misc misc/misc-wipe.bin`
-  (menu `[10]` → `[1]`, or `[2]` → `[5]`).
+- **`erase-part userdata` is refused** (also `userdata_a`/`userdata_b`).
+  spd_dump's `e userdata` (common.c erase_partition, ~1170) never erases
+  userdata: it writes the wipe BCB to misc and erases `persist`. Erasing the
+  partition directly would leave recovery nothing to format, so spdhost
+  refuses and points at the factory-reset path instead:
+  `write-part misc misc/misc-wipe.bin` (menu `[10]` → `[1]`, or `[2]` → `[5]`).
 
 ### Offline image tools
 
@@ -531,7 +531,8 @@ Options go before the commands, and never in front of the device path.
 --usb-fd N        adopt an already-open usbfs descriptor
 --vid/--pid       desktop enumeration (default 1782:4d00)
 --timeout MS      bulk timeout (default 1000)
---step N          partition chunk size, decimal or 0x hex
+--step N          partition chunk size, decimal or 0x hex; clamped to 0xf800
+                  and rounded up to a multiple of 0x800 (spd_dump blk_size)
 --no-line-state   skip the smartphone line-state control transfer
 --keep-going      a failed read-part is logged and the next command runs
 --yes             skip the typed yes for write/erase/repartition/reboot-*

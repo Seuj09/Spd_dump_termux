@@ -3532,8 +3532,8 @@ erase_part_action() {
 	echo "erase-part clears one partition on the phone. It cannot be undone."
 	echo "spdhost refuses: persist, persist_a, persist_b, splloader, splloader_bak, all."
 	echo "A name without _a/_b is resolved like spd_dump: boot erases boot_a on a slot-a phone."
-	echo "userdata erases the userdata partition itself. spd_dump's 'e userdata' does not:"
-	echo "it writes the wipe BCB to misc and erases persist. For a factory reset use [10] -> [1]."
+	echo "userdata is refused here: erasing it directly leaves recovery nothing to format."
+	echo "For a factory reset use [10] -> [1] (wipe BCB via recovery)."
 	read -r -p "Partition name to erase: " name
 	if [[ -z ${name:-} ]]; then
 		echo "Cancelled."
@@ -3551,9 +3551,12 @@ erase_part_action() {
 			return 1
 			;;
 	esac
-	if [[ $name == userdata ]]; then
-		echo "Note: this erases userdata itself; it does not write the wipe BCB or erase persist."
-	fi
+	case $name in
+		userdata|userdata_a|userdata_b)
+			echo "Refusing: erase-part $name leaves recovery nothing to format. Use [10] -> [1] for a factory reset." >&2
+			return 1
+			;;
+	esac
 	if ! confirm_dangerous "type dangerous to erase $name: "; then
 		return 1
 	fi
