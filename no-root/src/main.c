@@ -1744,7 +1744,14 @@ int main(int argc, char **argv)
 				do_fdl(io, line, argv[i + 1], (uint32_t)addr);
 				/* spd_dump: FDL1 at 0x5500 / 0x65000800 sets highspeed, and
 				 * after FDL2 blk_size = 0xf800 for partition reads/writes.
-				 * Loader sends stay at 528 (spd_send_fdl caps the step). */
+				 * Loader sends stay at 528 (spd_send_fdl caps the step).
+				 * G12: sc9863a (FDL1 at 0x5000) deliberately stays at 4096.
+				 * spd_dump never sets highspeed for 0x5000, and on that
+				 * chip's eMMC FDL2 (no raw-data, not UFS) it leaves blk_size
+				 * 0, so its partition reads go at 0x1000 too. Nothing shows
+				 * that FDL2 takes 0xf800 frames, so no default is raised
+				 * here; SPDHOST_STEP=0xf800 in the menu (or --step) is the
+				 * opt-in until it is confirmed on a phone. */
 				if (!step_set && (addr == 0x5500 || addr == 0x65000800) && io->step != 0xf800) {
 					io->step = 0xf800;
 					if (verbose)

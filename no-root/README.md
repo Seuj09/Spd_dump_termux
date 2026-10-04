@@ -560,7 +560,11 @@ Options go before the commands, and never in front of the device path.
 ```
 
 `--step` defaults to 4096, or 0xf800 once an `fdl` goes to `0x5500` or
-`0x65000800` (spd_dump's highspeed `blk_size`). Loader downloads are always
+`0x65000800` (spd_dump's highspeed `blk_size`). sc9863a (FDL1 at `0x5000`)
+stays at 4096, as it does in spd_dump, so a full dump there is slow. To try
+bigger chunks, start the menu with `SPDHOST_STEP=0xf800 ./menu.sh` (or pass
+`--step 0xf800` to spdhost); it is not the default because it has not been
+confirmed on a sc9863a loader. If reads then time out, drop it again. Loader downloads are always
 sent in 528-byte chunks; `--step` is for partition reads and writes only.
 `--keep-going` lists the failures at the end and exits 1; USB timeouts and a
 device reset still stop the run. The menu's `all`/`all_lite` use it, check
