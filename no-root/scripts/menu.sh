@@ -2609,7 +2609,7 @@ part_image_candidate() {
 	name=${base%.*}
 	[[ $base == "$name" ]] && name=$base
 	case $name in
-		*_bak|misc-slotinfo|misc-before-*|persist-before-*) return 1 ;;
+		*_bak|misc-slotinfo|misc-before-*|persist-before-*|frp-before-*) return 1 ;;
 	esac
 	return 0
 }
@@ -2880,7 +2880,7 @@ restore_backup_menu() {
 	fi
 	echo "Restore these images from $DUMP_DIR, then $BOOT_AFTER:"
 	printf '  %s\n' "${names[@]}"
-	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, *_bak.img."
+	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, frp-before-*.img, *_bak.img."
 	if [[ $INPUT_DIR == "$DUMP_DIR" ]]; then
 		echo "This is the same folder menu [6] flashes from, so images you put there to flash are listed here too."
 	fi
@@ -3675,8 +3675,10 @@ verity_menu() {
 frp_reset_menu() {
 	local out
 	echo "DANGEROUS: Reset FRP."
-	echo "Reads the whole persist partition (or persist_a / persist_b for the active slot)"
-	echo "into a backup file, checks that file's size, then erases that partition, then reset."
+	echo "Reads the whole FRP partition into a backup file, checks that file's size, then"
+	echo "erases that partition, then reset. The FRP partition is 'frp' when the phone's"
+	echo "table has one (persist is then left alone), else persist (or persist_a / persist_b)."
+	echo "spdhost names the one it picked before it asks you to confirm."
 	echo "A failed or short read does not erase. Factory reset still does not erase persist."
 	echo "erase-part persist stays refused."
 	echo "A persist image over 512MB is refused."
@@ -3685,7 +3687,7 @@ frp_reset_menu() {
 	fi
 	need_loaders || return 1
 	mkdir -p "$DUMP_DIR"
-	out=$DUMP_DIR/persist-before-$(date +%Y%m%d-%H%M%S).img
+	out=$DUMP_DIR/frp-before-$(date +%Y%m%d-%H%M%S).img
 	echo "Backup: $out"
 	echo "spdhost asks for the word dangerous again before the read."
 	ready || return 1
@@ -3942,7 +3944,7 @@ extra_menu() {
 	echo "[2] Set active slot (a/b)"
 	echo "[3] Power off"
 	echo "[4] DANGEROUS: verity (vbmeta byte 0x7B; type the word dangerous)"
-	echo "[5] DANGEROUS: reset FRP (backup persist, then erase it)"
+	echo "[5] DANGEROUS: reset FRP (backup frp or persist, then erase it)"
 	echo "[6] Reboot recovery"
 	echo "[7] Reboot fastbootd (Android 10+ recovery)"
 	echo "[8] DANGEROUS: unlock bootloader (erases splloader until the last step)"

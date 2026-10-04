@@ -480,8 +480,10 @@ Dangerous:
   image *is* that partition read back — so an interrupted run cannot leave the
   phone carrying a `w_force` row. `w-force` is still there for an image that
   really is larger than its table row.
-- `frp-reset OUT` — read all of `persist` (or `persist_a`/`persist_b` for
-  the active slot) to OUT, check the size, then erase it. A failed or short
+- `frp-reset OUT` — read all of the FRP partition to OUT, check the size,
+  then erase it. That is `frp` (or `frp_a`/`frp_b`) when the table has one —
+  `persist` is then left alone — else `persist` (or `persist_a`/`persist_b`
+  for the active slot). A failed or short
   read does not erase. Over 512MB is refused. Needs `parts`.
 - `danger-erase NAME` — erase only `persist`, `persist_a`, `persist_b`,
   `splloader` or `splloader_bak`. A persist name that is not in the live
@@ -730,7 +732,7 @@ Extra:
 [2] Set active slot (a/b)
 [3] Power off
 [4] DANGEROUS: verity (vbmeta byte 0x7B)
-[5] DANGEROUS: reset FRP (backup persist, then erase it)
+[5] DANGEROUS: reset FRP (backup frp or persist, then erase it)
 [6] Reboot recovery          [7] Reboot fastbootd
 [8] DANGEROUS: unlock bootloader (erases splloader until the last step)
 [9] Hex mode (exec_addr)     [10] Boot mode after flash / restore

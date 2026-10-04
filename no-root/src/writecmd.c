@@ -76,7 +76,8 @@ static int junk_file(const char *raw, const char *name)
 		!strncmp(raw, "lk", 2) || !strncmp(raw, "0x", 2) || !strncmp(raw, "custom_exec", 11))
 		return 1;
 	if (!strcmp(name, "SHA256SUMS") || !strcmp(name, "misc-slotinfo") ||
-		!strncmp(name, "misc-before-", 12) || !strncmp(name, "persist-before-", 15))
+		!strncmp(name, "misc-before-", 12) || !strncmp(name, "persist-before-", 15) ||
+		!strncmp(name, "frp-before-", 11))
 		return 1;
 	return 0;
 }
@@ -229,6 +230,7 @@ static int write_bak_image(struct spd *io, const char *bak, const char *path,
  * `part too large` is the reference's own guard: its offset fields are 32-bit
  * (dump_partition takes uint32_t), so a partition past 4 GiB cannot be read
  * into a file to patch in the first place. */
+
 int spd_mem_to_part_file(struct spd *io, const char *name, uint64_t offset,
 	const uint8_t *mem, size_t len, const char *dir, int slot, char *out, size_t out_sz)
 {
@@ -825,8 +827,9 @@ static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, i
 		return 1;
 	}
 	/* R1: a guessed table unit may have scaled this row; size it by the
-	 * device instead, or do not touch it. */
-	if (io->ptab_unit_bad) {
+	 * device instead, or do not touch it. G1: a table the probe corrected
+	 * has device-confirmed sizes already. */
+	if (!spd_ptab_sizes_verified(io)) {
 		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
 		if (!probed) {
 			fprintf(stderr, "verity: table unit unverified and the device gave no size for %s;"

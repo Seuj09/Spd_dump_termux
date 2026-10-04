@@ -67,6 +67,22 @@ MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-r
 check "R1: frp-reset on a guessed unit backs up the device's 1 MiB persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s r1persist.img) = 1048576 ] && grep -q \"using the device's size for persist\" sh_r1p2.log"
 
+# ---- G10: a separate frp partition is the one frp-reset backs up and erases ----
+printf '%s\n' 'misc 1024' 'persist 2048' 'frp 512' 'boot 4096' > ptfrp
+MOCK_PTABLE=$tmp/ptfrp sh g10 --dangerous parts pt.txt frp-reset g10frp.img; rc=$?
+# ERASE_FLASH (0x0a) names the partition in UTF-16LE: frp = 66 00 72 00 70 00 00.
+check "G10: with an frp row, frp-reset backs up frp (512 KiB) and erases frp, not persist (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp.img) = 524288 ] && grep -q 'separate frp partition' sh_g10.log &&
+		grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10.seq"
+check "G10: the confirm names frp" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup frp, then erase it)' sh_g10.log
+MOCK_PTABLE=$tmp/ptfrp sh g10gate --yes parts pt.txt frp-reset g10no.img; rc=$?
+check "G10: --yes still does not authorize it, nothing erased (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0a ' sh_g10gate.seq && [ ! -e g10no.img ]"
+printf '%s\n' 'misc 1024' 'persist 1024' 'boot 4096' > ptnofrp
+MOCK_PTABLE=$tmp/ptnofrp sh g10p --dangerous parts pt.txt frp-reset g10p.img; rc=$?
+check "G10: without an frp row it is still persist (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10p.img) = 1048576 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10p.seq"
+
 # ---- R2: repartition checks ------------------------------------------------------------------
 # KiB rows: misc 1, prodnv 1, boot 4, super 8, userdata 16 MiB = 30 MiB in all.
 printf '%s\n' 'misc 1024' 'prodnv 1024' 'boot 4096' 'super 8192' 'userdata 16384' > ptr

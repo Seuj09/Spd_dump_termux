@@ -236,8 +236,9 @@ static void usage(void)
 		"                          (DIR: --part-xml folder, else .) and prints its\n"
 		"                          sha256 first. Needs an UNLOCKED bootloader to boot.\n"
 		"                          Needs parts. Over 64MB is refused. --yes is not enough.\n"
-		"  frp-reset OUT           DANGEROUS. Read all of persist to OUT, check\n"
-		"                          the file size, then erase persist. A failed or\n"
+		"  frp-reset OUT           DANGEROUS. Read all of the FRP partition to OUT,\n"
+		"                          check the file size, then erase it: `frp` when the\n"
+		"                          table has that row, else persist. A failed or\n"
 		"                          short read does not erase. Needs parts.\n"
 		"                          Over 512MB is refused.\n"
 		"  danger-erase NAME       DANGEROUS. Only persist, persist_a, persist_b,\n"
@@ -1184,26 +1185,48 @@ static int same_file_size(const char *path, uint64_t expect)
 	return (uint64_t)n == expect ? 0 : -1;
 }
 
-/* Backup persist, then erase it. A short or failed read leaves the partition. */
+/* G10: the partition that holds FRP. Phones whose table has a separate `frp`
+ * row (or frp_a/frp_b) keep the FRP block there, and their persist holds other
+ * things (DRM keys, calibration): erasing persist there removes those and
+ * leaves FRP in place. So `frp` wins when the table has it; persist is the
+ * answer only when it does not. */
+static const char *frp_base(struct spd *io)
+{
+	char r[40];
+	uint64_t sz = 0;
+	if (io && io->nparts > 0 &&
+	    spd_lookup_part(io, "frp", spd_active_slot(io), r, sizeof(r), &sz) == 0 && sz)
+		return "frp";
+	return "persist";
+}
+
+/* Backup the FRP partition (frp, else persist), then erase it. A short or
+ * failed read leaves the partition. */
 static int frp_reset(struct spd *io, const char *out)
 {
 	char resolved[40];
 	uint64_t sz = 0;
 	int slot, lk;
+	const char *base;
 
 	if (!io || io->nparts <= 0) {
 		fprintf(stderr, "frp-reset: run parts first; nothing sent\n");
 		return -1;
 	}
 	slot = spd_active_slot(io);
-	lk = spd_lookup_part(io, "persist", slot, resolved, sizeof(resolved), &sz);
+	base = frp_base(io);
+	lk = spd_lookup_part(io, base, slot, resolved, sizeof(resolved), &sz);
 	if (lk != 0 || sz == 0) {
-		fprintf(stderr, "frp-reset: persist is not in the live table; nothing sent\n");
+		fprintf(stderr, "frp-reset: %s is not in the live table; nothing sent\n", base);
 		return -1;
 	}
+	if (!strcmp(base, "frp"))
+		fprintf(stderr, "frp-reset: this table has a separate %s partition, which is where FRP"
+			" lives; that is the one backed up and erased. persist is left alone.\n", resolved);
 	/* R1: a guessed table unit may have scaled this row; size it by the
-	 * device instead, or do not touch it. */
-	if (io->ptab_unit_bad) {
+	 * device instead, or do not touch it. G1: a table the probe corrected
+	 * has device-confirmed sizes already. */
+	if (!spd_ptab_sizes_verified(io)) {
 		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
 		if (!probed) {
 			fprintf(stderr, "frp-reset: table unit unverified and the device gave no size for %s;"
@@ -2358,9 +2381,12 @@ int main(int argc, char **argv)
 				i += 2 + extra;
 			}
 		} else if (strcmp(cmd, "frp-reset") == 0) {
+			char frpwhat[96];
 			need(argc, i, 1, "frp-reset");
 			need_fdl2(io, "frp-reset");
-			confirm_dangerous("reset FRP (backup persist, then erase it)");
+			snprintf(frpwhat, sizeof(frpwhat), "reset FRP (backup %s, then erase it)",
+				frp_base(io));
+			confirm_dangerous(frpwhat);
 			if (frp_reset(io, argv[i + 1]))
 				return 1;
 			i += 2;

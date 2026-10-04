@@ -151,10 +151,11 @@ check "L3: exactly 256 KiB is still sent" \
 
 mkdir -p l6
 printf 'P' > l6/persist-before-20260101-000000.img
+printf 'F' > l6/frp-before-20260101-000000.img
 printf 'A' > l6/boot_a.img
 sh l6 parts pt.txt write-files l6; rc=$?
-check "L6: persist-before-*.img is not even considered (rc $rc)" \
-	bash -c "[ $rc = 0 ] && ! grep -q 'persist-before' sh_l6.log && grep -qE '^SEQ 01 .*$(u16 boot_a)' sh_l6.seq"
+check "L6: persist-before-*.img / frp-before-*.img are not even considered (rc $rc)" \
+	bash -c "[ $rc = 0 ] && ! grep -q 'persist-before' sh_l6.log && ! grep -q 'frp-before' sh_l6.log && grep -qE '^SEQ 01 .*$(u16 boot_a)' sh_l6.seq"
 
 # ------------------------------------------------- erase-part userdata (refused)
 for n in userdata; do
