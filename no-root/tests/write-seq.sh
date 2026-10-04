@@ -728,8 +728,13 @@ esac
 exit 0
 """ % (rec,))
 runner.chmod(0o755)
-fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
-fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
+# U6: the per-phone blobs are looked up only beside FDL1, so the loaders are
+# copied next to them (a hand-configured set: no DEVICE).
+import shutil
+fdl1 = work / "fdl1-dl.bin"
+fdl2 = work / "fdl2-dl.bin"
+shutil.copy(root / "fdl/ums9230/infinix/fdl1-dl.bin", fdl1)
+shutil.copy(root / "fdl/ums9230/infinix/fdl2-dl.bin", fdl2)
 script = """
 source "%s/scripts/menu.sh"
 FDL1="%s"
@@ -818,8 +823,13 @@ esac
 exit 0
 """ % (rec,))
 runner.chmod(0o755)
-fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
-fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
+# U6: the per-phone blobs are looked up only beside FDL1, so the loaders are
+# copied next to them (a hand-configured set: no DEVICE).
+import shutil
+fdl1 = work / "fdl1-dl.bin"
+fdl2 = work / "fdl2-dl.bin"
+shutil.copy(root / "fdl/ums9230/infinix/fdl1-dl.bin", fdl1)
+shutil.copy(root / "fdl/ums9230/infinix/fdl2-dl.bin", fdl2)
 script = """
 source "%s/scripts/menu.sh"
 FDL1="%s"
