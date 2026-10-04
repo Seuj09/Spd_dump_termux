@@ -94,10 +94,20 @@ no_read() { ! [ -s "ra_$1" ] && ! [ -s "rb_$1" ]; }
 # logged frame is the request, not the reply: an 8-byte body of n, pos_lo,
 # pos_hi, all little-endian, in the first 16 hex characters of field 4.
 reads_mid() { grep -c '^SEQ 11 ' "$1"; }
-readbytes() { awk '$1 == "SEQ" && $2 == "11" {
+# POSIX awk only (mawk, busybox): no gawk strtonum, so the hex is summed by hand.
+readbytes() { awk 'function hexval(x,   i, c, v) {
+		v = 0
+		for (i = 1; i <= length(x); i++) {
+			c = index("0123456789abcdef", tolower(substr(x, i, 1)))
+			if (c == 0) return v
+			v = v * 16 + (c - 1)
+		}
+		return v
+	}
+	$1 == "SEQ" && $2 == "11" {
 		h = substr($4, 1, 8)
-		s += strtonum("0x" substr(h, 7, 2) substr(h, 5, 2) substr(h, 3, 2) substr(h, 1, 2))
-	} END {print s + 0}' "$1"; }
+		s += hexval(substr(h, 7, 2) substr(h, 5, 2) substr(h, 3, 2) substr(h, 1, 2))
+	} END {printf "%.0f\n", s + 0}' "$1"; }
 # Did a write START carrying this partition's name go out at all?
 wrote() { grep -q "^SEQ 01 .*$2" "$1"; }
 export -f frames_ok reads_same no_read reads_mid readbytes wrote
