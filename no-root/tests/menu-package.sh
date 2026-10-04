@@ -88,7 +88,7 @@ for soc in ums9230 sc9863a ums512; do
 			ck "[8] $soc/$brand/alternatif/$alt has its own fdl2-cboot.bin (not its fdl2-dl.bin)" $?
 		done < <(shipped_alt_models "$(pkg_fdl_root)" "$soc" "$brand" || true)
 	done < <(soc_brands "$soc")
-	soc_profile "$soc"
+	soc_profile "$soc"; SOC=$soc  # G3: stubs resolve only once a chip is picked
 	exec_stub_present "$EXEC_ADDR_DEFAULT"
 	ck "[3] $soc primary exec stub $EXEC_ADDR_DEFAULT is present" $?
 	exec_stub_present "$EXEC_ADDR_ALT"
