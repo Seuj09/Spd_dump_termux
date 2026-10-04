@@ -112,29 +112,41 @@ static int streq_env(const char *e, const char *n) { const char *v = getenv(e); 
 #define GPT_LEN (32u * 1024u)
 #define GPT_ENTRIES 128
 static uint8_t *gptbuf;
+/* MOCK_GPT=4k (G1): the same table on 4096-byte sectors, as a UFS part writes
+ * it -- header at byte 4096 (LBA 1), entries at LBA 2 -- with a 512 KiB row
+ * (sml_a) under 1 MiB and a smallest-whole-MiB row of 2 MiB, the two shapes
+ * the menu's old unit guess got wrong (0 and halved). */
 static void gpt_build(void)
 {
-	static const char *names[] = { "misc", "boot_a", "boot_b", "userdata" };
-	static const uint64_t start[] = { 2048, 4096, 20480, 40960 };
-	static const uint64_t end[] = { 4095, 20479, 40959, 81919 };
+	static const char *names512[] = { "misc", "boot_a", "boot_b", "userdata" };
+	static const uint64_t start512[] = { 2048, 4096, 20480, 40960 };
+	static const uint64_t end512[] = { 4095, 20479, 40959, 81919 };
+	static const char *names4k[] = { "sml_a", "boot_a", "boot_b", "super" };
+	static const uint64_t start4k[] = { 256, 384, 896, 1408 };
+	static const uint64_t end4k[] = { 383, 895, 1407, 2943 };
+	const char *v = getenv("MOCK_GPT");
+	int k4 = v && !strcmp(v, "4k");
+	const char **names = k4 ? names4k : names512;
+	const uint64_t *start = k4 ? start4k : start512, *end = k4 ? end4k : end512;
+	unsigned sec = k4 ? 4096 : 512;
 	uint8_t *h;
 	int i;
 
 	if (gptbuf) return;
 	gptbuf = calloc(1, GPT_LEN);
 	if (!gptbuf) return;
-	h = gptbuf + 512; /* LBA 1 */
+	h = gptbuf + sec; /* LBA 1 */
 	memcpy(h, "EFI PART", 8);
 	h[8] = 0x00; h[9] = 0x00; h[10] = 0x01; h[11] = 0x00; /* revision 1.0 */
 	*(uint32_t *)(h + 12) = 92;   /* header size */
 	*(uint64_t *)(h + 24) = 1;    /* current LBA */
-	*(uint64_t *)(h + 40) = 34;   /* first usable LBA */
-	*(uint64_t *)(h + 48) = 81919;/* last usable LBA */
+	*(uint64_t *)(h + 40) = k4 ? 6 : 34; /* first usable LBA */
+	*(uint64_t *)(h + 48) = end[3];/* last usable LBA */
 	*(uint64_t *)(h + 72) = 2;    /* partition entry LBA */
 	*(uint32_t *)(h + 80) = GPT_ENTRIES; /* entries (128 * 128 B = 16 KiB) */
 	*(uint32_t *)(h + 84) = 128;  /* entry size */
 	for (i = 0; i < 4; i++) {
-		uint8_t *e = gptbuf + 2 * 512 + i * 128;
+		uint8_t *e = gptbuf + 2 * sec + i * 128;
 		const char *n = names[i];
 		int k;
 		for (k = 0; n[k]; k++) e[56 + 2 * k] = (uint8_t)n[k];
@@ -218,6 +230,9 @@ static void log_out(const uint8_t *buf, int len)
 		sz = le32(raw + 4 + 72); if (plen >= 80) sz |= (uint64_t)le32(raw + 4 + 76) << 32;
 		strcpy(cur_part, nm); cur_size = part_size(nm); midst_count = 0;
 		if (streq_env("MOCK_FAIL_START", nm)) { make_reply(0x82, NULL, 0, crc); return; }
+		/* MOCK_NOPROBE=NAME (G1): NAME reads, but refuses check_partition's
+		 * 8-byte READ_START, so the device will not size it. */
+		if (sz == 8 && streq_env("MOCK_NOPROBE", nm)) { make_reply(0x82, NULL, 0, crc); return; }
 		if (!cur_size || (sz > cur_size && !getenv("MOCK_LOOSE"))) make_reply(0x82, NULL, 0, crc); /* not ACK */
 		else make_reply(0x80, NULL, 0, crc);
 		return; }

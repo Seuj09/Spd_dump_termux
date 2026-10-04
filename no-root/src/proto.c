@@ -2483,6 +2483,7 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	 * the same unit the XML did. fetch_ptab sets it from the wire instead. */
 	io->ptab_shift = 20;
 	io->ptab_unit_bad = 0; /* the XML's rows are MiB by format, not a guess */
+	io->ptab_unit_fixed = 0;
 	io->ptab_from_xml = 1;
 	/* The session has a table (the one just sent), so the latch is "asked and
 	 * answered": spd_dump's gpt_failed is already 0 here and scan_xml_partitions
@@ -2887,6 +2888,7 @@ static int gpt_probe(struct spd *io)
 	 * reason the repartition echo's is. */
 	io->ptab_shift = 20;
 	io->ptab_unit_bad = 0;
+	io->ptab_unit_fixed = 0;
 	fprintf(stderr, "parts: %d entries from the standard GPT (%llu-byte sectors)\n",
 		io->nparts, (unsigned long long)real_sector);
 	fprintf(stderr, "Storage is %s\n", storage == SPD_STORAGE_EMMC ? "emmc" : "ufs");
@@ -2999,6 +3001,7 @@ static int fetch_ptab(struct spd *io)
 		io->storage = (divisor == 10) ? SPD_STORAGE_EMMC : SPD_STORAGE_UFS;
 		io->ptab_shift = 20 - divisor;
 		io->ptab_unit_bad = 0;
+		io->ptab_unit_fixed = 0;
 		for (i = 0; i < n; i++) {
 			const uint8_t *rec = p + i * 0x4c;
 			unsigned k;
@@ -3048,13 +3051,41 @@ static int fetch_ptab(struct spd *io)
 				io->ptab_unit_bad = 0;
 				fprintf(stderr, "check: %s is %llu bytes on the device too; the table's unit is right\n",
 					io->ptab[pick].name, (unsigned long long)probed);
-			} else
+			} else {
+				/* G1: the probe disagrees. When it is exactly the row's
+				 * raw unit at another shift between KiB (10) and MiB (20)
+				 * -- a UFS FDL2 that reports MiB rows comes out << 19 by
+				 * the divisor heuristic -- the unit is that shift: every
+				 * row is re-scaled, so dumps are not half size. The table
+				 * stays "unit bad" for anything that would send it back. */
+				uint64_t raw = io->ptab[pick].size >> io->ptab_shift;
+				int s, fixed = -1;
+				for (s = 10; s <= 20 && raw; s++)
+					if (s != io->ptab_shift && (raw << s) == probed) {
+						fixed = s;
+						break;
+					}
 				fprintf(stderr,
 					"WARNING: %s is %llu bytes by the table but the device answers %llu; "
 					"treat this table's sizes as suspect. This session will not send the"
 					" table back or save it as XML.\n",
 					io->ptab[pick].name, (unsigned long long)io->ptab[pick].size,
 					(unsigned long long)probed);
+				if (fixed >= 0) {
+					unsigned r;
+					for (r = 0; r < n; r++)
+						io->ptab[r].size = (io->ptab[r].size >> io->ptab_shift) << fixed;
+					fprintf(stderr, "check: %s's answer is the table's own number << %d, not << %d;"
+						" every row's size is corrected to units << %d = bytes"
+						" (the table itself is still not sent back)\n",
+						io->ptab[pick].name, fixed, io->ptab_shift, fixed);
+					io->ptab_shift = fixed;
+					io->ptab_unit_fixed = 1;
+				} else
+					fprintf(stderr, "check: the device's answer is not the table's number at any"
+						" unit; sizes stay UNVERIFIED and `dump` sizes each partition by"
+						" asking the device\n");
+			}
 		}
 	}
 	/* common.c:1143 gpt_failed = 0: the session has its table now, so nothing
@@ -3152,20 +3183,64 @@ int spd_part_xml(struct spd *io, const char *out_path)
 	return 0;
 }
 
+int spd_ptab_sizes_verified(const struct spd *io)
+{
+	return !io->ptab_unit_bad || io->ptab_unit_fixed;
+}
+
+/* G1: the shift the `parts` columns are printed at. It is the table's own
+ * shift, lowered only as far as every non-empty row needs to stay exact: a
+ * standard GPT is bytes (shift 20 is only how its XML is written), so a row
+ * under 1 MiB or not a whole MiB printed `size >> 20` as 0 or rounded, and the
+ * menu then dropped it from `all`. A wire table's rows are raw << shift, so its
+ * shift never moves. */
+static int parts_exact_at(const struct spd *io, int s)
+{
+	int i;
+	for (i = 0; i < io->nparts; i++)
+		if (io->ptab[i].size & ((1ull << s) - 1))
+			return 0;
+	return 1;
+}
+
+static int parts_print_shift(const struct spd *io)
+{
+	int s = io->ptab_shift;
+	if (parts_exact_at(io, s))
+		return s;
+	/* Lowered: KiB first, which is what an eMMC table is read in, then
+	 * whatever finer unit keeps every row exact (bytes at worst). */
+	for (s = s > 10 ? 10 : s - 1; s > 0; s--)
+		if (parts_exact_at(io, s))
+			break;
+	return s;
+}
+
 int spd_list_parts(struct spd *io, const char *out_path)
 {
 	FILE *fo = NULL;
 	unsigned i, count;
+	int pshift;
 
 	if (fetch_ptab(io))
 		return -1;
 	count = (unsigned)io->nparts;
+	pshift = parts_print_shift(io);
 	if (out_path && strcmp(out_path, "-") != 0) {
 		fo = fopen(out_path, "w");
 		if (!fo) {
 			fprintf(stderr, "open %s: %s\n", out_path, strerror(errno));
 			return -1;
 		}
+		/* G1: the unit travels with the file, so the menu does not re-derive
+		 * it with spd_dump's divisor loop (which halves every row of a GPT
+		 * whose smallest row is 2 MiB, and cannot know what the probe said).
+		 * A `#` line: readers that take "name units" rows skip it, since its
+		 * second word is not a number. verified 0 = the unit is a guess the
+		 * device did not confirm; `dump` then sizes each row by the device. */
+		fprintf(fo, "# spdhost-parts shift %d verified %d%s\n", pshift,
+			spd_ptab_sizes_verified(io),
+			io->ptab_unit_fixed ? " corrected 1" : "");
 	}
 	/* The index printed here is the index spd_lookup_part() accepts, which is
 	 * spd_dump's scheme: the first table entry is 1 -> ptab[0] (and 0, which
@@ -3191,7 +3266,7 @@ int spd_list_parts(struct spd *io, const char *out_path)
 		 * raw 0x4c-record dword (size = dword << shift), so this prints the
 		 * same number it always did; after a repartition, where the shift is
 		 * 20, it is the XML's MiB. */
-		uint64_t sz = io->ptab[i].size >> io->ptab_shift;
+		uint64_t sz = io->ptab[i].size >> pshift;
 		printf("%u %s %" PRIu64 "\n", i + 1, io->ptab[i].name, sz);
 		if (fo)
 			fprintf(fo, "%s %" PRIu64 "\n", io->ptab[i].name, sz);

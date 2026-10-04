@@ -388,6 +388,7 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 	char out[1024], tmp[1100], part[1100], alt[40];
 	const char *read_name = name;
 	uint64_t off = 0, n = size;
+	int unverified = 0;
 	if (!strcmp(name, "super") || size >= (512ull << 20))
 		fprintf(stderr, "dump: %s is %llu bytes\n", name, (unsigned long long)size);
 	snprintf(out, sizeof(out), "%s/%s.img", outdir, name);
@@ -399,6 +400,27 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 		spd_metadata_beside(io, out, slot);
 	if (spd_userdata_declined(name, yes))
 		return 0;
+	/* G1: a table whose unit is a guess the device did not confirm sizes
+	 * nothing; reading `size` bytes there gave half-size (or worse) images
+	 * that still matched the manifest. Ask the device for this row's size,
+	 * as `read-part NAME 0 full` does. splloader is a fixed offset, not a
+	 * row. A row the device will not size is read at the table's size and
+	 * flagged `unverified` in the manifest, so the menu does not call it ok. */
+	if (!spd_ptab_sizes_verified(io) && strncmp(name, "splloader", 9)) {
+		uint64_t probed = spd_check_partition(io, name, 1, slot);
+		if (probed) {
+			if (probed != size)
+				fprintf(stderr, "dump: %s: table unit unverified; using the device's"
+					" %llu bytes (table says %llu)\n", name,
+					(unsigned long long)probed, (unsigned long long)size);
+			size = n = probed;
+		} else {
+			fprintf(stderr, "dump: %s: table unit unverified and the device did not size"
+				" it; reading the table's %llu bytes, NOT verified\n", name,
+				(unsigned long long)size);
+			unverified = 1;
+		}
+	}
 	spd_nv_read_adjust(name, alt, sizeof(alt), &off, &n);
 	if (off)
 		read_name = alt;
@@ -417,6 +439,8 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 	if (spd_read_part(io, read_name, off, n, tmp) == 0) {
 		if (rename(tmp, out) == 0) {
 			if (manifest) {
+				if (unverified)
+					fprintf(manifest, "unverified %s\n", name);
 				fprintf(manifest, "ok %s\n", name);
 				fflush(manifest);
 			}

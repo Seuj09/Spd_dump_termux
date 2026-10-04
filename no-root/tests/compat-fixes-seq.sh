@@ -231,9 +231,15 @@ check "L6: a stub in the working directory is not a default (fdl/<chip>/ only) (
 out=$(source ./menu_env.sh; BOOT_AFTER=reboot-recovery; RUNNER=(echo); fetch_parts_table 2>&1)
 check "L2: fetch_parts_table ends with power-off when the ending writes misc" \
 	bash -c '[[ $1 == *"misc-slotinfo.img power-off"* ]]' _ "$out"
+# G1: the probe's answer is the table's own number << 10, so spdhost corrects the
+# shift and the menu says so instead of calling the unit a guess.
 out=$(export M=3 MOCK_PTABLE=$tmp/pt512; source ./menu_env.sh; BOOT_AFTER=reset; fetch_parts_table 2>&1)
-check "L1 menu: a shift-11 table is called a guess after the table fetch" \
-	bash -c '[[ $1 == *"WARNING: this table'"'"'s unit is a guess (shift 11"* ]] && grep -q "WARNING: uboot_a is 2097152 bytes by the table" m3.err' _ "$out"
+check "L1/G1 menu: a shift-11 table the probe answers at << 10 is reported corrected to shift 10" \
+	bash -c '[[ $1 == *"spdhost corrected"*"shift 10"* && $1 != *"unit is a guess"* ]] && grep -q "WARNING: uboot_a is 2097152 bytes by the table" m3.err' _ "$out"
+# The probe row will not be sized: the unit stays a guess, and the menu says so.
+out=$(export M=3 MOCK_PTABLE=$tmp/pt512 MOCK_NOPROBE=uboot_a; source ./menu_env.sh; BOOT_AFTER=reset; fetch_parts_table 2>&1)
+check "L1 menu: a shift-11 table the device will not confirm is called a guess after the table fetch" \
+	bash -c '[[ $1 == *"WARNING: this table'"'"'s unit is a guess the device did not confirm (shift 11"* ]]' _ "$out"
 out=$(source ./menu_env.sh; BOOT_AFTER=reset; RUNNER=(echo); chip_uid_action 2>&1)
 check "L2: chip-uid ends with the configured reset" bash -c '[[ $1 == *"chip-uid reset"* ]]' _ "$out"
 out=$(unset SPDHOST_EXEC_ADDR; source ./menu_env.sh; unset SPDHOST_EXEC_ADDR; SOC= EXEC_ADDR=; exec_addr_value; echo "[end]")

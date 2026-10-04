@@ -56,9 +56,12 @@ sh gpt parts pt.txt parts pt2.txt partition-list ours.xml; shrc=$?
 
 # The four rows, in order, with the sizes gpt_info()'s LBA arithmetic gives:
 # (2047*512)>>20 = 1 MiB, 16384*512 = 8, 20480*512 = 10, 40960*512 = 20.
+# G1: the file starts with the unit line the menu reads instead of guessing.
 check "parts on a GPT device: four named rows, in MiB (rc $shrc)" \
-	bash -c "[ $shrc = 0 ] && [ \"\$(cat ours/pt.txt)\" = \
+	bash -c "[ $shrc = 0 ] && [ \"\$(grep -v '^#' ours/pt.txt)\" = \
 		\"\$(printf '%s\n' 'misc 1' 'boot_a 8' 'boot_b 10' 'userdata 20')\" ]"
+check "parts file names its unit: shift 20, verified (G1)" \
+	bash -c "[ \"\$(head -1 ours/pt.txt)\" = '# spdhost-parts shift 20 verified 1' ]"
 check "the second parts in the session writes the same table" \
 	bash -c "diff -q ours/pt.txt ours/pt2.txt >/dev/null"
 # The name must come from partition_name at offset 56, not the type GUID at 0. A
@@ -66,7 +69,7 @@ check "the second parts in the session writes the same table" \
 # which a UTF-16 GUID read reproduces; the exact-file check above would also catch
 # those, but only as an opaque mismatch.
 check "GPT names are real, not blank or mojibake" \
-	bash -c "[ \$(wc -l < ours/pt.txt) = 4 ] &&
+	bash -c "[ \$(grep -vc '^#' ours/pt.txt) = 4 ] &&
 		! LC_ALL=C grep -q '[^ -~]' ours/pt.txt &&
 		! grep -qE '^[[:space:]]|[[:space:]][[:space:]]' ours/pt.txt"
 

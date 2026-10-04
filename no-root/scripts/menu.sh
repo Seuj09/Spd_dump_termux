@@ -1162,22 +1162,45 @@ MISC_WIPE_SHA=bd6b67e852d6072e6fb87040f2ac40216d5b661b7fa661e7024569ecf8ddb3a7
 ACTIVE_SLOT=""
 PARTS_SHIFT=""
 
-# spd_dump partition_list() (common.c ~1106-1116): READ_PARTITION sizes are
-# units. divisor starts at 10 and drops until every non-zero entry >> divisor
-# is non-zero; bytes = units << (20 - divisor). eMMC tables are KiB (shift 10).
+# The unit of the "name units" rows. spdhost (G1) writes it as the file's first
+# line, "# spdhost-parts shift S verified V [corrected 1]", from the table it
+# actually read: the divisor it used, a GPT's byte sizes, or the shift its size
+# probe corrected the table to. That line is the only source used when it is
+# there. Without it (an older spdhost) the divisor loop below re-derives it
+# like spd_dump partition_list() (common.c ~1106-1116): divisor starts at 10 and
+# drops until every non-zero entry >> divisor is non-zero; bytes = units <<
+# (20 - divisor). That guess halves every row of a GPT whose smallest row is
+# 2 MiB, which is why the header exists.
+# PARTS_VERIFIED: 1 = the sizes are known good, 0 = the unit is a guess the
+# device did not confirm (spdhost's `dump` then sizes each row by the device),
+# "" = no header (older spdhost; only shift 10 is a known unit).
+# PARTS_CORRECTED: 1 when spdhost re-scaled the table to the probe's answer.
 # RAW (units) -> OUT (bytes). Always derived from RAW, so it is idempotent.
+PARTS_VERIFIED=""
+PARTS_CORRECTED=""
 parts_units_to_bytes() {
-	local raw=$1 out=$2 name size div=10 tmp
-	while read -r name size _; do
-		[[ $size =~ ^[0-9]+$ ]] && (( size > 0 )) || continue
-		while (( div > 0 && (size >> div) == 0 )); do ((div--)); done
-	done < "$raw"
+	local raw=$1 out=$2 name size div=10 tmp ushift="" line
+	PARTS_VERIFIED=""
+	PARTS_CORRECTED=""
+	IFS= read -r line < "$raw" || line=
+	if [[ $line =~ ^\#\ spdhost-parts\ shift\ ([0-9]+)\ verified\ ([01])(\ corrected\ 1)?[[:space:]]*$ ]] &&
+		(( BASH_REMATCH[1] <= 30 )); then
+		ushift=${BASH_REMATCH[1]}
+		PARTS_VERIFIED=${BASH_REMATCH[2]}
+		[[ -n ${BASH_REMATCH[3]} ]] && PARTS_CORRECTED=1
+	else
+		while read -r name size _; do
+			[[ $size =~ ^[0-9]+$ ]] && (( size > 0 )) || continue
+			while (( div > 0 && (size >> div) == 0 )); do ((div--)); done
+		done < "$raw"
+		ushift=$((20 - div))
+	fi
 	tmp=$(mktemp "$out.XXXXXX") || return 1
 	while read -r name size _; do
-		[[ -n ${name:-} && $size =~ ^[0-9]+$ ]] || continue
-		printf '%s %s\n' "$name" $(( size << (20 - div) ))
+		[[ -n ${name:-} && $name != \#* && $size =~ ^[0-9]+$ ]] || continue
+		printf '%s %s\n' "$name" $(( size << ushift ))
 	done < "$raw" > "$tmp" && mv "$tmp" "$out" || { rm -f "$tmp"; return 1; }
-	PARTS_SHIFT=$((20 - div))
+	PARTS_SHIFT=$ushift
 }
 
 # Active slot from misc bootloader_control at 0x800, as spd_dump select_ab():
@@ -1403,8 +1426,15 @@ fetch_parts_table() {
 		rm -f "$misc"
 	fi
 	load_parts_state || { echo "could not convert $raw to bytes" >&2; return 1; }
-	echo "parts: units -> bytes (shift $PARTS_SHIFT, like spd_dump); slot: ${ACTIVE_SLOT:-unknown}"
-	if [[ $PARTS_SHIFT != 10 ]]; then
+	echo "parts: units -> bytes (shift $PARTS_SHIFT${PARTS_VERIFIED:+, from spdhost}); slot: ${ACTIVE_SLOT:-unknown}"
+	if [[ $PARTS_VERIFIED == 1 && $PARTS_CORRECTED == 1 ]]; then
+		echo "note: the device's size probe disagreed with spd_dump's unit guess; spdhost corrected"
+		echo "every row to shift $PARTS_SHIFT from the device's answer (see its 'check:' line above)."
+	elif [[ $PARTS_VERIFIED == 0 ]]; then
+		echo "WARNING: this table's unit is a guess the device did not confirm (shift $PARTS_SHIFT)."
+		echo "The sizes shown may be off by a power of two. Dumps size each partition by asking"
+		echo "the device; a partition it will not size is reported UNVERIFIED, not ok."
+	elif [[ -z $PARTS_VERIFIED && $PARTS_SHIFT != 10 ]]; then
 		# L1: only shift 10 (KiB rows, eMMC) is a known unit. Anything else is
 		# UFS or spd_dump's heuristic lowered by a row under 1 MiB; spdhost
 		# printed what its one-row check_partition probe answered above.
@@ -1516,8 +1546,10 @@ verify_dump_manifest() {
 		(( rc != 0 )) || rc=1
 		return "$rc"
 	fi
+	local -A unver=()
 	while read -r tag name _; do
 		[[ $tag == ok ]] && okset[$name]=1
+		[[ $tag == unverified ]] && unver[$name]=1
 	done < "$man"
 	echo
 	echo "Verifying (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
@@ -1530,6 +1562,14 @@ verify_dump_manifest() {
 		((n++))
 		file="$DUMP_DIR/$file"
 		sz=$(stat -c %s "$file" 2>/dev/null || echo -1)
+		if [[ -n ${unver[$name]:-} ]]; then
+			# G1: read at a size from a guessed table unit the device would
+			# not confirm. The file is kept, but it is not called a backup.
+			failed+=("$name(size unverified)")
+			echo "UNVERIFIED $name: $sz bytes at a guessed table unit; the device would not size it."
+			echo "     $file is kept but NOT recorded in SHA256SUMS; it may be truncated."
+			continue
+		fi
 		if [[ -n ${okset[$name]:-} ]] && (( sz == bytes )); then
 			record_sha256 "$file" || failed+=("$name")
 			continue

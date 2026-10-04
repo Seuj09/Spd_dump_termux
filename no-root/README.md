@@ -253,13 +253,20 @@ Partition table and reads:
   KiB, it has no table row) and the first table row is `1`, as in spd_dump.
   The unit is whatever that
   loader reports (often sectors). On eMMC (ums9230) the units are KiB;
-  convert with `bytes = units << (20 - divisor)`, where `divisor` starts at
-  10 and drops while any non-zero entry is smaller than `1 << divisor`. The
-  menu does this and writes `partition_bytes.txt` in the dump folder
+  spd_dump converts with `bytes = units << (20 - divisor)`, where `divisor`
+  starts at 10 and drops while any non-zero entry is smaller than
+  `1 << divisor`. That is only a guess on UFS (MiB rows) or when one row is
+  under 1 MiB, so spdhost checks one row's size with the device and, when the
+  answer is the table's own number at another unit, corrects every row to it.
+  FILE starts with the unit spdhost used, as a comment line:
+  `# spdhost-parts shift S verified V` (`bytes = units << S`; `verified 0`
+  means the device did not confirm the guess, and `dump` then sizes each
+  partition by asking the device). The menu reads that line rather than
+  guessing, and writes `partition_bytes.txt` in the dump folder
   (`/sdcard/Download` by default, `backup/` when storage permission is missing).
-  On a phone whose `user_partition` holds a standard GPT — which is every
-  modern device — the rows come from that table instead and the unit is MiB,
-  the same number `partition-list` writes into the XML.
+  On a phone whose `user_partition` holds a standard GPT, the rows come from
+  that table instead. They print in MiB when every row is a whole MiB, else
+  in KiB (or finer), so a row under 1 MiB never prints as 0.
 - `partition-list [FILE]` — the same table as the XML `repartition` reads,
   byte for byte what spd_dump's `partition_list` writes for it: one
   `<Partitions>` list, `size` in the table's own unit, last row `0xffffffff`

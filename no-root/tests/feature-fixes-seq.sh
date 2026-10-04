@@ -58,10 +58,12 @@ check "R1: a plain write (no twin) is not blocked by the latch (rc $rc)" \
 # verity and frp-reset size their row from the same table: they use the
 # device's own size for the row instead of the doubled one.
 cp pt9 pt9vp; printf '%s\n' 'vbmeta 1024' 'persist 1024' >> pt9vp
-MOCK_PTABLE=$tmp/pt9vp MOCK_IMAGES=vbmeta sh r1v --dangerous parts pt.txt verity 0; rc=$?
+# MOCK_NOPROBE=uboot: the fetch's probe row will not be sized, so the unit stays a
+# guess (an answered probe at << 10 would correct the whole table instead, G1).
+MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp MOCK_IMAGES=vbmeta sh r1v --dangerous parts pt.txt verity 0; rc=$?
 check "R1: verity on a guessed unit uses the device's 1 MiB for vbmeta, not the table's 2 MiB (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q \"using the device's size for vbmeta: 1048576 bytes (table says 2097152)\" sh_r1v.log && grep -q '(1048576-byte rewrite)' sh_r1v.log"
-MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-reset r1persist.img; rc=$?
+MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-reset r1persist.img; rc=$?
 check "R1: frp-reset on a guessed unit backs up the device's 1 MiB persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s r1persist.img) = 1048576 ] && grep -q \"using the device's size for persist\" sh_r1p2.log"
 

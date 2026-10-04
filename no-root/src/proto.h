@@ -59,6 +59,13 @@ struct spd {
 	 * Cleared by a confirmed probe and by any table not built from a guess
 	 * (divisor 10, GPT, an XML repartition). */
 	int ptab_unit_bad;
+	/* G1: 1 when ptab_unit_bad is set but the device's size probe answered
+	 * exactly the table's raw unit at another shift (a UFS FDL2 that reports
+	 * MiB rows, read by spd_dump's divisor heuristic as << 19): every row was
+	 * re-scaled to that shift. The SIZES are then device-confirmed and the
+	 * dump paths use them; ptab_unit_bad stays set, so the table itself is
+	 * still never sent back or saved as XML on the strength of one probe. */
+	int ptab_unit_fixed;
 	/* R2: where this session saved the device's own table as repartition XML
 	 * (the auto partition_<time>.xml, or a partition-list FILE) before any
 	 * repartition. Empty = no backup; `repartition` refuses then. */
@@ -214,6 +221,10 @@ int spd_repartition_echo(struct spd *io, int idx, const char *newname);
 int spd_ptab_mib_unsafe(const struct spd *io, unsigned count, const char *what);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
+/* G1: 1 when io->ptab's byte sizes are known good: a table read with a known
+ * unit (spd_dump divisor 10, GPT, XML) or one the device's probe confirmed or
+ * corrected. 0 = the sizes come from a guessed unit nobody confirmed. */
+int spd_ptab_sizes_verified(const struct spd *io);
 /* Read [offset, offset+size) of NAME into MEM (exactly size bytes or error). */
 int spd_read_part_mem(struct spd *io, const char *name, uint64_t offset, uint64_t size, uint8_t *mem);
 /* spd_dump check_partition(): ask the DEVICE about NAME. Without NEED_SIZE the
