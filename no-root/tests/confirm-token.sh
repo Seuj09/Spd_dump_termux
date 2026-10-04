@@ -118,50 +118,48 @@ b=$(ls -1t mdump/misc-before-*.img | head -1); BS=$(sha256sum "$b" | awk '{print
 python3 "$drive" m6.pty "Choice:" '6\n' "y = continue" 'y\n' "Restore which" '\n' "type yes to write misc" 'yes\n' -- "export M=6; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [6] restore: token = backup image sha, misc == backup" bash -c "grep -q -- '--confirm-token=$BS' m6.pty && cmp -s m6.misc '$b'"
 
-# 8: menu [3] -> [2] set the active slot. This used to be the one misc write
-# that skipped the token (menu passed spdhost `set-active`, which hashed the
-# image only after patching it, so no token could be precomputed). The menu now
-# reads misc, builds the image itself and hashes THAT, so the write is guarded
-# like every other one. SLOTB is spdhost's set-active slot_b (--self-test pins
-# those 32 bytes against spd_dump's).
+# 8: menu [3] -> [2] set the active slot. H2: ONE session now -- spdhost
+# set-active reads misc, patches the slot block, writes the whole misc, reads it
+# back and resets. The token covers the PATCH: sha256 of the line
+# "spdhost-set-active b none\n" (no BCB for a system ending). It used to be the
+# sha256 of an image the menu built from a read in an earlier session, which is
+# exactly the two-session race this removes. SLOTB is spdhost's set-active
+# slot_b (--self-test pins those 32 bytes against spd_dump's); the mock misc has
+# no valid bootloader_control, so spdhost writes that fresh block.
 "$tmp/gen_expected" misc 0 1048576 > misc.raw
-TOKB=$(python3 - misc.raw "$tmp" <<'PY'
-import hashlib, sys
+python3 - misc.raw "$tmp" <<'PY'
+import sys
 raw = open(sys.argv[1], "rb").read()
 slot = bytes([0x5f,0x62,0,0,0x42,0x43,0x41,0x42,1,2,0,0,0x1e,0,0x6f,0] + [0] * 12 + [0x9e,0xe2,0x10,0x70])
-exp = raw[:0x800] + slot + raw[0x820:]
-open(sys.argv[2] + "/misc.slotB.exp", "wb").write(exp)
-print(hashlib.sha256(exp).hexdigest())
+open(sys.argv[2] + "/misc.slotB.exp", "wb").write(raw[:0x800] + slot + raw[0x820:])
 PY
-)
+TOKB=$(printf 'spdhost-set-active b none\n' | sha256sum | awk '{print $1}')
 python3 "$drive" m8.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'yes\r\n' -- "export M=8; source $tmp/menu_env.sh; set_slot_menu"; rc=$?
-check "menu [3]->[2] slot b: token = sha256 of the patched image, write-part misc, no --yes (rc $rc)" \
-	bash -c "grep -q 'misc image sha256: $TOKB' m8.pty && grep '^+ ' m8.pty | grep -q -- '--confirm-token=$TOKB' && grep '^+ ' m8.pty | grep -q 'write-part misc' && ! grep '^+ ' m8.pty | grep -q -- '--yes'"
-check "menu [3]->[2] slot b: whole misc written byte-for-byte (slot_b at 0x800), read back, reset" \
-	bash -c "grep -q 'confirm-token matches' m8.err && grep -q 'misc-verify: OK' m8.err && tail -1 m8.seq | grep -q '^SEQ 05 ' && cmp -s m8.misc misc.slotB.exp"
+check "menu [3]->[2] slot b: ONE session, token = sha256 of the patch line, set-active b reset, no --yes (rc $rc)" \
+	bash -c "grep -q 'confirm token (sha256 of the patch: slot b, BCB for reset): $TOKB' m8.pty && grep '^+ ' m8.pty | grep -q -- '--confirm-token=$TOKB' && grep '^+ ' m8.pty | grep -q 'misc-backup .* set-active b reset' && [ \$(grep -c '^+ ' m8.pty) = 1 ] && ! grep '^+ ' m8.pty | grep -q -- '--yes'"
+check "menu [3]->[2] slot b: whole misc written byte-for-byte (slot_b at 0x800), read back, reset; results reported apart" \
+	bash -c "grep -q 'confirm-token matches' m8.err && grep -q 'misc-verify: OK' m8.err && tail -1 m8.seq | grep -q '^SEQ 05 ' && cmp -s m8.misc misc.slotB.exp && grep -q 'misc verify: OK' m8.pty && grep -q 'reset: acknowledged' m8.pty"
 python3 "$drive" m9.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'no\r\n' -- "export M=9; source $tmp/menu_env.sh; set_slot_menu"; rc=$?
 check "menu slot b, typed 'no': 'menu: not confirmed', no token, zero write frames" \
 	bash -c "grep -q 'menu: not confirmed' m9.pty && ! grep '^+ ' m9.pty | grep -q -- '--confirm-token' && nowrite m9"
 
-# 9: with a recovery/fastbootd ending the BCB is folded INTO the slot write.
-# reboot-recovery would be a second misc write, and one --confirm-token
-# authorizes exactly one, so the two are merged into a single image and a single
-# session (no re-plug after the reset). Everything below the 2048-byte BCB --
-# the slot at 0x800 included -- comes from the live misc.
-TOKFB=$(python3 - misc.slotB.exp "$root/misc/misc-fastbootd.bin" "$tmp" <<'PY'
-import hashlib, sys
+# 9: with a recovery/fastbootd ending the BCB rides in the same set-active
+# (--bcb fastboot): one misc write, one token (slot letter + BCB sha), and
+# spdhost resets itself. Everything past the 2048-byte BCB -- the slot at
+# 0x800 included -- comes from the live misc of THIS session.
+FBSHA=$(sha256sum "$root/misc/misc-fastbootd.bin" | awk '{print $1}')
+TOKFB=$(printf 'spdhost-set-active b %s\n' "$FBSHA" | sha256sum | awk '{print $1}')
+python3 - misc.slotB.exp "$root/misc/misc-fastbootd.bin" "$tmp" <<'PY'
+import sys
 base = open(sys.argv[1], "rb").read()
 bcb = open(sys.argv[2], "rb").read()
 assert len(bcb) == 2048
-exp = bcb + base[2048:]
-open(sys.argv[3] + "/misc.slotB.fb.exp", "wb").write(exp)
-print(hashlib.sha256(exp).hexdigest())
+open(sys.argv[3] + "/misc.slotB.fb.exp", "wb").write(bcb + base[2048:])
 PY
-)
 python3 "$drive" m10.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'yes\r\n' -- \
 	"export M=10 MOCK_MISC_IN=$tmp/misc.slotB.exp; source $tmp/menu_env.sh; BOOT_AFTER=reboot-fastboot; set_slot_menu"; rc=$?
-check "menu slot b + fastbootd ending: BCB folded in, ONE --confirm-token for the merged image (rc $rc)" \
-	bash -c "grep -q 'Ending is reboot-fastboot: its 2048-byte BCB is part of this write' m10.pty && grep -q 'misc image sha256: $TOKFB' m10.pty && grep '^+ ' m10.pty | grep -q -- '--confirm-token=$TOKFB' && [ \$(grep -o -- '--confirm-token=[0-9a-f]\{64\}' m10.pty | sort -u | wc -l) = 1 ] && ! grep '^+ ' m10.pty | grep -q -- '--yes'"
+check "menu slot b + fastbootd ending: set-active b --bcb fastboot, ONE --confirm-token over slot+BCB (rc $rc)" \
+	bash -c "grep -q 'Ending is reboot-fastboot: its 2048-byte BCB is part of this one misc write' m10.pty && grep '^+ ' m10.pty | grep -q -- '--confirm-token=$TOKFB' && grep '^+ ' m10.pty | tr -d '\\r' | grep -q 'set-active b --bcb fastboot\$' && [ \$(grep -o -- '--confirm-token=[0-9a-f]\{64\}' m10.pty | sort -u | wc -l) = 1 ] && ! grep '^+ ' m10.pty | grep -q -- '--yes'"
 check "menu slot b + fastbootd: written misc = BCB at 0, live bytes (slot_b at 0x800) after it, reset" \
 	bash -c "cmp -s m10.misc misc.slotB.fb.exp && tail -1 m10.seq | grep -q '^SEQ 05 '"
 

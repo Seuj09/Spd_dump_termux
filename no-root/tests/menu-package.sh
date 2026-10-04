@@ -95,7 +95,8 @@ ck "[3] shipped_fdl_pair without a model still returns the main pair" $?
 
 # The BCB images menu [2]/[5] and extra [1]/[6]/[7] write. The bytes matter:
 # confirm_wipe_userdata refuses anything whose sha256 is not MISC_WIPE_SHA,
-# and splice_misc_bcb refuses a BCB that is not what spdhost synthesizes.
+# and set-active --bcb (menu [3] slot + recovery/fastbootd ending) writes what
+# spdhost synthesizes, so the shipped files must be those bytes.
 echo
 echo "misc/ (menu [2] reboot, [5] wipe, extra [1]/[6]/[7])"
 resolve_misc_dir

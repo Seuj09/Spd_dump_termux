@@ -2172,8 +2172,14 @@ guarded_misc_session() {
 	# One --confirm-token authorizes exactly ONE misc write, so a caller must
 	# never put a second misc-writing command (reboot-recovery, reboot-fastboot,
 	# another write-part misc) behind this one: spdhost refuses it and exits.
-	local ending=reset
+	local ending=reset st verify endres
 	if (( $# > 0 )); then ending=${!#}; fi
+	case $ending in
+		recovery) ending="reset into recovery" ;;
+		fastboot) ending="reset into fastbootd" ;;
+		reboot-recovery) ending="reset into recovery" ;;
+		reboot-fastboot) ending="reset into fastbootd" ;;
+	esac
 	MISC_CONFIRM_TOKEN=
 	if [[ ! $tok =~ ^[0-9a-f]{64}$ ]]; then
 		echo "menu: not confirmed ($kind: no confirm token); nothing written" >&2
@@ -2194,9 +2200,30 @@ guarded_misc_session() {
 	else
 		backup_cmd=(misc-backup "$backup")
 	fi
+	# spdhost appends misc-verify=... and reset=/power-off=... here, so the
+	# two results are reported apart (H1): a lost reset ack after a verified
+	# misc is not a failed misc write, and a verified misc is not a reset.
+	st=$(mktemp "$(spd_tmpdir 2>/dev/null || echo /tmp)/spdhost-status.XXXXXX" 2>/dev/null) || st=
+	local -x SPDHOST_STATUS_FILE=$st
 	run_session "--confirm-token=$tok" fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" "${backup_cmd[@]}" "$@"
 	rc=$?
+	verify=$( [[ -n $st ]] && awk -F= '$1 == "misc-verify" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	endres=$( [[ -n $st ]] && awk -F= '$1 == "reset" || $1 == "power-off" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	[[ -n $st ]] && rm -f "$st"
+	case $verify in
+		ok) echo "misc verify: OK (the whole misc was read back and matches)" ;;
+		failed) echo "misc verify: FAILED (read-back mismatch; spdhost did not reset)" ;;
+		not-reached) echo "misc verify: not reached (the misc write itself failed)" ;;
+		*) echo "misc verify: not reached (spdhost stopped before the misc write)" ;;
+	esac
+	case $endres in
+		ack) echo "$ending: acknowledged by the loader" ;;
+		left-bus) echo "$ending: device left the bus on reset (expected)" ;;
+		timeout) echo "$ending: FAILED -- no ack and the device is still connected (timeout)" ;;
+		not-sent|usb-error|nack) echo "$ending: FAILED ($endres)" ;;
+		*) [[ $verify == ok ]] && echo "$ending: not run" ;;
+	esac
 	load_parts_state >/dev/null 2>&1
 	want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
 	[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
@@ -2218,7 +2245,12 @@ guarded_misc_session() {
 			echo "If spdhost said 'misc CHANGED since it was read', nothing was written: misc"
 			echo "changed between the read session and this one. Run this option again."
 		fi
-		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no $ending happens after a failed backup or a misc read-back mismatch."
+		if [[ $verify == ok ]]; then
+			echo "$kind: misc WAS written and verified; only the $ending did not complete (exit $rc)."
+			echo "Hold power (or unplug the battery/USB) to restart; misc already holds the change."
+		else
+			echo "$kind FAILED (exit $rc). Read the spdhost lines above: no $ending happens after a failed backup or a misc read-back mismatch."
+		fi
 	else
 		echo "$kind: misc written, read back and verified, then $ending."
 	fi
@@ -2792,41 +2824,33 @@ repartition_menu() {
 		repartition "$xml" "$BOOT_AFTER"
 }
 
-# Splice the shipped 2048-byte BCB for a recovery/fastbootd ending onto the
-# front of a full misc image: IN OUT, OUT the same size as IN. The point is
-# that a slot change and a BCB ending become ONE misc write, because one
-# --confirm-token authorizes exactly one misc write per session and a second
-# session would need the phone back in download mode after the reset.
-# misc+0x800 is past the 2048 bytes, so the slot survives either way.
-splice_misc_bcb() {
-	local kind=$1 in=$2 out=$3 bcb want got
-	resolve_misc_dir || return 1
-	case $kind in
-		reboot-recovery) bcb=$MISC_DIR/misc-recovery.bin ;;
-		reboot-fastboot) bcb=$MISC_DIR/misc-fastbootd.bin ;;
-		*) echo "no shipped BCB for $kind" >&2; return 1 ;;
+# The --confirm-token for `set-active`: spdhost hashes the PATCH, not the misc
+# image -- the line "spdhost-set-active <a|b> <BCB sha256|none>\n" -- because
+# the image around the patch is whatever misc holds when the write session
+# reads it. WHICH a|b, ENDING the BOOT_AFTER value.
+set_active_token() {
+	local which=$1 ending=$2 bcb=none
+	case $ending in
+		reboot-recovery|reboot-fastboot) bcb=$(misc_bcb_sha256 "$ending") ;;
 	esac
-	[[ -f $bcb ]] || { echo "missing $bcb" >&2; return 1; }
-	if (( $(stat -c %s "$bcb") != 2048 )); then
-		echo "$bcb is not a 2048-byte BCB" >&2
-		return 1
-	fi
-	# Must be the exact bytes spdhost's reboot-* command synthesizes, or the
-	# merged image would not boot where the user asked.
-	want=$(misc_bcb_sha256 "$kind")
-	got=$(sha256sum "$bcb" | awk '{print $1}')
-	if [[ $got != "$want" ]]; then
-		echo "refusing: $bcb is not the BCB spdhost writes for $kind" >&2
-		return 1
-	fi
-	{ head -c 2048 "$bcb"; tail -c +2049 "$in"; } > "$out" || return 1
+	printf 'spdhost-set-active %s %s\n' "$which" "$bcb" | sha256sum | awk '{print $1}'
 }
 
+# H2: ONE session. spdhost reads misc, patches the slot block (and the BCB for
+# a recovery/fastbootd ending), writes the whole misc, reads it back and
+# resets. The old flow read misc in one session and wrote an image built from
+# that read in a second one; anything that touched the slot block in between
+# (the bootloader counting a try down, a fastboot boot) was either refused or,
+# before the expect check, overwritten with stale bytes.
 set_slot_menu() {
-	local which live live_sha src patched digest bin ending rc
+	local which digest ending rc
+	local -a cmd
 	need_loaders || return
-	echo "Set the active A/B slot. This rewrites 32 bytes at misc+0x800"
-	echo "and then rewrites the whole misc partition (backup + read-back)."
+	echo "Set the active A/B slot. spdhost reads misc, patches the 32-byte slot"
+	echo "block at misc+0x800 (keeping the other slot's tries/successful), writes"
+	echo "the whole misc back and reads it back -- all in one session."
+	echo "Only for A/B phones (uboot_a and uboot_b in the table); spdhost refuses"
+	echo "anything else before writing."
 	echo "[1] slot a"
 	echo "[2] slot b"
 	echo "[0] Back"
@@ -2838,62 +2862,46 @@ set_slot_menu() {
 		*) echo "Unchanged."; return 1 ;;
 	esac
 	continue_choice "set the active slot to $which" || return
-	bin=$(resolve_spdhost_bin) || {
-		echo "spdhost binary not found next to this tree or on PATH. From no-root/: make" >&2
-		return 1
-	}
-	# The confirm token is the sha256 of exactly what spdhost will write, so
-	# the image must exist BEFORE the write session starts: read misc now,
-	# build the image to write, hash it. pack-slot applies the same
-	# bootloader_control set-active builds (spdhost --self-test checks those 32
-	# bytes byte-for-byte against spd_dump's slot_a/slot_b).
-	echo "Reading misc first so the confirm token can cover the exact bytes written."
-	read_misc_image || return 1
-	live=$MISC_LIVE_IMAGE
-	# What misc held in THIS read. The write session checks misc against it
-	# and stops before writing if anything changed it in between (M3).
-	live_sha=$(sha256sum "$live" | awk '{print $1}')
-	src=$live
+	cmd=(set-active "$which")
 	ending=reset
 	case $BOOT_AFTER in
 		power-off)
 			ending=power-off
+			cmd+=(power-off)
 			;;
-		reboot-recovery|reboot-fastboot)
-			# Fold the BCB in instead of running reboot-* afterwards: that
-			# command is itself a misc write, and one token authorizes one.
-			src=$live.merged
-			if ! splice_misc_bcb "$BOOT_AFTER" "$live" "$src"; then
-				rm -f "$live" "$src"
-				return 1
-			fi
-			echo "Ending is $BOOT_AFTER: its 2048-byte BCB is part of this write."
+		reboot-recovery)
+			ending="reset into recovery"
+			cmd+=(--bcb recovery)
+			echo "Ending is $BOOT_AFTER: its 2048-byte BCB is part of this one misc write."
+			;;
+		reboot-fastboot)
+			ending="reset into fastbootd"
+			cmd+=(--bcb fastboot)
+			echo "Ending is $BOOT_AFTER: its 2048-byte BCB is part of this one misc write."
+			echo "fastbootd lives in recovery and needs an Android 10+ recovery image."
+			;;
+		*)
+			cmd+=(reset)
 			;;
 	esac
-	patched=$src.slot-$which
-	if ! "$bin" pack-slot "$which" "$src" "$patched"; then
-		echo "pack-slot failed; misc was not touched." >&2
-		rm -f "$live" "$src" "$patched"
-		return 1
+	if [[ $which == b ]]; then
+		echo "note: slot b is often never flashed on these phones. spdhost checks"
+		echo "boot_b/vbmeta_b before a recovery ending; with a 'super' partition,"
+		echo "slot b's system may be empty and a normal boot on b can fail."
 	fi
-	rm -f "$live" "$src"
-	digest=$(sha256sum "$patched" | awk '{print $1}')
-	echo "About to write $(stat -c %s "$patched") bytes to partition 'misc' (active slot $which), then $ending."
-	echo "misc image sha256: $digest"
+	digest=$(set_active_token "$which" "$BOOT_AFTER")
+	echo "About to set the active slot to $which in partition 'misc' (whole misc rewritten, read back), then $ending."
+	echo "confirm token (sha256 of the patch: slot $which, BCB for $BOOT_AFTER): $digest"
 	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
 	if [[ ! -t 0 ]]; then
 		echo "refusing to write misc without a TTY (no silent --yes)" >&2
-		rm -f "$patched"
 		return 1
 	fi
 	if ! menu_typed_yes "type yes to set the active slot to $which: " "$digest"; then
-		rm -f "$patched"
 		return 1
 	fi
-	MISC_EXPECT_SHA=$live_sha
-	guarded_misc_session "set-active $which" write-part misc "$patched" "$ending"
+	guarded_misc_session "set-active $which" "${cmd[@]}"
 	rc=$?
-	rm -f "$patched"
 	return "$rc"
 }
 
