@@ -12,10 +12,14 @@
 
 #define HDLC_MARK 0x7e
 #define HDLC_ESC 0x7d
-/* usbfs starts scatter-gather above USB_SG_SIZE (16384). A 32 KiB bulk IN
- * is two segments on a 4.14 host and does not complete when the reply is a
- * short packet, so libusb reports TIMEOUT. Kernel 3.10 has no such cap and
- * libusb already splits there. Frames larger than this are read in pieces. */
+/* libusb's linux backend splits a bulk transfer by MAX_BULK_BUFFER_LENGTH
+ * (16384) depending on the usbfs caps: one URB when the kernel reports
+ * BULK_SCATTER_GATHER or NO_PACKET_SIZE_LIM, otherwise 16 KiB URBs, with or
+ * without BULK_CONTINUATION. Capping each bulk IN at 16 KiB makes it a single
+ * URB in every one of those branches. A frame larger than this is read in
+ * pieces and reassembled in spd_recv. Why 32 KiB reads timed out on the
+ * Android 10 Go host is still unproven; SPDHOST_USB_CAPS=1 plus
+ * SPDHOST_BROM_TRACE=1 on that phone is the way to confirm it. */
 #define RECV_CAP 0x4000
 #define RAW_CAP (4 + 0x10000 + 2)
 

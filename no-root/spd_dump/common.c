@@ -226,9 +226,13 @@ void find_endpoints(libusb_device_handle *dev_handle, int result[2]) {
 }
 #endif
 
-/* 16384, not 32768. usbfs scatter-gather starts above USB_SG_SIZE. A 32 KiB
- * bulk IN on a 4.14 host does not complete on the short packet a BootROM
- * sends (LIBUSB_ERROR_TIMEOUT). Kernel 3.10 never submits that URB. */
+/* 16384, not 32768. libusb's linux backend splits bulk transfers by
+ * MAX_BULK_BUFFER_LENGTH (16384) depending on the usbfs caps (one URB with
+ * BULK_SCATTER_GATHER or NO_PACKET_SIZE_LIM, else 16 KiB URBs with or without
+ * BULK_CONTINUATION). Capping the read at 16 KiB guarantees a single URB in
+ * every caps branch. The root cause of the 32 KiB timeouts on the Android 10
+ * Go host is still unproven; spdhost's SPDHOST_USB_CAPS=1 plus
+ * SPDHOST_BROM_TRACE=1 is the way to confirm it. */
 #define RECV_BUF_LEN (0x4000)
 
 char fn_partlist[40] = { 0 };
