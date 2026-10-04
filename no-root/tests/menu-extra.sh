@@ -334,9 +334,11 @@ check "read-misc: parts then misc-backup, into the temp dir and not the dump fol
 # --------------------------------------------------- chip-uid
 # Read-only: no typed confirm, and nothing on the line that writes or reboots.
 tr=$(menu chip_uid_action "Press Enter to continue" '\r')
-check "chip-uid: one read-only session, no write, no erase, no --yes" \
-	bash -c "grep -q 'chip-uid' $tmp/ran/log &&
-		! grep -qE -- 'write-part|erase|repartition|reset|--yes' $tmp/ran/log"
+# L2: the session now ends (configured reset/power-off) instead of leaving the
+# phone in FDL2, so the only thing after chip-uid is that ending.
+check "chip-uid: one read-only session ending in reset/power-off, no write, no erase, no --yes" \
+	bash -c "grep -qE 'chip-uid (reset|power-off)\$' $tmp/ran/log &&
+		! grep -qE -- 'write-part|erase|repartition|reboot-|--yes' $tmp/ran/log"
 
 # ------------------------------------- a reset that does not happen
 # reboot_mode [1] (system), [4] (power off) and extra [3] used to drop the

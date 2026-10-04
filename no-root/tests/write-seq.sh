@@ -631,8 +631,9 @@ cu=$(menu_extra_chip_uid)
 # $cu goes in as an argument: `bash -c` gets a fresh shell and cannot see the
 # parent's variables, so a `\$cu` inside the string would expand to nothing
 # (and an empty subject makes the `! grep` check below pass for the wrong reason).
-check "menu Extra [11] sends one chip-uid session" \
-	bash -c "[ \$(grep -c '^+ ' <<<\"\$1\") = 1 ] && grep -Eq '^\+ .* chip-uid\$' <<<\"\$1\"" _ "$cu"
+# L2: a read-only session ends with the configured reset/power-off.
+check "menu Extra [11] sends one chip-uid session (ending in reset/power-off)" \
+	bash -c "[ \$(grep -c '^+ ' <<<\"\$1\") = 1 ] && grep -Eq '^\+ .* chip-uid (reset|power-off)\$' <<<\"\$1\"" _ "$cu"
 check "menu Extra [11] sends no --yes for chip-uid" \
 	bash -c "! grep -q -- '--yes' <<<\"\$1\"" _ "$cu"
 
