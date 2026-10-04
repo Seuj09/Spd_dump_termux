@@ -424,7 +424,17 @@ Dangerous:
   row, which is what the release unlock does.
 - `erase-part NAME` — erase any other partition. Refuses `persist`,
   `persist_a`, `persist_b`, `all`, `splloader` and `splloader_bak` even with
-  `--yes` or `--dangerous`; `danger-erase` is the way to those.
+  `--yes` or `--dangerous`; `danger-erase` is the way to those. NAME is
+  resolved against the live table first, as spd_dump's `e` does: `boot`
+  erases `boot_a` on a slot-a phone, a number is a table index (`0` is
+  `splloader`, so it is refused), and the refusals apply to the resolved
+  name. A name the table does not know is refused, not sent literally.
+- **`erase-part userdata` is not spd_dump's `e userdata`.** spdhost erases the
+  userdata partition itself. spd_dump's `e userdata` (common.c
+  erase_partition, ~1170) never erases userdata: it writes the wipe BCB to
+  misc and erases `persist`. spdhost writes no BCB and leaves persist alone.
+  For a recovery-driven factory reset use `write-part misc misc/misc-wipe.bin`
+  (menu `[10]` → `[1]`, or `[2]` → `[5]`).
 
 ### Offline image tools
 

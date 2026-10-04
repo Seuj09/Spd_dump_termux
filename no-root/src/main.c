@@ -194,7 +194,14 @@ static void usage(void)
 		"  erase_flash ADDR SIZE   raw erase by address (spd_dump erase_flash).\n"
 		"                          --yes confirms it; it never names a partition,\n"
 		"                          so erase-part's blacklist has nothing to match.\n"
-		"  erase-part NAME         not persist, not splloader, not all\n"
+		"  erase-part NAME         not persist, not splloader, not all. NAME is\n"
+		"                          resolved first, as spd_dump does: boot -> boot_a\n"
+		"                          on slot a, 0 -> splloader; the refusals apply to\n"
+		"                          the resolved name. erase-part userdata erases\n"
+		"                          the userdata partition itself; unlike spd_dump's\n"
+		"                          `e userdata` it does NOT write the wipe BCB to\n"
+		"                          misc and does NOT erase persist (factory reset is\n"
+		"                          write-part misc misc/misc-wipe.bin, menu [10]->[1]).\n"
 		"  verity 0|1              DANGEROUS. Byte 0x7B of vbmeta (spd_dump):\n"
 		"                          0 writes 0x01 (dm-verity off), 1 writes 0x00\n"
 		"                          on each vbmeta* that exists. Not byte 0x78.\n"
@@ -1891,12 +1898,38 @@ int main(int argc, char **argv)
 				return 1;
 			i += 2;
 		} else if (strcmp(cmd, "erase-part") == 0) {
+			char ename[40];
+			uint64_t esz = 0;
+			int lk;
 			need(argc, i, 1, "erase-part");
 			need_fdl2(io, "erase-part");
 			if (erase_refused(argv[i + 1]))
 				return 1;
-			confirm(yes, "erase", argv[i + 1]);
-			if (spd_erase_part(io, argv[i + 1]))
+			/* spd_dump erase_partition resolves the name through
+			 * get_partition_info (common.c:1592) before it sends
+			 * anything, so `e boot` erases boot_a on a slot-a phone
+			 * and `e 0` is splloader. Do the same, run the refusal
+			 * list on the RESOLVED name (boot -> boot_a, 0 ->
+			 * splloader), and send that name. A name the live table
+			 * does not know is refused rather than sent literally. */
+			lk = spd_resolve_part(io, argv[i + 1], ename, sizeof(ename), &esz);
+			if (lk == -2) {
+				fprintf(stderr, "erase-part: no partition table in this session; run parts"
+					" first. Nothing erased.\n");
+				return 1;
+			}
+			if (lk != 0) {
+				fprintf(stderr, "erase-part: '%s' is not in the live partition table"
+					" (also tried the active slot's _a/_b row). Nothing erased.\n",
+					argv[i + 1]);
+				return 1;
+			}
+			if (strcmp(ename, argv[i + 1]))
+				fprintf(stderr, "erase-part: %s -> %s\n", argv[i + 1], ename);
+			if (erase_refused(ename))
+				return 1;
+			confirm(yes, "erase", ename);
+			if (spd_erase_part(io, ename))
 				return 1;
 			i += 2;
 		} else if (strcmp(cmd, "read_flash") == 0) {
