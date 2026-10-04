@@ -72,7 +72,7 @@ static int junk_file(const char *raw, const char *name)
 		!strncmp(raw, "lk", 2) || !strncmp(raw, "0x", 2) || !strncmp(raw, "custom_exec", 11))
 		return 1;
 	if (!strcmp(name, "SHA256SUMS") || !strcmp(name, "misc-slotinfo") ||
-		!strncmp(name, "misc-before-", 12))
+		!strncmp(name, "misc-before-", 12) || !strncmp(name, "persist-before-", 15))
 		return 1;
 	return 0;
 }
@@ -641,14 +641,29 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 				continue;
 			}
 			psz = write_byte_limit(io, resolved, psz);
+			/* L3: a folder flash or restore never writes more than 256 KiB
+			 * to splloader -- the size every splloader dump is (dumpcmd's
+			 * lookup) -- even when the table has no row to cap it with, or
+			 * a bigger one. A larger splloader.img in a folder is not a
+			 * dump of it, and it aborts the plan like any oversized image. */
+			if (!strncmp(resolved, "splloader", 9) && (psz == 0 || psz > SPLLOADER_BYTES))
+				psz = SPLLOADER_BYTES;
+			/* L2: misc is 2048 bytes (a BCB) or the whole live row, and
+			 * nothing else is safe to write. preset_modem saves it at a fixed
+			 * 1 MiB, so a phone whose misc row is another size refused the
+			 * WHOLE restore here. Skip that one row, loudly, instead: misc
+			 * is left exactly as it is and every other image still goes. */
+			if (!strcmp(resolved, "misc") && !file_len(items[i].path, &flen) &&
+				flen != 2048 && flen != psz) {
+				fprintf(stderr, "write-parts: skip misc: %s is %llu bytes, and misc takes 2048"
+					" bytes or the whole partition (%llu). misc is NOT written; the rest of"
+					" this restore continues\n", items[i].path, (unsigned long long)flen,
+					(unsigned long long)psz);
+				continue;
+			}
 			if (file_len(items[i].path, &flen) || flen == 0 || (psz && flen > psz)) {
 				fprintf(stderr, "write-parts: %s is empty or larger than the partition (%llu > %llu)\n",
 					resolved, (unsigned long long)flen, (unsigned long long)psz);
-				free(items);
-				return NULL;
-			}
-			if (!strcmp(resolved, "misc") && flen != 2048 && flen != psz) {
-				fprintf(stderr, "write-parts: misc image must be 2048 bytes or the whole partition\n");
 				free(items);
 				return NULL;
 			}
