@@ -2,6 +2,7 @@
 # Menu [unlock bootloader] recovery-path fixes (feature-audit/REPORT.md):
 #   U1  a fresh splloader/uboot backup every run, in its own folder; an older
 #       backup_spl/ is never reused or restored
+#   U2  splloader_bak is erased before splloader
 # The runner is a fake that records each session's argv and writes the files a
 # backup session would; confirm_dangerous/pause/ready are stubbed (the typed
 # word is the pty tests' job, in write-seq.sh).
@@ -81,6 +82,13 @@ check "U1: a short splloader backup stops the run before any erase" \
 unlock_run u1b
 d1=$(grep -o '/backup_spl/unlock-[0-9-]*' rec_u1 | head -1); d2=$(grep -o '/backup_spl/unlock-[0-9-]*' rec_u1b | head -1)
 check "U1: each run gets its own backup folder ($d1 vs $d2)" bash -c "[ -n '$d1' ] && [ -n '$d2' ] && [ '$d1' != '$d2' ]"
+
+# ---- U2 ---------------------------------------------------------------------------------
+check "U2: the erase session names splloader_bak first, then splloader" \
+	bash -c "grep -q 'danger-erase splloader_bak danger-erase splloader reset' rec_u1"
+unlock_run u2fail FAIL_ON='*danger-erase*'
+check "U2: a failed erase session skips cboot and the unlock loader but still restores" \
+	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part splloader' rec_u2fail"
 
 echo "menu-unlock: $pass passed, $fail failed"
 (( fail == 0 ))

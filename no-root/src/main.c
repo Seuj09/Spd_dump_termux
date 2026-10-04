@@ -442,7 +442,7 @@ static void confirm_dangerous(const char *what)
 		buf[l] = 0;
 		if (strcmp(buf, "dangerous") == 0) {
 			/* One typed word covers the rest of this process. The unlock
-			 * session erases splloader and then splloader_bak; a second
+			 * session erases splloader_bak and then splloader; a second
 			 * refusal would exit after the first erase. */
 			dangerous_ok = 1;
 			fprintf(stderr, "spdhost: DANGEROUS confirmed: %s\n", what);

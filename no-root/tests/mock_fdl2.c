@@ -328,6 +328,14 @@ static void log_out(const uint8_t *buf, int len)
 		if (getenv("MOCK_RESET_GONE")) { bus_gone = 1; reply_len = reply_pos = 0; return; }
 		if (getenv("MOCK_RESET_SILENT")) { reply_len = reply_pos = 0; return; }
 		make_reply(0x80, NULL, 0, crc); return;
+	case 0x0a: { /* ERASE: name[36]wchar. MOCK_FAIL_ERASE=NAME refuses that one
+	              * name, as a loader that will not erase splloader_bak does. */
+		const char *fe = getenv("MOCK_FAIL_ERASE");
+		char nm[40]; int q;
+		for (q = 0; q < 36 && 4 + 2 * q < plen + 4; q++) { nm[q] = raw[4 + 2 * q]; if (!nm[q]) break; }
+		nm[q < 36 ? q : 36] = 0;
+		if (fe && !strcmp(fe, nm)) { make_reply(0x82, NULL, 0, crc); return; }
+		make_reply(0x80, NULL, 0, crc); return; }
 	default: make_reply(0x80, NULL, 0, crc); return;
 	}
 }

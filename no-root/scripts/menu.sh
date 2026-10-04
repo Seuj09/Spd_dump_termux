@@ -3213,17 +3213,22 @@ unlock_bootloader_menu() {
 		echo "Building spl-unlock.bin from $spl."
 		unlock_make_spl_unlock "$work" "$spl" || return 1
 	fi
-	echo "DANGEROUS: next session erases splloader and splloader_bak, then reset."
+	echo "DANGEROUS: next session erases splloader_bak, then splloader, then reset."
 	echo "spdhost asks for the word dangerous once. That answer covers both erases."
 	echo "Any other answer sends nothing."
 	echo "The backup stays in $work."
 	pause || return 1
 	ready || return 1
 	erase_rc=0
+	# U2: splloader_bak first. spdhost stops the session at the first refused
+	# erase, so a loader that will not erase splloader_bak now leaves
+	# splloader untouched, instead of exiting after splloader is already gone.
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		danger-erase splloader danger-erase splloader_bak reset || erase_rc=$?
+		danger-erase splloader_bak danger-erase splloader reset || erase_rc=$?
 	if (( erase_rc != 0 )); then
 		echo "Erase session failed (exit $erase_rc)."
+		echo "splloader_bak is erased first, so if that erase was the one refused,"
+		echo "splloader was never erased (see the session output above)."
 		echo "The unlock loader is skipped. The last session still writes $work back."
 	fi
 	if (( erase_rc == 0 )); then

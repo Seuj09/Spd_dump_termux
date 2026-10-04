@@ -116,5 +116,17 @@ check "R2: the diff is printed before the confirm question (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0b ' sh_r2ask.seq &&
 		awk '/SIZE CHANGED/{d=NR} /refusing repartition from/{q=NR} END{exit !(d && q && d < q)}' sh_r2ask.log"
 
+# ---- U2: the menu's erase session, bak first ------------------------------------------------
+printf '%s\n' 'splloader 256' 'splloader_bak 256' 'misc 1024' 'uboot 1024' 'boot 4096' 'userdata 8192' > ptu
+efr() { awk '$1=="SEQ" && $2=="0a" {print $4}' "$1"; }
+u16() { local s=$1 i o=; for ((i = 0; i < ${#s}; i++)); do o+=$(printf '%02x00' "'${s:i:1}"); done; printf '%s' "$o"; }
+export -f efr u16
+MOCK_PTABLE=$tmp/ptu MOCK_FAIL_ERASE=splloader_bak sh u2bad --dangerous danger-erase splloader_bak danger-erase splloader reset; rc=$?
+check "U2: loader refuses splloader_bak: session stops, splloader is never erased (rc $rc)" \
+	bash -c "[ $rc != 0 ] && efr sh_u2bad.seq | grep -q '^$(u16 splloader_bak)' && ! efr sh_u2bad.seq | grep -q '^$(u16 splloader)0000'"
+MOCK_PTABLE=$tmp/ptu sh u2ok --dangerous danger-erase splloader_bak danger-erase splloader reset; rc=$?
+check "U2: both accepted: splloader_bak then splloader, then reset (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \"\$(efr sh_u2ok.seq | cut -c1-28)\" = \"\$(printf '%s\n%s' $(u16 splloader_bak) $(u16 splloader)0000 | cut -c1-28)\" ]"
+
 echo "feature-fixes-seq: $pass passed, $fail failed"
 (( fail == 0 ))
