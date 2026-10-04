@@ -2852,11 +2852,14 @@ static int fetch_ptab(struct spd *io)
 			unsigned k, pick = 0;
 			int saved_storage = io->storage;
 			uint64_t probed;
+			/* check_partition's search starts at 2 MiB and only grows from
+			 * there, so it can size a row of 2 MiB or more: probe the first
+			 * such row, else whatever row has a size. */
 			for (k = 0; k < n; k++)
-				if (!strcmp(io->ptab[k].name, "misc"))
+				if (io->ptab[k].size >= (2ull << 20))
 					break;
 			pick = k;
-			if (pick >= n || !io->ptab[pick].size)
+			if (pick >= n)
 				for (pick = 0; pick + 1 < n && !io->ptab[pick].size; pick++)
 					;
 			fprintf(stderr,

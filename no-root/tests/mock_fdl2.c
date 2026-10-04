@@ -34,6 +34,8 @@
  *                     every later IN read is LIBUSB_ERROR_NO_DEVICE: the
  *                     loader reset before its ack left (H1).
  *   MOCK_RESET_SILENT=1 those two get no reply at all (a timeout).
+ *   MOCK_IMAGES=P1,P2 those partitions read with a boot-image magic in their
+ *                     first 8 bytes (AVB0 for vbmeta*, else ANDROID!).
  * Data bytes are pattern_byte(offset) ^ name_seed(name) (see mock_pattern.h).
  *
  * Stateful fake libusb: BootROM -> FDL1 -> FDL2 with partition reads.
@@ -225,6 +227,17 @@ static void log_out(const uint8_t *buf, int len)
 		else if (gpt_wanted(cur_part) && off + want <= GPT_LEN) memcpy(data, gptbuf + off, want);
 		else if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
 		else for (k = 0; k < want; k++) data[k] = part_byte(cur_part, off + k);
+		{ /* MOCK_IMAGES=a,b,...: those partitions start with a real header
+		   * magic (AVB0 for vbmeta*, else ANDROID!), for the M5 check. */
+		  const char *im = getenv("MOCK_IMAGES");
+		  if (im && off < 8) {
+			char lst[512], *t; snprintf(lst, sizeof lst, "%s", im);
+			for (t = strtok(lst, ","); t; t = strtok(NULL, ","))
+				if (!strcmp(t, cur_part)) {
+					const char *m = strncmp(cur_part, "vbmeta", 6) ? "ANDROID!" : "AVB0\0\0\0\0";
+					for (k = (uint32_t)off; k < 8 && k - off < want; k++) data[k - off] = (uint8_t)m[k];
+				}
+		  } }
 		make_reply(0x93, data, (int)want, crc); return; }
 	case 0x06: { /* READ_FLASH: {addr, size, offset}, all big-endian. The byte at
 	              * absolute address (addr + offset) is part_byte("flash", a), so
