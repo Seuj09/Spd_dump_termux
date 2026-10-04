@@ -7,6 +7,7 @@
 #   U6  fdl2-cboot.bin / spl-unlock.bin come only from the model's own folder
 #   G2  non-A/B, an unverified table or an oversized cboot is refused before the
 #       erase; cboot goes to uboot only; the restore reports its two writes apart
+#   G5  an spl-unlock.bin with 0 signature sites patched stops before the erase
 # The runner is a fake that records each session's argv and writes the files a
 # backup session would; confirm_dangerous/pause/ready are stubbed (the typed
 # word is the pty tests' job, in write-seq.sh).
@@ -189,6 +190,48 @@ out=$(cd $P && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/echo bash -c 'source 
 	unlock_bootloader_menu </dev/null' _ "$root" "$P" 2>&1)
 check "U6: unlock with no model copy sends nothing and says where it looked" \
 	bash -c '[[ $1 == *"Missing fdl2-cboot.bin"* && $1 == *"nothing sent"* && $1 != *danger-erase* ]]' _ "$out"
+
+# ---- G5 ---------------------------------------------------------------------------------
+# A fake image-tools spdhost whose patchers match nothing (LEGACY=1: the legacy
+# one patches a site). Answers its usage line so spdhost_has_image_tools is true.
+cat > fakespd <<'R'
+#!/bin/bash
+case $1 in
+  gen-spl-unlock|gen-spl-unlock-legacy)
+    if (( $# < 3 )); then echo "usage: spdhost $1 IN OUT" >&2; echo "gen-spl-unlock IN OUT" >&2; exit 1; fi
+    cp "$2" "$3"
+    if [[ $1 == gen-spl-unlock-legacy && -n ${LEGACY:-} ]]; then echo "$1: patched 2 signature site(s)" >&2
+    else echo "$1: patched 0 signature site(s)" >&2; fi
+    exit 0 ;;
+esac
+exit 1
+R
+chmod +x fakespd
+mk5() { # LABEL ANSWER [VAR=value ...]: unlock_make_spl_unlock on a dump
+	local L=$1 a=$2; shift 2
+	mkdir -p "w5_$L"; head -c 4096 /dev/zero > "w5_$L/splloader.img"
+	printf '%s\n' "$a" | env "$@" SPDHOST_BIN="$tmp/fakespd" SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true \
+		SPDHOST_MENU_CONFIG="$tmp/none.conf" bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+		unlock_make_spl_unlock "$2" "$2/splloader.img"; echo "rc=$?"' _ "$root" "$tmp/w5_$L" > "out5_$L" 2>&1
+}
+mk5 none n
+check "G5: 0 sites patched (legacy declined) stops before the erase, no spl-unlock.bin left" \
+	bash -c "grep -q 'Neither pattern matched' out5_none && grep -q 'rc=1' out5_none && [ ! -e w5_none/spl-unlock.bin ]"
+mk5 both0 y
+check "G5: legacy tried and it matches nothing either: stops too" \
+	bash -c "grep -q 'legacy pattern matched nothing either' out5_both0 && grep -q 'rc=1' out5_both0 && [ ! -e w5_both0/spl-unlock.bin ]"
+mk5 legacy y LEGACY=1
+check "G5: legacy patched sites: its result is used (rc 0)" \
+	bash -c "grep -q 'Using the legacy result' out5_legacy && grep -q 'rc=0' out5_legacy && [ -s w5_legacy/spl-unlock.bin ]"
+mk5 force n SPDHOST_UNLOCK_FORCE_UNPATCHED=1
+check "G5: SPDHOST_UNLOCK_FORCE_UNPATCHED=1 is the explicit expert override" \
+	bash -c "grep -q 'SPDHOST_UNLOCK_FORCE_UNPATCHED=1: continuing' out5_force && grep -q 'rc=0' out5_force"
+# And end to end: no erase session after a 0-site build.
+rm -f fdl/ums9230/testphone/spl-unlock.bin
+unlock_run g5e2e SPDHOST_BIN="$tmp/fakespd" </dev/null
+check "G5: the unlock never reaches danger-erase with an unpatched SPL" \
+	bash -c "grep -q 'Neither pattern matched' out_g5e2e && grep -q 'rc=1' out_g5e2e && ! grep -q 'danger-erase' rec_g5e2e"
+printf u > fdl/ums9230/testphone/spl-unlock.bin
 
 echo "menu-unlock: $pass passed, $fail failed"
 (( fail == 0 ))

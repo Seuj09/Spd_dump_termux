@@ -3179,7 +3179,7 @@ unlock_make_spl_unlock() {
 	# bash expands every word of a `local` before it assigns any of them, so
 	# `local work=$1 out=$work/...` would read `work` while it is still unset
 	# and menu.sh runs under `set -u`. That aborted the whole unlock.
-	local work=$1 spl=$2 out bin err rc reply legacy
+	local work=$1 spl=$2 out bin err rc reply legacy patched
 	out=$work/spl-unlock.bin
 
 	if spdhost_has_image_tools; then
@@ -3193,6 +3193,7 @@ unlock_make_spl_unlock() {
 		fi
 		if [[ $err == *"patched 0 signature site"* ]]; then
 			legacy=$work/spl-unlock-legacy.bin
+			patched=0
 			echo
 			echo "The standard pattern matched nothing in this splloader."
 			echo "'gen-spl-unlock-legacy' targets an older layout. Trying it is"
@@ -3205,11 +3206,26 @@ unlock_make_spl_unlock() {
 				if (( rc == 0 )) && [[ -s $legacy ]]; then
 					if [[ $err == *"patched 0 signature site"* ]]; then
 						echo "The legacy pattern matched nothing either."
-						echo "Keeping the standard output; it may still work."
 					else
 						cp -f "$legacy" "$out"
 						echo "Using the legacy result."
+						patched=1
 					fi
+				fi
+			fi
+			# G5: an image with 0 sites patched is the stock SPL. Sending it
+			# would run the whole destructive cycle (erase, cboot, restore)
+			# for nothing, on exactly the SPL generation nobody has tested.
+			if (( ! patched )); then
+				if [[ ${SPDHOST_UNLOCK_FORCE_UNPATCHED:-} == 1 ]]; then
+					echo "WARNING: SPDHOST_UNLOCK_FORCE_UNPATCHED=1: continuing with an spl-unlock.bin"
+					echo "in which no signature site was patched. It is the stock SPL."
+				else
+					rm -f "$out"
+					echo "Neither pattern matched this splloader, so spl-unlock.bin would be"
+					echo "the unmodified SPL. Stopping here: splloader was not erased and"
+					echo "nothing was written. (Experts: SPDHOST_UNLOCK_FORCE_UNPATCHED=1.)"
+					return 1
 				fi
 			fi
 		fi
