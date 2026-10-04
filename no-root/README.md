@@ -632,21 +632,26 @@ is labeled dangerous. Use only on a sacrificial device.
 [0] Quit
 ```
 
-**On the first run the menu asks which loaders the phone uses**, before it
-prints anything else:
+**On the first run the menu asks for the phone's chip first**, before it
+prints anything else, and then for the loaders:
 
 ```
-Phone setup. Which loaders does this phone use?
-[1] universal (generic ums9230; try this if you do not know the model)
-[2] pick a shipped model by chip and brand
-[3] type my own loader paths and addresses
-[0] skip for now (menu [3] sets this later)
+Phone setup. First: which chip is this phone? ...
+[1] ums9230   FDL1 0x65000800
+[2] sc9863a   FDL1 0x5000
+[3] ums512    FDL1 0x5500
+[4] another chip, or I will type my own loader paths and addresses
+[0] skip for now (it asks again next time; menu [3] also sets this)
+Chip (no default):
 ```
 
-`[1]` is the answer when the model is unknown: `fdl/ums9230/universal/` holds
-the generic ums9230 pair (`fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @
-`0x9efffe00`, exec stub `0x65015f08`). It still asks for `yes` before saving,
-because a wrong chip or address can brick the phone. The prompt is skipped
+Neither question has a default: pressing Enter loads nothing. After ums9230,
+`[1] universal` is the answer when the model is unknown: `fdl/ums9230/universal/`
+holds the generic ums9230 pair (`fdl1-dl.bin` @ `0x65000800`, `fdl2-dl.bin` @
+`0x9efffe00`, exec stub `0x65015f08`). It is not offered for the other chips,
+and it still asks for `yes` before saving, because a wrong chip or address can
+brick the phone. `[2]` picks a shipped brand/model of the chip you named, `[3]`
+takes your own paths. The prompt is skipped
 when a complete loader config is already saved, when stdin is not a terminal
 (so a script or a piped run is never blocked), and when
 `SPDHOST_ALLOW_DEFAULT_FDL=1` applies the shipped ums9230 Infinix pair without

@@ -659,7 +659,7 @@ wizard_apply_universal() {
 #   - stdin is not a terminal, so a piped or </dev/null run reaches the menu
 #     and its "Input closed" exit instead of blocking on a prompt.
 setup_wizard() {
-	local choice
+	local choice soc
 	if [[ -n ${FDL1:-} && -f $FDL1 && -n ${FDL1_ADDR:-} &&
 	      -n ${FDL2:-} && -f $FDL2 && -n ${FDL2_ADDR:-} ]]; then
 		return 0
@@ -669,28 +669,64 @@ setup_wizard() {
 		return 0
 	fi
 	[[ -t 0 ]] || return 0
-	echo "Phone setup. Which loaders does this phone use?"
+	# G4: the chip comes first, and nothing has a default. Enter used to pick
+	# [1] universal -- the ums9230 loaders and the ums9230 BootROM stub --
+	# whatever the phone was; on an sc9863a or ums512 that is the wrong chip's
+	# loader and stub. "universal" is now offered only once ums9230 is picked.
+	echo "Phone setup. First: which chip is this phone? It decides the loaders,"
+	echo "their addresses and the exec stub sent before FDL1 (a wrong one can brick it)."
 	if [[ -n ${FDL1:-} || -n ${FDL2:-} ]]; then
 		echo "  now: FDL1=${FDL1:-unset} FDL2=${FDL2:-unset} chip=${SOC:-unset} (${DEVICE:-no model})"
 	else
 		echo "  now: no loaders set"
 	fi
-	echo "[1] universal (generic ums9230; try this if you do not know the model)"
-	echo "[2] pick a shipped model by chip and brand"
-	echo "[3] type my own loader paths and addresses"
+	echo "[1] ums9230   FDL1 0x65000800"
+	echo "[2] sc9863a   FDL1 0x5000"
+	echo "[3] ums512    FDL1 0x5500"
+	echo "[4] another chip, or I will type my own loader paths and addresses"
 	echo "[0] skip for now (it asks again next time; menu [3] also sets this)"
 	echo "Until a loader pair is saved, every session that needs one will ask"
 	echo "for it. Set SPDHOST_ALLOW_DEFAULT_FDL=1 to apply the shipped Infinix"
 	echo "pair silently instead of asking at all."
-	if ! read -r -p "Choice [1]: " choice; then
+	if ! read -r -p "Chip (no default): " choice; then
 		echo "Skipped (no input)."
 		return 0
 	fi
-	case ${choice:-1} in
-		1) wizard_apply_universal ;;
-		2) select_shipped_model ;;
+	case $choice in
+		1) soc=ums9230 ;;
+		2) soc=sc9863a ;;
+		3) soc=ums512 ;;
+		4) configure_loaders_manual; return 0 ;;
+		0) echo "Skipped. Menu [3] sets the loaders later."; return 0 ;;
+		'') echo "No chip picked; nothing loaded. Menu [3] sets the loaders later."; return 0 ;;
+		*) echo "Not a choice. Skipped; menu [3] sets the loaders later."; return 0 ;;
+	esac
+	echo "Chip $soc. Which loaders?"
+	if [[ $soc == ums9230 ]]; then
+		echo "[1] universal (generic ums9230 loaders; try this if you do not know the model)"
+		echo "[2] pick a shipped model by brand"
+		echo "[3] type my own loader paths and addresses"
+	else
+		echo "[2] pick a shipped model by brand"
+		echo "[3] type my own loader paths and addresses"
+	fi
+	echo "[0] skip for now"
+	if ! read -r -p "Choice (no default): " choice; then
+		echo "Skipped (no input)."
+		return 0
+	fi
+	case $choice in
+		1)
+			if [[ $soc == ums9230 ]]; then
+				wizard_apply_universal
+			else
+				echo "Not a choice for $soc. Skipped; menu [3] sets the loaders later."
+			fi
+			;;
+		2) select_shipped_model "$soc" ;;
 		3) configure_loaders_manual ;;
 		0) echo "Skipped. Menu [3] sets the loaders later." ;;
+		'') echo "Nothing picked; nothing loaded. Menu [3] sets the loaders later." ;;
 		*) echo "Not a choice. Skipped; menu [3] sets the loaders later." ;;
 	esac
 	return 0
@@ -846,22 +882,26 @@ shipped_alt_models() {
 }
 
 select_shipped_model() {
-	local root soc brand model choice n i label
+	# An optional chip argument: the setup wizard asks for the chip first and
+	# passes it here, so the brand list is that chip's.
+	local soc=${1:-} root brand model choice n i label
 	local -a brands=() alts=() pair=()
 	root=$(pkg_fdl_root) || { echo "No fdl/ directory next to this menu."; return 1; }
-	echo "Pick the chip. Addresses match the release menu."
-	echo "[1] ums9230   FDL1 0x65000800"
-	echo "[2] sc9863a   FDL1 0x5000"
-	echo "[3] ums512    FDL1 0x5500"
-	echo "[0] Back"
-	read -r -p "Choice: " choice
-	case $choice in
-		0) echo "Back to the menu."; return 0 ;;
-		1) soc=ums9230 ;;
-		2) soc=sc9863a ;;
-		3) soc=ums512 ;;
-		*) echo "Unchanged."; return 1 ;;
-	esac
+	if [[ -z $soc ]]; then
+		echo "Pick the chip. Addresses match the release menu."
+		echo "[1] ums9230   FDL1 0x65000800"
+		echo "[2] sc9863a   FDL1 0x5000"
+		echo "[3] ums512    FDL1 0x5500"
+		echo "[0] Back"
+		read -r -p "Choice: " choice
+		case $choice in
+			0) echo "Back to the menu."; return 0 ;;
+			1) soc=ums9230 ;;
+			2) soc=sc9863a ;;
+			3) soc=ums512 ;;
+			*) echo "Unchanged."; return 1 ;;
+		esac
+	fi
 	continue_choice "$soc loaders" || return
 	mapfile -t brands < <(soc_brands "$soc")
 	echo "Pick the brand. Uses that brand's fdl1-dl.bin and fdl2-dl.bin."

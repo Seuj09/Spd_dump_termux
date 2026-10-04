@@ -15,7 +15,9 @@
 #     end; this checks the wizard itself is the one that stays quiet);
 #   - SPDHOST_ALLOW_DEFAULT_FDL=1 still applies the shipped ums9230 Infinix
 #     pair without a prompt, exactly as it did before the wizard existed;
-#   - [1] changes nothing until the typed `yes`, and [0] changes nothing at all.
+#   - [1] changes nothing until the typed `yes`, and [0] changes nothing at all;
+#   - G4: the chip is asked first with no default, so Enter loads nothing, and
+#     the ums9230 "universal" set is offered only after ums9230 is picked.
 #
 # Usage (from no-root/): tests/menu-wizard.sh
 set -uo pipefail
@@ -66,8 +68,9 @@ wiz_pty() {
 echo "== [1] universal: the whole ums9230 set moves together =="
 rm -f "$tmp/conf" "$tmp/res"
 out=$(wiz_pty "$tmp/w1.pty" "$tmp/res" \
-	"Choice [1]: " '\r' "universal loaders: " 'yes\r')
-check "[wizard] the prompt offers universal first" bash -c '[[ $1 == *"[1] universal"* ]]' _ "$out"
+	"Chip (no default): " '1\r' "Choice (no default): " '1\r' "universal loaders: " 'yes\r')
+check "[wizard] the chip is asked first, universal only after ums9230" \
+	bash -c '[[ ${1%%Chip (no default)*} != *"universal"* && $1 == *"Chip ums9230. Which loaders?"*"[1] universal"* ]]' _ "$out"
 check "[wizard] the prompt prints the current state" bash -c '[[ $1 == *"now: no loaders set"* ]]' _ "$out"
 got "[wizard] [1] sets the chip" "$tmp/res" SOC ums9230
 got "[wizard] [1] names the model universal" "$tmp/res" DEVICE universal
@@ -83,7 +86,7 @@ echo
 echo "== nothing is applied without the typed yes =="
 rm -f "$tmp/conf" "$tmp/res"
 out=$(wiz_pty "$tmp/w2.pty" "$tmp/res" \
-	"Choice [1]: " '\r' "universal loaders: " 'no\r')
+	"Chip (no default): " '1\r' "Choice (no default): " '1\r' "universal loaders: " 'no\r')
 check "[wizard] declining the confirm says nothing was applied" \
 	bash -c '[[ $1 == *"menu: not confirmed"* ]]' _ "$out"
 got "[wizard] a declined confirm leaves SOC unset" "$tmp/res" SOC ""
@@ -93,11 +96,37 @@ check "[wizard] a declined confirm writes no config" test ! -e "$tmp/conf"
 echo
 echo "== [0] skip leaves everything alone =="
 rm -f "$tmp/conf" "$tmp/res"
-out=$(wiz_pty "$tmp/w3.pty" "$tmp/res" "Choice [1]: " '0\r')
+out=$(wiz_pty "$tmp/w3.pty" "$tmp/res" "Chip (no default): " '0\r')
 check "[wizard] [0] says the menu can set it later" \
 	bash -c '[[ $1 == *"sets the loaders later"* ]]' _ "$out"
 got "[wizard] [0] leaves SOC unset" "$tmp/res" SOC ""
 check "[wizard] [0] writes no config" test ! -e "$tmp/conf"
+
+echo
+echo "== G4: Enter loads nothing, and universal is ums9230's only =="
+rm -f "$tmp/conf" "$tmp/res"
+out=$(wiz_pty "$tmp/w4.pty" "$tmp/res" "Chip (no default): " '\r')
+check "[wizard] Enter at the chip prompt loads nothing" bash -c '[[ $1 == *"No chip picked; nothing loaded"* ]]' _ "$out"
+got "[wizard] Enter leaves SOC unset" "$tmp/res" SOC ""
+got "[wizard] Enter leaves FDL1 unset" "$tmp/res" FDL1 ""
+got "[wizard] Enter leaves the exec stub unset" "$tmp/res" EXEC_ADDR ""
+check "[wizard] Enter writes no config" test ! -e "$tmp/conf"
+rm -f "$tmp/conf" "$tmp/res"
+out=$(wiz_pty "$tmp/w5.pty" "$tmp/res" "Chip (no default): " '1\r' "Choice (no default): " '\r')
+check "[wizard] Enter at ums9230's loader prompt loads nothing either" \
+	bash -c '[[ $1 == *"Nothing picked; nothing loaded"* ]]' _ "$out"
+got "[wizard] ... SOC still unset" "$tmp/res" SOC ""
+check "[wizard] ... and no config" test ! -e "$tmp/conf"
+rm -f "$tmp/conf" "$tmp/res"
+out=$(wiz_pty "$tmp/w6.pty" "$tmp/res" "Chip (no default): " '2\r' "Choice (no default): " '1\r')
+check "[wizard] sc9863a is not offered the ums9230 universal set, and [1] loads nothing" \
+	bash -c '[[ ${1#*Chip sc9863a} != *"universal"* && $1 == *"Not a choice for sc9863a"* ]]' _ "$out"
+got "[wizard] ... SOC unset after sc9863a [1]" "$tmp/res" SOC ""
+rm -f "$tmp/conf" "$tmp/res"
+out=$(wiz_pty "$tmp/w7.pty" "$tmp/res" "Chip (no default): " '3\r' "Choice (no default): " '2\r' "back to the menu [n]: " '\r')
+check "[wizard] ums512 -> brand pick goes straight to ums512's loaders (no second chip question)" \
+	bash -c '[[ $1 == *"Picked: ums512 loaders"* && $1 != *"Pick the chip."* ]]' _ "$out"
+check "[wizard] ... declining there writes no config" test ! -e "$tmp/conf"
 
 echo
 echo "== it asks once, and never on a non-terminal =="
@@ -114,7 +143,7 @@ echo "== it asks once, and never on a non-terminal =="
 out=$(env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_MENU_LIB=1 \
 	SPDHOST_MENU_RUNNER=/bin/true bash "$tmp/wiz.sh" "$tmp/res" </dev/null 2>&1)
 check "[wizard] a complete config draws no prompt" \
-	bash -c '[[ $1 != *"Which loaders"* ]]' _ "$out"
+	bash -c '[[ $1 != *"Phone setup"* ]]' _ "$out"
 got "[wizard] and the saved model is kept" "$tmp/res" DEVICE infinix
 got "[wizard] and the saved chip is kept" "$tmp/res" SOC ums9230
 
@@ -123,7 +152,7 @@ rm -f "$tmp/conf" "$tmp/res"
 out=$(env HOME="$tmp/home" SPDHOST_MENU_CONFIG="$tmp/conf" SPDHOST_MENU_LIB=1 \
 	SPDHOST_MENU_RUNNER=/bin/true bash "$tmp/wiz.sh" "$tmp/res" </dev/null 2>&1)
 check "[wizard] no stdin at all draws no prompt" \
-	bash -c '[[ $1 != *"Which loaders"* ]]' _ "$out"
+	bash -c '[[ $1 != *"Phone setup"* ]]' _ "$out"
 got "[wizard] and sets nothing" "$tmp/res" SOC ""
 
 echo
