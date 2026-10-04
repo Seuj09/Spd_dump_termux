@@ -1059,6 +1059,15 @@ exec_stub_path() {
 		echo "refusing: exec_addr $ea is the $chip stub but the chip is $SOC (option 3)." >&2
 		return 1
 	fi
+	# G3: no chip picked means no stub. A saved EXEC_ADDR alone (hex mode used
+	# to save ums9230's second stub for any FDL1 at 0x65000800, which newer
+	# chips share) is not a reason to send a BootROM stub. SPDHOST_EXEC_ADDR
+	# is the explicit expert override and is still honoured.
+	if [[ -z ${SOC:-} && -z ${SPDHOST_EXEC_ADDR+set} ]]; then
+		echo "refusing: exec_addr $ea is the $chip stub, but no chip is picked (option 3)." >&2
+		echo "Pick the chip in option 3, set EXEC_ADDR to 0 there ([4] another chip), or set SPDHOST_EXEC_ADDR to send it anyway." >&2
+		return 1
+	fi
 	if [[ -n ${FDL1_ADDR:-} ]] && soc_fdl1_for "$chip" >/dev/null &&
 	   (( FDL1_ADDR != $(soc_fdl1_for "$chip") )); then
 		echo "refusing: exec_addr $ea is the $chip stub, which goes with FDL1 at $(soc_fdl1_for "$chip"), not $FDL1_ADDR." >&2
@@ -3083,7 +3092,16 @@ hex_mode_menu() {
 	local cur alt
 	cur=$(exec_addr_value || true)
 	echo "exec_addr now: ${cur:-disabled}."
-	echo "Chip ${SOC:-ums9230}: primary stub $EXEC_ADDR_DEFAULT, second $EXEC_ADDR_ALT."
+	# G3: the two stubs belong to a chip. With none picked (manual loaders,
+	# "[4] another chip: no exec stub") EXEC_ADDR_DEFAULT/ALT are still the
+	# ums9230 globals, and toggling would save ums9230's BootROM stub for
+	# whatever phone this is. Nothing is changed or saved.
+	if [[ -z ${SOC:-} ]]; then
+		echo "No chip picked (option 3), so there is no stub to toggle. Nothing changed."
+		echo "Pick the chip in option 3 first; hex mode only switches between that chip's two stubs."
+		return 1
+	fi
+	echo "Chip $SOC: primary stub $EXEC_ADDR_DEFAULT, second $EXEC_ADDR_ALT."
 	echo "The second file is custom_exec_no_verify_$(printf '%x' "$((EXEC_ADDR_ALT))").bin."
 	if exec_stub_present "$EXEC_ADDR_ALT"; then
 		alt=$EXEC_ADDR_ALT

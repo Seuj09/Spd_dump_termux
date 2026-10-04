@@ -427,6 +427,32 @@ check "hex mode: a saved alt address with no stub behind it is repaired to the p
 	bash -c '[[ $1 == *"Saved exec_addr 0x65015f08"* && $1 == *"EX=0x65015f08"* ]] &&
 		grep -q "^EXEC_ADDR=0x65015f08$" "$2"' _ "$out" "$tmp/hex-savedalt.conf"
 
+# G3: no chip picked ("[4] another chip: no exec stub") with an FDL1 at
+# 0x65000800, which newer Unisoc chips share with ums9230. Hex mode used to save
+# ums9230's second stub (0x65015f48) here and print "Chip ums9230".
+cat >"$tmp/hex-nochip.conf" <<EOF
+FDL1=$tmp/plain/fdl1.bin
+FDL1_ADDR=0x65000800
+FDL2=$tmp/plain/fdl2.bin
+FDL2_ADDR=0x9efffe00
+EXEC_ADDR=0
+SOC=
+EOF
+cp "$tmp/hex-nochip.conf" "$tmp/hex-nochip.orig"
+out=$(cd "$tmp" && menu_run "$tmp/hex-nochip.conf" hex_probe 2>&1)
+check "G3: hex mode with no chip refuses the toggle and saves nothing" \
+	bash -c '[[ $1 == *"no stub to toggle"* && $1 == *"EX=0 "* && $1 != *"Chip ums9230"* ]] && cmp -s "$2" "$3"' \
+	_ "$out" "$tmp/hex-nochip.conf" "$tmp/hex-nochip.orig"
+# A config that already carries a stub address but no chip (what the old hex
+# mode left behind): no stub is sent; the session is refused before the wait.
+sed 's/^EXEC_ADDR=0$/EXEC_ADDR=0x65015f48/' "$tmp/hex-nochip.orig" > "$tmp/stub-nochip.conf"
+out=$(cd "$tmp" && menu_run "$tmp/stub-nochip.conf" exec_stub_present 0x65015f48 2>&1); rc=$?
+check "G3: a saved stub with no chip is refused, not sent (rc $rc)" \
+	bash -c '[[ $2 != 0 && $1 == *"no chip is picked"* ]]' _ "$out" "$rc"
+out=$(cd "$tmp" && SPDHOST_EXEC_ADDR=0x65015f48 menu_run "$tmp/stub-nochip.conf" exec_stub_path 0x65015f48 2>&1); rc=$?
+check "G3: SPDHOST_EXEC_ADDR is still the explicit override with no chip (rc $rc)" \
+	bash -c '[[ $2 == 0 && $1 == *custom_exec_no_verify_65015f48.bin ]]' _ "$out" "$rc"
+
 echo
 echo "menu-config: $pass passed, $fail failed"
 (( fail == 0 ))
