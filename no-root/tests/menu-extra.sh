@@ -162,6 +162,34 @@ head -c 1048576 /dev/zero >"$misc_in2"
 tr=$(menu pack_slot_action "misc image" "$misc_in2\r" "Slot to make active" 'x\r')
 check "pack-slot: a bad slot letter writes nothing" test ! -e "${misc_in2%.img}-slotx.img"
 
+# L1: [6]/[7] take the file name as the partition name, so misc-slotX.img was
+# skipped there and the slot never changed. pack-slot now offers to write the
+# image itself through the guarded misc session: typed yes, the token for the
+# exact bytes, and misc-backup-expect so a stale dump never reverts newer misc.
+misc_in3=$tmp/dump/misc3.img
+head -c 1048576 /dev/zero | tr '\0' 'M' >"$misc_in3"
+in3_sha=$(sha256sum "$misc_in3" | awk '{print $1}')
+tr=$(menu pack_slot_action "misc image" "$misc_in3\r" "Slot to make active" 'a\r' \
+	"to misc on the phone now" '\r')
+check "pack-slot L1: Enter at 'write now' starts no session" test ! -s "$tmp/ran/log"
+check "pack-slot L1: no longer tells the user to flash it from [6]/[7]" \
+	bash -c "! grep -q 'Flash it from menu \[6\]' '$tr' && grep -q 'cannot flash this file' '$tr'"
+out3=${misc_in3%.img}-slota.img
+out3_sha=$(sha256sum "$out3" | awk '{print $1}')
+tr=$(menu pack_slot_action "misc image" "$misc_in3\r" "Slot to make active" 'a\r' \
+	"to misc on the phone now" 'y\r' "type yes to write the slot a image" 'no\r')
+check "pack-slot L1: a typed 'no' at the confirm starts no session" test ! -s "$tmp/ran/log"
+tr=$(menu pack_slot_action "misc image" "$misc_in3\r" "Slot to make active" 'a\r' \
+	"to misc on the phone now" 'y\r' "type yes to write the slot a image" 'yes\r' \
+	"Press Enter to continue" '\r')
+check "pack-slot L1: the write names partition misc, not misc-slota" \
+	ran_has "write-part misc $out3 reset"
+check "pack-slot L1: the token is the sha256 of the slot image" \
+	ran_has "--confirm-token=$out3_sha"
+check "pack-slot L1: misc is checked against the source dump before the write" \
+	ran_has "misc-backup-expect $tmp/dump/misc-before-[0-9-]*.img $in3_sha write-part misc"
+check "pack-slot L1: never passes --yes" ran_lacks --yes
+
 # promote_dump_action -- menu [9]. Filesystem only, no phone. The point is
 # what it refuses to do: input/ also holds the images a user meant to flash,
 # so an image already there is never replaced, and the dump folder's non-image
