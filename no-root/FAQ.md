@@ -39,6 +39,23 @@ Some options run in more than one USB session, for example to ask for a typed co
 ### Nothing shows up when I plug in.
 Your adapter or cable may not switch the host into OTG mode. Try another OTG adapter, and check that OTG is enabled in your host's settings.
 
+### "Display over other apps" is greyed out or disabled for Termux:API.
+Some systems block it. Grant it with a command.
+
+From a PC with adb:
+
+```sh
+adb shell pm grant com.termux.api android.permission.SYSTEM_ALERT_WINDOW
+```
+
+From Termux (the same command without `adb shell`):
+
+```sh
+pm grant com.termux.api android.permission.SYSTEM_ALERT_WINDOW
+```
+
+For another app, replace `com.termux.api` with its package name.
+
 ### arm32 or arm64 zip?
 Run `uname -m`. `aarch64` means arm64, and `armv7l` or `armv8l` means arm32.
 

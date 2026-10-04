@@ -15,6 +15,15 @@ pkg update -y && pkg install -y termux-api unzip curl
 termux-setup-storage
 ```
 
+## 1b. Grant permissions to both apps
+
+- **Termux:** `termux-setup-storage` asks for file access. Allow it, so the menu can read images and save dumps on `/sdcard`.
+- **Termux:API:** open its app info (Settings → Apps → Termux:API) and:
+  - turn off battery restrictions (set battery usage to *Unrestricted*), and
+  - allow **Display over other apps**.
+
+Without these, the USB permission prompt and device handoff can fail or get killed in the background.
+
 ## 2. Download and unzip spdhost
 
 Check your Termux architecture with `uname -m`.
