@@ -5,6 +5,8 @@ per run, no GUI. It talks to a phone in BootROM or FDL over libusb bulk
 transfers. On a phone (Termux, no root) the `spdhost-usb` wrapper takes the
 descriptor from `termux-usb`; on a PC it opens the device node itself.
 
+New here? Start with the [setup tutorial](TUTORIAL.md) and the [FAQ](FAQ.md).
+
 Prebuilt static binaries, libusb included, are on the
 [spdhost-source](https://github.com/Seuj09/Spd_dump_termux/releases/tag/spdhost-source)
 release:
