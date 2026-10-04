@@ -2494,7 +2494,8 @@ flash_input_menu() {
 	echo "misc.img, if present, is backed up and verified. Writing it also restores the"
 	echo "slot record it was dumped with; no other file here can change the slot."
 	echo "This flash does not erase metadata."
-	echo "splloader.img is written up to the live table size. With no splloader row, the file is sent whole (a dump is still 256 KiB)."
+	echo "splloader.img is capped at 256 KiB (the size of a splloader dump); a larger one aborts the flash."
+	echo "A misc.img that is not 2048 bytes or the whole live misc partition is skipped with a warning."
 	echo "A broken l_fixnv1 image is skipped. A sparse image waits up to 100 seconds per chunk."
 	echo "Then: $BOOT_AFTER. recovery/fastbootd writes a 2048-byte BCB after the images."
 	echo "A same-size *_bak is written only when the device is not A/B. vbmeta flags are not edited."
@@ -2671,7 +2672,8 @@ restore_backup_menu() {
 	fi
 	echo "A name that is not on the phone is skipped. The other images are still written."
 	echo "A broken l_fixnv1 image is skipped. An empty or oversized image aborts the restore before anything is sent."
-	echo "splloader.img is written up to the live table size (a dump of it is still 256 KiB)."
+	echo "splloader.img is capped at 256 KiB (the size of a splloader dump); a larger one aborts the restore."
+	echo "A misc.img that is not 2048 bytes or the whole live misc partition is skipped with a warning; the rest is written."
 	echo "userdata.img in this folder is written back. Inactive _a/_b images are skipped."
 	echo "The active slot is written back after the files."
 	echo "super.img without metadata.img erases metadata when that partition is on the phone."
@@ -3420,8 +3422,44 @@ pack_slot_action() {
 		return 1
 	fi
 	echo "Wrote $out: the image for slot $which, same size as $in."
-	echo "Flash it from menu [6] (or [7] for a whole folder)."
 	record_sha256 "$out" || true
+	# [6] and [7] take a file's name as its partition name, so misc-slot$which.img
+	# is skipped there as "not in the table" and the slot never changes (L1).
+	# Write it here instead, through the same guarded misc session set-slot
+	# uses: typed yes, --confirm-token for these exact bytes, backup first,
+	# read-back after. The image is built from $in, so the write session also
+	# checks that the phone's misc still IS $in (misc-backup-expect) and stops
+	# before writing if it is not -- a stale dump never reverts newer misc.
+	echo "Menus [6] and [7] cannot flash this file: they use the file name as the"
+	echo "partition name, and 'misc-slot$which' is not a partition."
+	echo "To change the slot on the phone, either write it now (below), or use"
+	echo "[10] -> [2] Set active slot, which reads misc live and does the same."
+	local ans digest in_sha ending=reset rc
+	read -r -p "Write $out to misc on the phone now? [y/N]: " ans || ans=
+	while [[ $ans == *[$' \t\r\n'] ]]; do ans=${ans%?}; done
+	case $ans in
+		y|Y|yes) ;;
+		*) echo "Not written. The file stays at $out."; return 0 ;;
+	esac
+	need_loaders || return 1
+	if [[ ! -t 0 ]]; then
+		echo "refusing to write misc without a TTY (no silent --yes)" >&2
+		return 1
+	fi
+	[[ $BOOT_AFTER == power-off ]] && ending=power-off
+	in_sha=$(sha256sum "$in" | awk '{print $1}')
+	digest=$(sha256sum "$out" | awk '{print $1}')
+	echo "About to write $(stat -c %s "$out") bytes to partition 'misc' (active slot $which), then $ending."
+	echo "The phone's misc must still be exactly $in (sha256 $in_sha), or nothing is written."
+	echo "misc image sha256: $digest"
+	echo "Wrong chip/FDL or a mis-click can soft-brick the boot path."
+	if ! menu_typed_yes "type yes to write the slot $which image to misc: " "$digest"; then
+		return 1
+	fi
+	MISC_EXPECT_SHA=$in_sha
+	guarded_misc_session "slot $which image" write-part misc "$out" "$ending"
+	rc=$?
+	return "$rc"
 }
 
 # True when the resolved spdhost has the built-in PAC reader. Probed the same
