@@ -3,6 +3,7 @@
 #   U1  a fresh splloader/uboot backup every run, in its own folder; an older
 #       backup_spl/ is never reused or restored
 #   U2  splloader_bak is erased before splloader
+#   U4  the uboot backup is restored to the row it was dumped from
 # The runner is a fake that records each session's argv and writes the files a
 # backup session would; confirm_dangerous/pause/ready are stubbed (the typed
 # word is the pty tests' job, in write-seq.sh).
@@ -89,6 +90,22 @@ check "U2: the erase session names splloader_bak first, then splloader" \
 unlock_run u2fail FAIL_ON='*danger-erase*'
 check "U2: a failed erase session skips cboot and the unlock loader but still restores" \
 	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part splloader' rec_u2fail"
+
+# ---- U4 ---------------------------------------------------------------------------------
+# The phone dumped uboot_b (slot b active at backup time); the menu's own
+# ACTIVE_SLOT says a. The restore must go to uboot_b, not to the active name.
+unlock_run u4 SLOTFILE=uboot_b ACTIVE_SLOT=a
+check "U4: a uboot_b backup is restored to uboot_b" \
+	bash -c "grep 'write-part splloader' rec_u4 | grep -q 'write-part uboot_b .*/uboot_b.img'"
+unlock_run u4fail SLOTFILE=uboot_b ACTIVE_SLOT=a FAIL_ON='*write-part splloader*'
+check "U4: the printed restore command also targets uboot_b" \
+	bash -c "grep -q 'RESTORE FAILED' out_u4fail && grep -A30 'Restore command' out_u4fail | grep -q 'write-part uboot_b .*uboot_b.img'"
+unlock_run u4nab SLOTFILE=uboot
+check "U4: a non-A/B uboot.img goes back to uboot" \
+	bash -c "grep 'write-part splloader' rec_u4nab | grep -q 'write-part uboot .*/uboot.img'"
+out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+	unlock_uboot_row /x/uboot_a.img; unlock_uboot_row /x/uboot_b.img; unlock_uboot_row /x/uboot.img; unlock_uboot_row /x/other.img' _ "$root" | tr '\n' ' ')
+check "U4: unlock_uboot_row maps file names to rows [$out]" test "$out" = "uboot_a uboot_b uboot uboot "
 
 echo "menu-unlock: $pass passed, $fail failed"
 (( fail == 0 ))

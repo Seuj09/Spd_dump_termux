@@ -3261,8 +3261,8 @@ unlock_bootloader_menu() {
 		unlock_describe_status "$slotf"
 	fi
 	fi
-	echo "Last session writes the dumped splloader and uboot back, then reset."
-	echo "parts runs first so uboot is the active slot name, not the bare word uboot."
+	echo "Last session writes the dumped splloader and $(basename "$uboot") back, then reset."
+	echo "The uboot copy goes to $(unlock_uboot_row "$uboot"), the row it was dumped from."
 	echo "spdhost asks you to type yes for each of those writes."
 	pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
 	ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
@@ -3270,9 +3270,11 @@ unlock_bootloader_menu() {
 	# erased from the session above. Its failure used to fall out of the case
 	# arm unchecked, so the menu moved on with the phone unbootable and said
 	# nothing. Say it loudly instead, and point at the two files that fix it.
+	# U4: the uboot backup goes back to the row it was dumped from (its own
+	# file name: uboot_a, uboot_b or uboot), not to whatever slot is active now.
 	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" \
-		write-part splloader "$spl" write-part uboot "$uboot" reset; then
+		write-part splloader "$spl" write-part "$(unlock_uboot_row "$uboot")" "$uboot" reset; then
 		echo
 		echo "RESTORE FAILED. splloader is still erased and the phone will not boot."
 		echo "Do not unplug. Keep it in download mode and run this session again"
@@ -3300,7 +3302,7 @@ unlock_restore_help() {
 		cmd+=(exec_addr "$ea" "$stub")
 	fi
 	cmd+=(fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" parts "$(parts_cache_path)"
-		write-part splloader "$spl" write-part uboot "$uboot" reset)
+		write-part splloader "$spl" write-part "$(unlock_uboot_row "$uboot")" "$uboot" reset)
 	echo
 	echo "splloader may still be erased. An erased SPL should still drop into BootROM download mode"
 	echo "(power off, hold the download-mode keys, plug in), so it is recoverable with this tool."
@@ -3311,6 +3313,17 @@ unlock_restore_help() {
 	printf '  '
 	printf '%q ' "${cmd[@]}"
 	echo
+}
+
+# U4: the partition a uboot backup belongs to is in its file name
+# (unlock_pick_uboot only returns uboot.img, uboot_a.img or uboot_b.img).
+unlock_uboot_row() {
+	local b
+	b=$(basename "$1" .img)
+	case $b in
+		uboot|uboot_a|uboot_b) printf '%s\n' "$b" ;;
+		*) printf 'uboot\n' ;;
+	esac
 }
 
 unlock_pick_uboot() {
