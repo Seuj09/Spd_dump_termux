@@ -38,9 +38,54 @@ python3 "$root/tests/dhtb_fixture.py" "$tmp/fx" || exit 1
 
 # A reference run is only meaningful when qemu, the x86-64 loader and the binary
 # are all present. Any one missing means "skip", never "pass".
-have_ref() {
-	[[ -n $QEMU && -x $X86_64_LOADER && -f $REF/$1 ]]
+#
+# The binary must also be an x86-64 ELF: qemu-x86_64 cannot run anything else,
+# and a wrong-arch or non-ELF file (a stray aarch64 build, a text stub) used to
+# come back as an exit-code mismatch that looked like a code bug. It is skipped
+# here with the reason instead. ref_why holds the reason for the last miss.
+ref_why=""
+is_x86_64_elf() {
+	# e_ident: 7f 45 4c 46, EI_CLASS 2 (64-bit), EI_DATA 1 (LE); e_machine at
+	# offset 18 is 0x3e (EM_X86_64), little-endian.
+	local h
+	h=$(od -An -tx1 -N20 -- "$1" 2>/dev/null | tr -d ' \n')
+	[[ ${h:0:8} == 7f454c46 && ${h:8:2} == 02 && ${h:10:2} == 01 && ${h:36:4} == 3e00 ]]
 }
+have_ref() {
+	ref_why=""
+	if [[ -z $QEMU || ! -x $X86_64_LOADER ]]; then
+		ref_why="no reference binary"
+		return 1
+	fi
+	if [[ ! -f $REF/$1 ]]; then
+		ref_why="no reference binary"
+		return 1
+	fi
+	if ! is_x86_64_elf "$REF/$1"; then
+		ref_why="reference $REF/$1 is not an x86-64 ELF binary; reference comparison skipped"
+		return 1
+	fi
+	return 0
+}
+
+# The arch gate itself, on crafted 20-byte ELF headers (no qemu needed).
+elfhdr() { # CLASS MACHINE_LO MACHINE_HI -> stdout
+	printf '%b' "\\x7fELF\\x$1\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x$2\\x$3"
+}
+elfhdr 02 3e 00 > "$tmp/elf-x86_64"
+elfhdr 02 b7 00 > "$tmp/elf-aarch64"
+elfhdr 01 03 00 > "$tmp/elf-i386"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/elf-script"
+is_x86_64_elf "$tmp/elf-x86_64"
+check "ref gate: an x86-64 ELF header is accepted" $?
+! is_x86_64_elf "$tmp/elf-aarch64" && ! is_x86_64_elf "$tmp/elf-i386" && ! is_x86_64_elf "$tmp/elf-script" &&
+	! is_x86_64_elf "$tmp/does-not-exist"
+check "ref gate: aarch64, i386, a script and a missing file are refused" $?
+if [[ -n $QEMU && -x $X86_64_LOADER ]]; then
+	mkdir -p "$tmp/fakeref" && cp "$tmp/elf-aarch64" "$tmp/fakeref/chsize"
+	( REF=$tmp/fakeref; ! have_ref chsize && [[ $ref_why == *"not an x86-64 ELF binary"* ]] )
+	check "ref gate: have_ref skips a non-x86-64 reference with the reason" $?
+fi
 
 echo "== golden: reference (qemu-x86_64) vs spdhost =="
 if [[ -z $QEMU ]]; then
@@ -72,7 +117,7 @@ do
 		check "$name: input left untouched" $?
 
 		if ! have_ref "$rt"; then
-			note "$name: no reference binary"
+			note "$name: $ref_why"
 			continue
 		fi
 
