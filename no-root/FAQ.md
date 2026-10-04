@@ -10,13 +10,25 @@ It's tested on Infinix ums9230 (Unisoc T606 family). FDL sets for other ums9230 
 The host is the phone running Termux. The target is the phone you're flashing, in download mode.
 
 ### Detection fails or says `check baud: timeout`. What do I do?
-Unplug, wait about 5 seconds, start the command, then plug in while holding the download keys and tap Allow quickly. The first Allow often uses up the BootROM's short window, so retry. If it keeps failing, run:
+
+**If the target still boots normally:**
+1. Press Ctrl+C to stop the menu while it is still running, then start it again and pick the option.
+2. Hold power for about 8 seconds until the target boots.
+3. Then hold **power + volume down** with the USB cable plugged in.
+4. Wait for the confirmation to appear.
+
+**If the target is bricked and won't turn on:**
+1. Unplug the cable and restart the menu.
+2. Hold **power + volume down** for 6-8 seconds.
+3. Plug in the cable and wait for the confirmation.
+
+Repeat the steps if the error keeps coming back. If it still persists, run:
 
 ```sh
 SPDHOST_USB_CAPS=1 SPDHOST_BROM_TRACE=1 bash scripts/spdhost-usb ping
 ```
 
-and send the output.
+and report it with the full output.
 
 ### Nothing shows up when I plug in.
 Your adapter or cable may not switch the host into OTG mode. Try another OTG adapter, and check that OTG is enabled in your host's settings.
