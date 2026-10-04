@@ -1187,6 +1187,21 @@ static int frp_reset(struct spd *io, const char *out)
 		fprintf(stderr, "frp-reset: persist is not in the live table; nothing sent\n");
 		return -1;
 	}
+	/* R1: a guessed table unit may have scaled this row; size it by the
+	 * device instead, or do not touch it. */
+	if (io->ptab_unit_bad) {
+		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
+		if (!probed) {
+			fprintf(stderr, "frp-reset: table unit unverified and the device gave no size for %s;"
+				" nothing erased\n", resolved);
+			return -1;
+		}
+		if (probed != sz)
+			fprintf(stderr, "frp-reset: table unit unverified; using the device's size for %s:"
+				" %llu bytes (table says %llu)\n", resolved,
+				(unsigned long long)probed, (unsigned long long)sz);
+		sz = probed;
+	}
 	/* The read streams to a file. The cap only stops a corrupt table from
 	 * filling the disk. A normal persist image is well under this. */
 	if (sz > (512ull << 20)) {

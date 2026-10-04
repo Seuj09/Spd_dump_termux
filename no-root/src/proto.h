@@ -52,6 +52,13 @@ struct spd {
 	struct spd_part { char name[37]; uint64_t size; } *ptab;
 	int nparts;
 	int ptab_shift;
+	/* R1: 1 when fetch_ptab had to guess the table's unit (spd_dump divisor
+	 * != 10) and the device's own size probe did not confirm it -- no answer,
+	 * or a different size. Every row may then be scaled (doubled or more), so
+	 * spd_ptab_mib_unsafe refuses to send or save this table while it is set.
+	 * Cleared by a confirmed probe and by any table not built from a guess
+	 * (divisor 10, GPT, an XML repartition). */
+	int ptab_unit_bad;
 	/* spd_dump's gpt_failed latch (spd_dump.c:144 `int gpt_failed = 1`, cleared
 	 * by a successful partition_list at common.c:1143, set to -1 by a refusal at
 	 * common.c:1088/1095). Every call site reads `if (gpt_failed == 1)` before

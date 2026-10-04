@@ -152,12 +152,15 @@ check "w-force repartition packets match spd_dump byte for byte (spd_dump rc $sd
 head -c 8388608 /dev/zero | tr '\0' 'F' > over.img
 # boot_a is 1 unit here, and the 1 drags spd_dump's divisor to 0, so the unit is
 # MiB and the row is 1 MiB. An 8 MiB image is past it.
+# MOCK_PTABLE_MIB=1 (here and on phonept/tinypt): the mock is that phone, so
+# the size probe fetch_ptab sends agrees with the MiB unit and the table is
+# not latched as unverified (R1).
 printf '%s\n' 'boot_a 1' 'big 8192' > overpt
-MOCK_PTABLE=$tmp/overpt sh over parts overpt w-force boot_a over.img; rc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/overpt sh over parts overpt w-force boot_a over.img; rc=$?
 check "w-force sends a file past the row's size instead of refusing it (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'w-force boot_a: WARNING the file is 8388608 bytes' sh_over.log &&
 		[ \$(grep -cE '^SEQ 0b ' sh_over.seq) = 2 ] && grep -q 'table is back to normal' sh_over.log"
-MOCK_PTABLE=$tmp/overpt sh over2 parts overpt write-part boot_a over.img; rc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/overpt sh over2 parts overpt write-part boot_a over.img; rc=$?
 check "the same file through write-part is refused before anything is sent (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'nothing sent' sh_over2.log &&
 		! grep -q 'write boot_a: 8388608 bytes from' sh_over2.log"
@@ -188,8 +191,8 @@ check "w-force on a name that is not in the table sends nothing (rc $rc)" \
 # the case the format exists for, and the one a 5 GB -> 10 GB super edit is
 # written against.
 printf '%s\n' 'prodnv 64' 'misc 1' 'sml_a 1' 'boot_a 64' 'super 5120' 'userdata 6144' > phonept
-MOCK_PTABLE=$tmp/phonept sh phone partition-list ours.xml; shrc=$?
-MOCK_PTABLE=$tmp/phonept sd xml2 skip_confirm 1 partition_list theirs.xml reset; sdrc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept sh phone partition-list ours.xml; shrc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept sd xml2 skip_confirm 1 partition_list theirs.xml reset; sdrc=$?
 check "partition-list is byte-identical to spd_dump partition_list (rc $shrc/$sdrc)" \
 	bash -c '[ '"$shrc"' = 0 ] && [ '"$sdrc"' = 0 ] && cmp -s ours.xml theirs.xml'
 check "a phone's MiB row is dumped as its own number, not shifted (super=5120)" \
@@ -207,7 +210,7 @@ check "the dumped XML is accepted back by repartition, super still 5120 (rc $rc)
 # caller names -- the menu points that at the dump folder -- so the copy lands
 # with the dumps instead of in whatever directory the tool was started in.
 mkdir -p autoxml
-MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/autoxml sh auto parts pt_auto.txt; arc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/autoxml sh auto parts pt_auto.txt; arc=$?
 autof=$(ls "$tmp"/autoxml/partition_*.xml 2>/dev/null | head -1)
 check "a table read leaves partition_<unixtime>.xml in SPDHOST_PART_XML_DIR (rc $arc)" \
 	bash -c "[ $arc = 0 ] && [ -n '$autof' ] &&
@@ -222,7 +225,7 @@ check "the automatic copy is byte-identical to partition-list (ours.xml)" cmp -s
 # READ_PARTITION, one automatic file (the name is picked once per process), and
 # both outputs still written from the cached table.
 mkdir -p once
-MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/once \
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/once \
 	sh once parts pt_once.txt partition-list once.xml; rc=$?
 n=$(ls "$tmp"/once/partition_*.xml 2>/dev/null | wc -l)
 check "two listings in one run: one device read, one auto file, both outputs (rc $rc, $n file)" \
@@ -231,8 +234,8 @@ check "two listings in one run: one device read, one auto file, both outputs (rc
 # Off unless asked for: an empty value means no copy, which is also what an
 # unset variable does, so no command grows a file nobody asked about.
 mkdir -p noxml
-MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR= sh offenv parts pt_off.txt
-MOCK_PTABLE=$tmp/phonept sh offunset parts pt_off2.txt
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR= sh offenv parts pt_off.txt
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept sh offunset parts pt_off2.txt
 check "no folder configured: no XML is written" \
 	bash -c "[ -z \"\$(ls noxml/partition_*.xml 2>/dev/null)\" ] &&
 		! grep -q '^partition xml:' sh_offenv.log && ! grep -q '^partition xml:' sh_offunset.log"
@@ -244,7 +247,7 @@ check "spd_dump itself leaves partition_<unixtime>.xml in its cwd, as spd_dump.c
 # The same folder as the flag, for a PC user driving the tool by hand. The flag
 # wins over the variable, so a caller can override what the menu exported.
 mkdir -p flagx envx
-MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/envx timeout 20 ./sh --usb-fd 7 --step 0x1000 \
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/phonept SPDHOST_PART_XML_DIR=$tmp/envx timeout 20 ./sh --usb-fd 7 --step 0x1000 \
 	--yes --part-xml "$tmp/flagx" exec_addr 0x65015f08 custom_exec_no_verify_65015f08.bin \
 	"${LOAD[@]}" parts pt_flag.txt 7</dev/null </dev/null >sh_flagx.log 2>&1
 frc=$?
@@ -273,7 +276,7 @@ check "the same dump fed back carries the MiB numbers (super 8) (rc $rc)" \
 # divisor loop skips zero entries; spd_dump's own loop spins on one, which is
 # why ours is written to survive the table that would hang the reference.
 printf '%s\n' 'tiny 1' 'boot_a 4096' > tinypt
-MOCK_PTABLE=$tmp/tinypt sh tiny partition-list tiny.xml; rc=$?
+MOCK_PTABLE_MIB=1 MOCK_PTABLE=$tmp/tinypt sh tiny partition-list tiny.xml; rc=$?
 check "a table in another unit dumps as whole MiB, not rounded to 0 (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"tiny\" size=\"1\"' tiny.xml"
 printf '%s\n' 'zero 0' 'boot_a 4096' > zeropt

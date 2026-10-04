@@ -743,6 +743,21 @@ static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, i
 			fprintf(stderr, "verity: skip %s (not in the live table)\n", name);
 		return 1;
 	}
+	/* R1: a guessed table unit may have scaled this row; size it by the
+	 * device instead, or do not touch it. */
+	if (io->ptab_unit_bad) {
+		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
+		if (!probed) {
+			fprintf(stderr, "verity: table unit unverified and the device gave no size for %s;"
+				" not written\n", resolved);
+			return -1;
+		}
+		if (probed != sz)
+			fprintf(stderr, "verity: table unit unverified; using the device's size for %s:"
+				" %llu bytes (table says %llu)\n", resolved,
+				(unsigned long long)probed, (unsigned long long)sz);
+		sz = probed;
+	}
 	if (sz <= 0x7B) {
 		fprintf(stderr,
 			"verity: %s is %llu bytes; offset 0x7b is past the end; not written\n",

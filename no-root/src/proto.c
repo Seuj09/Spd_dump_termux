@@ -2330,6 +2330,7 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	 * echo of this table later (spd_repartition_echo, for a force write) uses
 	 * the same unit the XML did. fetch_ptab sets it from the wire instead. */
 	io->ptab_shift = 20;
+	io->ptab_unit_bad = 0; /* the XML's rows are MiB by format, not a guess */
 	/* The session has a table (the one just sent), so the latch is "asked and
 	 * answered": spd_dump's gpt_failed is already 0 here and scan_xml_partitions
 	 * rewrites io->ptable in place, so a later partition_list prints the new
@@ -2353,6 +2354,15 @@ int spd_ptab_mib_unsafe(const struct spd *io, unsigned count, const char *what)
 	unsigned i;
 	int bad = 0;
 
+	/* R1: a table whose unit was guessed and not confirmed by the device has
+	 * rows that are whole MiB only because they were scaled; refuse it. */
+	if (io->ptab_unit_bad) {
+		fprintf(stderr, "%s: table unit unverified: the partition sizes were read with a"
+			" guessed unit (spd_dump divisor != 10) and the device's size probe did not"
+			" confirm it, so every row may be off by a power of two. Sending or saving"
+			" this table could resize every partition.\n", what);
+		return 1;
+	}
 	for (i = 0; i + 1 < count; i++) {
 		uint64_t sz = io->ptab[i].size;
 		if (sz != 0 && (sz & 0xfffffu) == 0)
@@ -2721,6 +2731,7 @@ static int gpt_probe(struct spd *io)
 	 * (xml_body fixes the shift at 20), so the read shift is 20 for the same
 	 * reason the repartition echo's is. */
 	io->ptab_shift = 20;
+	io->ptab_unit_bad = 0;
 	fprintf(stderr, "parts: %d entries from the standard GPT (%llu-byte sectors)\n",
 		io->nparts, (unsigned long long)real_sector);
 	fprintf(stderr, "Storage is %s\n", storage == SPD_STORAGE_EMMC ? "emmc" : "ufs");
@@ -2832,6 +2843,7 @@ static int fetch_ptab(struct spd *io)
 		 * do not need it. */
 		io->storage = (divisor == 10) ? SPD_STORAGE_EMMC : SPD_STORAGE_UFS;
 		io->ptab_shift = 20 - divisor;
+		io->ptab_unit_bad = 0;
 		for (i = 0; i < n; i++) {
 			const uint8_t *rec = p + i * 0x4c;
 			unsigned k;
@@ -2868,16 +2880,24 @@ static int fetch_ptab(struct spd *io)
 				divisor, 10 - divisor);
 			probed = spd_check_partition(io, io->ptab[pick].name, 1, 0);
 			io->storage = saved_storage;
+			/* R1: remember a failed check. The rows are whole MiB after the
+			 * scaling, so the H1 rounding guard alone would pass a table
+			 * whose every row is doubled; spd_ptab_mib_unsafe reads this. */
+			io->ptab_unit_bad = 1;
 			if (!probed)
-				fprintf(stderr, "check: the device did not answer a size probe for %s\n",
+				fprintf(stderr, "check: the device did not answer a size probe for %s;"
+					" the table's unit is unverified, so this session will not send"
+					" the table back or save it as XML\n",
 					io->ptab[pick].name);
-			else if (probed == io->ptab[pick].size)
+			else if (probed == io->ptab[pick].size) {
+				io->ptab_unit_bad = 0;
 				fprintf(stderr, "check: %s is %llu bytes on the device too; the table's unit is right\n",
 					io->ptab[pick].name, (unsigned long long)probed);
-			else
+			} else
 				fprintf(stderr,
 					"WARNING: %s is %llu bytes by the table but the device answers %llu; "
-					"treat this table's sizes as suspect\n",
+					"treat this table's sizes as suspect. This session will not send the"
+					" table back or save it as XML.\n",
 					io->ptab[pick].name, (unsigned long long)io->ptab[pick].size,
 					(unsigned long long)probed);
 		}

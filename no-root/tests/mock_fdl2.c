@@ -88,7 +88,11 @@ static void load_tab(void)
 	if (ntab >= 0) return;
 	ntab = 0;
 	if (!p || !strcmp(p, "1") || !(f = fopen(p, "r"))) return;
-	while (ntab < 128 && fscanf(f, "%36s %llu", nm, &kb) == 2) { strcpy(tab[ntab].n, nm); tab[ntab].kb = kb; ntab++; }
+	/* MOCK_PTABLE_MIB=1: the file's numbers are MiB, as a phone whose FDL2
+	 * reports MiB rows (spd_dump divisor 0) sends them. tab[] stays KiB, so
+	 * the size a probe finds agrees with the unit the table claims. */
+	while (ntab < 128 && fscanf(f, "%36s %llu", nm, &kb) == 2) {
+		strcpy(tab[ntab].n, nm); tab[ntab].kb = getenv("MOCK_PTABLE_MIB") ? kb << 10 : kb; ntab++; }
 	fclose(f);
 }
 static int streq_env(const char *e, const char *n) { const char *v = getenv(e); return v && !strcmp(v, n); }
@@ -253,7 +257,7 @@ static void log_out(const uint8_t *buf, int len)
 		make_reply(0x93, data, (int)want, crc); return; }
 	case 0x2d: load_tab(); if (ntab > 0) {
 		int k, j; memset(data, 0, ntab * 0x4c);
-		for (k = 0; k < ntab; k++) { uint8_t *r = data + k * 0x4c; uint32_t kb = (uint32_t)tab[k].kb;
+		for (k = 0; k < ntab; k++) { uint8_t *r = data + k * 0x4c; uint32_t kb = (uint32_t)(getenv("MOCK_PTABLE_MIB") && tab[k].kb != ~0ull ? tab[k].kb >> 10 : tab[k].kb);
 			for (j = 0; tab[k].n[j]; j++) r[2 * j] = tab[k].n[j];
 			r[0x48] = kb; r[0x49] = kb >> 8; r[0x4a] = kb >> 16; r[0x4b] = kb >> 24; }
 		make_reply(0xba, data, k * 0x4c, crc); return; }
