@@ -278,8 +278,12 @@ check "a table in another unit dumps as whole MiB, not rounded to 0 (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"tiny\" size=\"1\"' tiny.xml"
 printf '%s\n' 'zero 0' 'boot_a 4096' > zeropt
 MOCK_PTABLE=$tmp/zeropt sh zero partition-list zero.xml; rc=$?
-check "a zero-size row dumps as size=\"0\" instead of hanging (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q 'Partition id=\"zero\" size=\"0\"' zero.xml"
+# H1: a 0 row before the last would go back to the phone as a partition of
+# nothing and move every row after it, so partition-list now refuses that
+# table (promptly -- it still does not hang) rather than writing size="0".
+check "a zero-size row is refused with a clear error instead of hanging (rc $rc)" \
+	bash -c "[ $rc != 0 ] && [ ! -e zero.xml ] && grep -q 'row 1 zero: 0 bytes (0)' sh_zero.log &&
+		grep -q 'partition-list: refused' sh_zero.log"
 
 # The real table this feature exists for: a 73-row ums9230 layout whose super is
 # grown from the stock 5 GiB to 10 GiB (size 10000), the edit people actually
