@@ -602,8 +602,45 @@ static int need(int argc, int i, int n, const char *what)
 /* Defined with the other command state, below: whether to send KEEP_CHARGE. */
 static int keep_charge_on(void);
 
+/* The chip an exec stub address belongs to (the release package's stubs, by
+ * address), or NULL for an address this tree does not ship a stub for. */
+static const char *exec_chip(uint32_t ea)
+{
+	if ((ea & 0xffff0000u) == 0x65010000u)
+		return "ums9230";
+	if (ea == 0x3ee8 || ea == 0x3f48)
+		return "ums512";
+	if (ea == 0x4ee8 || ea == 0x4f48)
+		return "sc9863a";
+	return NULL;
+}
+
+/* M4: FDL1's load address for that chip. A stub built for one BootROM run
+ * behind another chip's FDL1 address jumps into the wrong memory map. */
+static uint32_t exec_chip_fdl1(const char *chip)
+{
+	if (!chip)
+		return 0;
+	if (!strcmp(chip, "ums9230"))
+		return 0x65000800u;
+	if (!strcmp(chip, "ums512"))
+		return 0x5500u;
+	return 0x5000u; /* sc9863a */
+}
+
 static void do_fdl(struct spd *io, int line, const char *path, uint32_t addr)
 {
+	if (io->fdl_stage == 0 && io->exec_addr) {
+		const char *chip = exec_chip(io->exec_addr);
+		uint32_t want = exec_chip_fdl1(chip);
+		if (chip && addr != want) {
+			fprintf(stderr,
+				"fdl: refusing: exec stub 0x%x is the %s stub, which goes with FDL1 at 0x%x, "
+				"not 0x%x. Pick the chip's own addresses (menu option 3); nothing sent\n",
+				io->exec_addr, chip, want, addr);
+			exit(1);
+		}
+	}
 	if (io->fdl_stage == 0) {
 		io->flags |= SPD_F_CRC16 | SPD_F_TRANSCODE;
 		if (!io->linked) {
@@ -1247,24 +1284,17 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 {
 	static char out[1024];
 	char name[64], dir[512];
-	const char *slash;
-	/* Every chip the tool ships loaders for, package-relative and from the
-	 * working directory. The stub is named after its address, so the same
-	 * name never appears under two chips. It used to be ums9230 only, which
-	 * made a line that named just the address abort on sc9863a and ums512:
-	 * the menu now passes the path it resolved, and this is the fallback for
-	 * a hand-typed command line. */
-	const char *rel[] = {
-		"%s/fdl/ums9230/%s",
-		"%s/fdl/ums512/%s",
-		"%s/fdl/sc9863a/%s",
-		"%s/../fdl/ums9230/%s",
-		"%s/../fdl/ums512/%s",
-		"%s/../fdl/sc9863a/%s",
-		NULL
-	};
+	const char *slash, *chip = exec_chip(addr);
+	/* L6: only the folder of the chip the address belongs to -- fdl/<chip>/,
+	 * package-relative, then from the working directory. A stray
+	 * custom_exec_no_verify_*.bin in the working directory or under another
+	 * chip is not looked at; an address this tree ships no stub for has no
+	 * default at all (name the FILE). */
+	const char *rel[] = { "%s/fdl/%s/%s", "%s/../fdl/%s/%s", NULL };
 	int k;
 
+	if (!chip)
+		return NULL;
 	snprintf(name, sizeof(name), "custom_exec_no_verify_%x.bin", (unsigned)addr);
 	slash = strrchr(self_path, '/');
 	if (slash) {
@@ -1274,18 +1304,12 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 		memcpy(dir, self_path, n);
 		dir[n] = 0;
 		for (k = 0; rel[k]; k++) {
-			snprintf(out, sizeof(out), rel[k], dir, name);
+			snprintf(out, sizeof(out), rel[k], dir, chip, name);
 			if (access(out, R_OK) == 0)
 				return out;
 		}
 	}
-	for (k = 0; k < 3; k++) {
-		static const char *socs[] = { "ums9230", "ums512", "sc9863a" };
-		snprintf(out, sizeof(out), "fdl/%s/%s", socs[k], name);
-		if (access(out, R_OK) == 0)
-			return out;
-	}
-	snprintf(out, sizeof(out), "%s", name);
+	snprintf(out, sizeof(out), "fdl/%s/%s", chip, name);
 	if (access(out, R_OK) == 0)
 		return out;
 	return NULL;

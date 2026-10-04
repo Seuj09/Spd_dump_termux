@@ -39,7 +39,8 @@ FDL2_ADDR_DEFAULT=0x9efffe00
 # FDL1 is started by fdl/ums9230/custom_exec_no_verify_65015f08.bin instead of
 # BSL_CMD_EXEC_DATA, which the Infinix BootROM signature-checks and hangs on.
 # SPDHOST_EXEC_ADDR=0 (or off) disables; any 0x... overrides. Also EXEC_ADDR=
-# in the menu config. Environment wins over config.
+# in the menu config. Environment wins over config. With no chip chosen (SOC
+# unset) and neither set, there is NO stub (exec_addr_value).
 EXEC_ADDR_DEFAULT=0x65015f08
 # Release menu "hex mode 2" for ums9230. Both stubs ship (fdl/ums9230/
 # custom_exec_no_verify_65015f08.bin and _65015f48.bin, byte-identical to the
@@ -738,33 +739,44 @@ configure_loaders_manual() {
 	na1=$(ask_addr "FDL1 address:") || return 1
 	nf2=$(ask_file "FDL2 file:") || return 1
 	na2=$(ask_addr "FDL2 address:") || return 1
-	cur=$(exec_addr_value || true)
+	# L6: the chip question is mandatory. It used to default (Enter) to
+	# "keep whatever stub is set", which with no chip saved meant the ums9230
+	# stub 0x65015f08 -- sent before FDL1 on any chip. Now every answer names
+	# a chip, or says outright that there is no stub.
 	echo "Which chip are these loaders for? This picks the exec stub."
 	echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
-	echo "[1] ums9230   [2] sc9863a   [3] ums512"
-	echo "[Enter] keep ${cur:-no exec stub} and leave the chip unset"
-	read -r -p "Choice: " choice
+	echo "[1] ums9230 (FDL1 0x65000800)   [2] sc9863a (FDL1 0x5000)   [3] ums512 (FDL1 0x5500)"
+	echo "[4] another chip: no exec stub (plain BSL EXEC)"
+	while true; do
+		if ! read -r -p "Choice (required): " choice; then
+			echo "Cancelled (no input); nothing saved." >&2
+			return 1
+		fi
+		case $choice in
+			1|2|3|4) break ;;
+			*) echo "Pick 1, 2, 3 or 4." >&2 ;;
+		esac
+	done
+	case $choice in
+		1) soc_profile ums9230 ;;
+		2) soc_profile sc9863a ;;
+		3) soc_profile ums512 ;;
+	esac
+	# M4: FDL1's address is a function of the chip; a mix is refused, not saved.
+	if [[ $choice != 4 && $(( na1 )) != $(( SOC_FDL1_ADDR )) ]]; then
+		echo "Refusing: FDL1 address $na1 does not go with that chip (its FDL1 loads at $SOC_FDL1_ADDR)." >&2
+		echo "Nothing saved. Use option 3's shipped models, or type the chip's own address." >&2
+		return 1
+	fi
 	FDL1=$nf1
 	FDL1_ADDR=$na1
 	FDL2=$nf2
 	FDL2_ADDR=$na2
-	case ${choice:-} in
-		1) soc_profile ums9230 && SOC=ums9230 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
-		2) soc_profile sc9863a && SOC=sc9863a && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
-		3) soc_profile ums512 && SOC=ums512 && EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
-		'')
-			# Enter means "the chip is still whatever it was", which is exactly
-			# what the loader path can contradict: keeping SOC here would pair
-			# these new paths with the previous chip's addresses on the next
-			# load. So unset the chip and PIN the value that was shown (0 when
-			# there is no stub), so it cannot drift when EXEC_ADDR_DEFAULT
-			# changes with a profile. If the typed path does name a chip,
-			# config_chip_check adopts it and reconciles the addresses on the
-			# next load, so the mix above cannot survive a reload either.
-			SOC=""
-			EXEC_ADDR=${cur:-0}
-			;;
-		*) echo "Unchanged exec stub." ;;
+	case $choice in
+		1) SOC=ums9230; EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		2) SOC=sc9863a; EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		3) SOC=ums512; EXEC_ADDR=$EXEC_ADDR_DEFAULT ;;
+		4) SOC=""; EXEC_ADDR=0 ;;
 	esac
 	ea=$(exec_addr_value || true)
 	# Last chance to notice a mix, before it is written to the config and used.
@@ -1002,16 +1014,21 @@ ready() {
 	pause
 }
 
-# Effective exec_addr: env SPDHOST_EXEC_ADDR, else config EXEC_ADDR, else
-# default. Prints nothing when disabled (0/off/empty).
+# Effective exec_addr: env SPDHOST_EXEC_ADDR, else config EXEC_ADDR, else the
+# chip's default -- and with no chip (SOC unset) none at all. Prints nothing
+# when disabled (0/off/empty).
 exec_addr_value() {
 	local v
 	if [[ -n ${SPDHOST_EXEC_ADDR+set} ]]; then
 		v=$SPDHOST_EXEC_ADDR
 	elif [[ -n $EXEC_ADDR ]]; then
 		v=$EXEC_ADDR
-	else
+	elif [[ -n ${SOC:-} ]]; then
 		v=$EXEC_ADDR_DEFAULT
+	else
+		# L6: no chip chosen, no stub. The old default was ums9230's
+		# 0x65015f08 whatever the phone was.
+		v=0
 	fi
 	case $v in
 		''|0|off|OFF|0x0|0X0) return 0 ;;
@@ -1020,37 +1037,35 @@ exec_addr_value() {
 }
 
 # custom_exec_no_verify_<hex>.bin for exec_addr, same name spdhost looks up.
-# Fail here, before the plug-in wait, when the stub is not on disk.
-# Resolve the exec stub for an address and print its path on stdout.
-#
-# The caller has to pass the result to spdhost as exec_addr's FILE. The file
-# is named after the address, so searching by name finds the right one for any
-# chip -- but spdhost's own default lookup only looks in fdl/ums9230/
-# (src/main.c find_exec_file), so on sc9863a and ums512 a session that named
-# only the address aborted with "custom_exec_no_verify_4ee8.bin not found"
-# before it opened the device. Every session goes through run_session, so
-# naming the file there is what makes the other two chips work.
+# Fail here, before the plug-in wait, when the stub is not on disk or does not
+# go with the chosen chip / FDL1 address. Prints the path on stdout; the
+# caller passes it to spdhost as exec_addr's FILE.
 exec_stub_path() {
-	local ea=$1 hex name d
+	local ea=$1 hex name d chip here
 	local -a places=()
 	hex=$(printf '%x' "$((ea))" 2>/dev/null) || return 1
 	name="custom_exec_no_verify_${hex}.bin"
-	places+=(
-		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/${SOC:-ums9230}/$name"
-		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/ums9230/$name"
-		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/ums512/$name"
-		"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fdl/sc9863a/$name"
-		"$PWD/fdl/${SOC:-ums9230}/$name"
-		"$PWD/fdl/ums9230/$name"
-		"$PWD/$name"
-		"$HOME/spdhost/fdl/ums9230/$name"
-		"$HOME/Spd_dump_termux/no-root/fdl/ums9230/$name"
-	)
-	if [[ -n ${FDL1:-} ]]; then
-		places+=("$(dirname "$FDL1")/$name" "$(dirname "$FDL1")/../$name")
+	# L6: a stub is looked up only under fdl/<its chip>/. The chip is the one
+	# the address belongs to; a chosen SOC that disagrees is refused (M4).
+	chip=$(exec_soc_name "$ea")
+	if [[ -z $chip ]]; then
+		echo "no $name: exec_addr $ea is no shipped chip's stub address (stubs live in fdl/<chip>/)." >&2
+		echo "Set SPDHOST_EXEC_ADDR=0 to use BSL EXEC, or pick the chip in option 3." >&2
+		return 1
 	fi
+	if [[ -n ${SOC:-} && $SOC != "$chip" ]]; then
+		echo "refusing: exec_addr $ea is the $chip stub but the chip is $SOC (option 3)." >&2
+		return 1
+	fi
+	if [[ -n ${FDL1_ADDR:-} ]] && soc_fdl1_for "$chip" >/dev/null &&
+	   (( FDL1_ADDR != $(soc_fdl1_for "$chip") )); then
+		echo "refusing: exec_addr $ea is the $chip stub, which goes with FDL1 at $(soc_fdl1_for "$chip"), not $FDL1_ADDR." >&2
+		return 1
+	fi
+	here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+	places+=("$here/../fdl/$chip/$name" "$PWD/fdl/$chip/$name")
 	if [[ -n ${RUNNER[0]:-} ]]; then
-		places+=("$(dirname "${RUNNER[0]}")/../fdl/ums9230/$name")
+		places+=("$(dirname "${RUNNER[0]}")/../fdl/$chip/$name")
 	fi
 	for d in "${places[@]}"; do
 		if [[ -f $d ]]; then
@@ -1059,8 +1074,19 @@ exec_stub_path() {
 		fi
 	done
 	echo "missing $name for exec_addr $ea." >&2
-	echo "Put it in fdl/${SOC:-ums9230}/, or set SPDHOST_EXEC_ADDR=0 to use BSL EXEC." >&2
+	echo "Put it in fdl/$chip/, or set SPDHOST_EXEC_ADDR=0 to use BSL EXEC." >&2
 	return 1
+}
+
+# FDL1 load address of a chip (the soc_profile table), without touching the
+# soc_profile globals.
+soc_fdl1_for() {
+	case $1 in
+		ums9230) echo 0x65000800 ;;
+		ums512) echo 0x5500 ;;
+		sc9863a) echo 0x5000 ;;
+		*) return 1 ;;
+	esac
 }
 
 # The check on its own, for callers that only want "is it there?" (hex mode,
@@ -1083,8 +1109,7 @@ run_session() {
 		shift
 	done
 	# Every BootROM fdl flow starts with FDL1: put exec_addr in front of it,
-	# with the stub's own path. spdhost's default lookup only knows
-	# fdl/ums9230/, so naming the file is what lets sc9863a and ums512 run.
+	# with the stub's own path from fdl/<chip>/ (exec_stub_path).
 	if [[ ${1:-} == fdl ]]; then
 		ea=$(exec_addr_value) || ea=
 		if [[ -n $ea ]]; then

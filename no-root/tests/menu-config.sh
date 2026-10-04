@@ -220,25 +220,27 @@ EXEC_ADDR=0x65015f08
 SOC=ums9230
 EOF
 
+# L6: the chip question is mandatory now. [Enter] used to mean "leave the chip
+# unset and keep the stub shown" -- with no chip that was ums9230's 0x65015f08,
+# sent before FDL1 on any phone. Now Enter re-asks, and running out of input
+# cancels with NOTHING saved.
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 "" |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
-check "manual [Enter]: the chip is left unset, not carried over" has "$out" "RESULT SOC= EXEC_ADDR=0x65015f08"
-check "manual [Enter]: the mixed stub is called out" has "$out" "is ums9230's stub but the loaders are sc9863a's"
-soc=$(menu_run "$tmp/ums.conf" show_chip_error 2>&1) # fresh load, unaffected
-check "manual [Enter]: the pre-existing config is not modified" has "$soc" "CHIPERR="
+check "manual [Enter]: re-asked, then cancelled at EOF with nothing saved" \
+	bash -c '[[ $1 == *"Pick 1, 2, 3 or 4."* && $1 == *"Cancelled (no input); nothing saved."* ]]' _ "$out"
 saved=$(sed -n 's/^SOC=//p' "$tmp/ums.conf")
-check "manual [Enter]: the saved config carries an empty SOC (got '$saved')" test -z "$saved"
-saved=$(sed -n 's/^EXEC_ADDR=//p' "$tmp/ums.conf")
-check "manual [Enter]: the pinned exec stub was written (got '$saved')" test "$saved" = 0x65015f08
+check "manual [Enter]: the saved config is untouched (SOC '$saved')" test "$saved" = ums9230
+saved=$(sed -n 's/^FDL1_ADDR=//p' "$tmp/ums.conf")
+check "manual [Enter]: the saved FDL1 address is untouched (got '$saved')" test "$saved" = 0x65000800
 
-# And that saved config reloads clean: the path names sc9863a, so the chip is
-# adopted and the ums9230 exec stub the user pinned is reconciled away. The mix
-# is therefore not survivable across a reload either.
-out=$(menu_run "$tmp/ums.conf" show_addrs 2>&1)
-check "manual [Enter]: reload adopts the path's chip and fixes the stub" \
-	has "$out" "F1=0x5000 F2=0x9efffe00 EX=0x4ee8 SOC=sc9863a"
+# [4] is the explicit "another chip, no stub" answer: chip unset, stub 0.
+out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 4 |
+	menu_run "$tmp/ums.conf" manual_probe 2>&1)
+check "manual [4]: no chip, no exec stub" has "$out" "RESULT SOC= EXEC_ADDR=0"
+saved=$(sed -n 's/^EXEC_ADDR=//p' "$tmp/ums.conf")
+check "manual [4]: EXEC_ADDR=0 is saved (got '$saved')" test "$saved" = 0
 menu_run "$tmp/ums.conf" need_loaders >/dev/null 2>&1
-check "manual [Enter]: reload is usable, not refused" test $? = 0
+check "manual [4]: reload is usable, not refused" test $? = 0
 
 # Choosing a chip explicitly still pins that chip's addresses.
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 2 |
@@ -249,9 +251,16 @@ check "manual [2]: no cross-chip warning for a matching pair" \
 	lacks "$out" "is ums9230's stub"
 
 # Path-vs-pick disagreement is spoken, and the picked chip wins the addresses.
-out=$(printf '%s\n' 1 "$SC1" 0x5000 "$SC2" 0x9efffe00 3 |
+# M4: picking ums512 for an FDL1 typed at sc9863a's 0x5000 is refused (ums512's
+# stub goes with FDL1 at 0x5500); it used to save with a warning.
+out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 3 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
-check "manual [3]: a path/chip disagreement warns" has "$out" "the loaders are sc9863a's but you picked ums512"
+check "manual [3]: an FDL1 address that is not the picked chip's is refused" \
+	has "$out" "Refusing: FDL1 address 0x5000 does not go with that chip (its FDL1 loads at 0x5500)"
+check "manual [3]: nothing saved for the refused mix" lacks "$out" "RESULT SOC=ums512"
+out=$(printf '%s\n' "$SC1" 0x5500 "$SC2" 0x9efffe00 3 |
+	menu_run "$tmp/ums.conf" manual_probe 2>&1)
+check "manual [3]: a path/chip disagreement still warns" has "$out" "the loaders are sc9863a's but you picked ums512"
 check "manual [3]: the picked chip's addresses are written" \
 	has "$out" "RESULT SOC=ums512 EXEC_ADDR=0x3ee8"
 
