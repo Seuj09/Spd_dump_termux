@@ -137,6 +137,9 @@ static void usage(void)
 		"                               a later misc write in this session is\n"
 		"                               then read back and verified. Failure\n"
 		"                               stops the session before any write.\n"
+		"  misc-backup-expect FILE SHA256  misc-backup, then stop the session\n"
+		"                               unless the misc read hashes to SHA256\n"
+		"                               (misc unchanged since an earlier read).\n"
 		"  write-part NAME FILE     one partition. misc is 2048 bytes or the\n"
 		"                          whole partition. fixnv1 uses NV framing.\n"
 		"                          A same-size NAME_bak is also written when\n"
@@ -570,7 +573,7 @@ static int is_command(const char *s)
 		strcmp(s, "chip-uid") == 0 ||
 		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
 		strcmp(s, "reset") == 0 || strcmp(s, "dump") == 0 ||
-		strcmp(s, "misc-backup") == 0 ||
+		strcmp(s, "misc-backup") == 0 || strcmp(s, "misc-backup-expect") == 0 ||
 		strcmp(s, "power-off") == 0 || strcmp(s, "poweroff") == 0;
 }
 
@@ -1706,6 +1709,39 @@ int main(int argc, char **argv)
 			if (spd_misc_backup(io, argv[i + 1]))
 				return 1; /* never --keep-going past a failed backup */
 			i += 2;
+		} else if (strcmp(cmd, "misc-backup-expect") == 0) {
+			/* misc-backup, then refuse to go on unless the misc just read
+			 * hashes to SHA256. The menu's set-slot builds its image from a
+			 * misc read in an earlier session; this is how the write session
+			 * proves misc has not changed since (a boot, slot counters, a
+			 * BCB), so the write never reverts bytes nobody looked at. A
+			 * mismatch ends the session before any write. */
+			char got[65];
+			size_t n = 0;
+			uint8_t *b;
+			const char *want;
+			need(argc, i, 2, "misc-backup-expect");
+			need_fdl2(io, "misc-backup-expect");
+			want = argv[i + 2];
+			if (strlen(want) != 64 || strspn(want, "0123456789abcdef") != 64) {
+				fprintf(stderr, "misc-backup-expect: want a 64-digit lowercase sha256\n");
+				return 1;
+			}
+			if (spd_misc_backup(io, argv[i + 1]))
+				return 1;
+			b = load_small_file(argv[i + 1], &n, (size_t)spd_misc_size(io));
+			if (!b)
+				return 1;
+			sha256_hex(b, n, got);
+			free(b);
+			if (strcmp(got, want)) {
+				fprintf(stderr, "misc-backup-expect: misc CHANGED since it was read (now sha256 %s,"
+					" expected %s). Stopping before any write; the backup of the current misc"
+					" is %s.\n", got, want, argv[i + 1]);
+				return 1;
+			}
+			fprintf(stderr, "misc-backup-expect: misc is unchanged (sha256 %s)\n", got);
+			i += 3;
 		} else if (strcmp(cmd, "write-part") == 0) {
 			need(argc, i, 2, "write-part");
 			need_fdl2(io, "write-part");

@@ -2158,9 +2158,16 @@ smoke_test() {
 # No --yes: the caller already took a typed "yes" (MISC_CONFIRM_TOKEN =
 # sha256 of the bytes to write); it is passed once as --confirm-token and
 # cleared, so it authorizes exactly this one misc write.
+MISC_EXPECT_SHA=""
 guarded_misc_session() {
-	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN
+	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN expect=$MISC_EXPECT_SHA
+	local -a backup_cmd
 	shift
+	# MISC_EXPECT_SHA (one-shot, like the token): the sha256 misc had when the
+	# caller read it in an EARLIER session. The backup then becomes
+	# misc-backup-expect, and spdhost stops before the write if misc has
+	# changed since -- the write is built from that earlier read.
+	MISC_EXPECT_SHA=
 	# The caller's last command is what ends the session (reset, power-off).
 	# One --confirm-token authorizes exactly ONE misc write, so a caller must
 	# never put a second misc-writing command (reboot-recovery, reboot-fastboot,
@@ -2178,8 +2185,17 @@ guarded_misc_session() {
 	raw=$(parts_cache_path)
 	echo "misc will be backed up to $backup first; the write is skipped if that fails."
 	ready || return 1
+	if [[ -n $expect ]]; then
+		if [[ ! $expect =~ ^[0-9a-f]{64}$ ]]; then
+			echo "menu: bad expected misc sha256 for $kind; nothing written" >&2
+			return 1
+		fi
+		backup_cmd=(misc-backup-expect "$backup" "$expect")
+	else
+		backup_cmd=(misc-backup "$backup")
+	fi
 	run_session "--confirm-token=$tok" fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$raw" misc-backup "$backup" "$@"
+		parts "$raw" "${backup_cmd[@]}" "$@"
 	rc=$?
 	load_parts_state >/dev/null 2>&1
 	want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
@@ -2198,6 +2214,10 @@ guarded_misc_session() {
 		rc=1
 	fi
 	if (( rc != 0 )); then
+		if [[ -n $expect ]]; then
+			echo "If spdhost said 'misc CHANGED since it was read', nothing was written: misc"
+			echo "changed between the read session and this one. Run this option again."
+		fi
 		echo "$kind FAILED (exit $rc). Read the spdhost lines above: no $ending happens after a failed backup or a misc read-back mismatch."
 	else
 		echo "$kind: misc written, read back and verified, then $ending."
@@ -2801,7 +2821,7 @@ splice_misc_bcb() {
 }
 
 set_slot_menu() {
-	local which live src patched digest bin ending rc
+	local which live live_sha src patched digest bin ending rc
 	need_loaders || return
 	echo "Set the active A/B slot. This rewrites 32 bytes at misc+0x800"
 	echo "and then rewrites the whole misc partition (backup + read-back)."
@@ -2828,6 +2848,9 @@ set_slot_menu() {
 	echo "Reading misc first so the confirm token can cover the exact bytes written."
 	read_misc_image || return 1
 	live=$MISC_LIVE_IMAGE
+	# What misc held in THIS read. The write session checks misc against it
+	# and stops before writing if anything changed it in between (M3).
+	live_sha=$(sha256sum "$live" | awk '{print $1}')
 	src=$live
 	ending=reset
 	case $BOOT_AFTER in
@@ -2865,6 +2888,7 @@ set_slot_menu() {
 		rm -f "$patched"
 		return 1
 	fi
+	MISC_EXPECT_SHA=$live_sha
 	guarded_misc_session "set-active $which" write-part misc "$patched" "$ending"
 	rc=$?
 	rm -f "$patched"
