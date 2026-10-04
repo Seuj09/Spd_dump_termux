@@ -3132,8 +3132,8 @@ unlock_bootloader_menu() {
 	echo "Next session writes $cboot onto uboot (the active slot name)."
 	echo "spdhost asks you to type yes for that write."
 	echo "A file larger than the uboot partition is refused, and the backup is written back."
-	pause || return 1
-	ready || return 1
+	pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
+	ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
 	rc=0
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" write-part uboot "$cboot" reset || rc=$?
@@ -3142,15 +3142,15 @@ unlock_bootloader_menu() {
 	else
 		echo "Next session sends spl-unlock.bin as FDL1 and does not load FDL2."
 		echo "The release menu treats a disconnect ('perangkat dilepas') as success."
-		pause || return 1
-		ready || return 1
+		pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
+		ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
 		run_session fdl "$unlock" "$FDL1_ADDR" || \
 			echo "Unlock loader returned non-zero. Continuing to the status read."
 		echo "Next session reads 64 bytes at miscdata offset 8192."
 		echo "Release-menu note: 64 zero bytes means locked; 32 bytes of text plus two 16-byte hashes means unlocked."
 		echo "This tool prints the bytes. It does not decide the lock state beyond that note."
-		pause || return 1
-		ready || return 1
+		pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
+		ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
 		slotf=$work/unlock-status.bin
 		run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 			read-part miscdata 8192 64 "$slotf" reset || \
@@ -3161,8 +3161,8 @@ unlock_bootloader_menu() {
 	echo "Last session writes the dumped splloader and uboot back, then reset."
 	echo "parts runs first so uboot is the active slot name, not the bare word uboot."
 	echo "spdhost asks you to type yes for each of those writes."
-	pause || return 1
-	ready || return 1
+	pause || { unlock_restore_help "$spl" "$uboot"; return 1; }
+	ready || { unlock_restore_help "$spl" "$uboot"; return 1; }
 	# This is the write that makes the phone bootable again: splloader is still
 	# erased from the session above. Its failure used to fall out of the case
 	# arm unchecked, so the menu moved on with the phone unbootable and said
@@ -3178,8 +3178,36 @@ unlock_bootloader_menu() {
 		echo "  $uboot"
 		echo "spdhost writes an image only after you type yes, so a lost USB"
 		echo "connection or an aborted prompt is the usual cause, not bad files."
+		unlock_restore_help "$spl" "$uboot"
 		return 1
 	fi
+}
+
+# M4: after the erase session the phone has no splloader until the last
+# session writes the backup back. Every way out of the unlock past that point
+# prints the backup paths and the exact command that restores them, so a
+# dropped cable, an EOF at a pause or a failed restore never leaves the user
+# without the next step. The command is the menu's own restore session,
+# spelled out (typed yes for each write; no --yes).
+unlock_restore_help() {
+	local spl=$1 uboot=$2 ea stub
+	local -a cmd=("${RUNNER[@]}" --timeout "${SPDHOST_TIMEOUT:-3000}")
+	ea=$(exec_addr_value 2>/dev/null) || ea=
+	if [[ -n $ea ]] && stub=$(exec_stub_path "$ea" 2>/dev/null); then
+		cmd+=(exec_addr "$ea" "$stub")
+	fi
+	cmd+=(fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" parts "$(parts_cache_path)"
+		write-part splloader "$spl" write-part uboot "$uboot" reset)
+	echo
+	echo "splloader may still be erased. An erased SPL should still drop into BootROM download mode"
+	echo "(power off, hold volume down, plug in), so it is recoverable with this tool."
+	echo "Backups:"
+	echo "  splloader: $spl"
+	echo "  uboot:     $uboot"
+	echo "Restore command (from $PWD; it asks you to type yes for each write):"
+	printf '  '
+	printf '%q ' "${cmd[@]}"
+	echo
 }
 
 unlock_pick_uboot() {
