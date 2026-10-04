@@ -652,10 +652,12 @@ int spd_dump(struct spd *io, const char *target, const char *outdir, int yes)
 		}
 	} else if (!strcmp(target, "preset_modem")) {
 		/* spd_dump r preset_modem: l_* and nr_* rows, then misc when A/B.
-		 * spd_dump reads misc at a fixed 0..1048576 here (the slot block),
-		 * not the table size. */
+		 * spd_dump reads misc at a fixed 0..1048576 here; L4: this reads
+		 * the live row's size (spd_misc_size, 1 MiB only without a table),
+		 * so the saved misc.img is a whole-partition image that write-parts
+		 * can restore on a phone whose misc is not 1 MiB. */
 		if (slot > 0)
-			dump_one(io, "misc", MISC_SLOT_BYTES, outdir, failed, sizeof(failed), &nfail, slot, yes);
+			dump_one(io, "misc", spd_misc_size(io), outdir, failed, sizeof(failed), &nfail, slot, yes);
 		for (i = 0; i < io->nparts; i++) {
 			if (!io->ptab[i].size || !preset_modem_want(io->ptab[i].name))
 				continue;

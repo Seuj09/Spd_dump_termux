@@ -1367,6 +1367,19 @@ show_parts_list() {
 	echo "all, all_lite, imei, preset_modem, and preset_resign are typed alone."
 }
 
+# L2: how a READ-ONLY session ends. A session that stops after its last read
+# used to leave the phone sitting in FDL2 (screen on, battery draining, no way
+# out but a forced restart). It now ends like every other session: with the
+# configured ending when that is reset or power-off, and with power-off when
+# the ending is recovery/fastbootd -- those write misc, and a read-only session
+# writes nothing.
+read_only_ending() {
+	case $BOOT_AFTER in
+		reset|power-off) printf '%s\n' "$BOOT_AFTER" ;;
+		*) printf '%s\n' power-off ;;
+	esac
+}
+
 # One session: parts table (units) + 32 bytes at misc+0x800 for the slot.
 fetch_parts_table() {
 	local raw misc rc sz
@@ -1376,7 +1389,7 @@ fetch_parts_table() {
 	ready || return 1
 	rm -f "$raw" "$misc"
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$raw" read-part misc "$SPD_SLOT_OFF" "$SPD_SLOT_BYTES" "$misc"
+		parts "$raw" read-part misc "$SPD_SLOT_OFF" "$SPD_SLOT_BYTES" "$misc" "$(read_only_ending)"
 	rc=$?
 	if [[ ! -s $raw ]]; then
 		echo "parts failed (exit $rc)." >&2
@@ -2307,7 +2320,7 @@ read_misc_image() {
 	img=$(mktemp "$dir/spdhost-misc-live.XXXXXX") || return 1
 	ready || { rm -f "$img"; return 1; }
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" misc-backup "$img"
+		parts "$(parts_cache_path)" misc-backup "$img" "$(read_only_ending)"
 	rc=$?
 	if (( rc != 0 )) || [[ ! -s $img ]]; then
 		echo "reading misc failed (exit $rc); nothing written." >&2
@@ -3385,7 +3398,7 @@ chip_uid_action() {
 	echo "Read-only: spdhost asks the BootROM/FDL for the chip UID."
 	echo "spd_dump prints it as a string; this prints the bytes as hex."
 	ready || return 1
-	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" chip-uid
+	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" chip-uid "$(read_only_ending)"
 }
 
 # Read-only: one session that refreshes the table and prints the byte size
@@ -3409,7 +3422,7 @@ check_part_action() {
 	echo "Read-only: parts, then part-size $name. Nothing is written."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" part-size "$name"
+		parts "$(parts_cache_path)" part-size "$name" "$(read_only_ending)"
 }
 
 # erase-part clears one partition. persist, splloader, splloader_bak and all

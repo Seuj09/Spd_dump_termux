@@ -2844,6 +2844,40 @@ static int fetch_ptab(struct spd *io)
 			n, io->ptab_shift, divisor);
 		fprintf(stderr, "Storage is %s\n",
 			divisor == 10 ? "emmc" : "ufs");
+		/* L1: divisor 10 is the only case where the unit is known (KiB rows,
+		 * eMMC). Anything lower is spd_dump's guess: one row under 1 MiB is
+		 * enough to drop it, and every size in the table is then doubled
+		 * (or more). Say so, and ask the device for one real size. */
+		if (divisor != 10 && n > 0) {
+			unsigned k, pick = 0;
+			int saved_storage = io->storage;
+			uint64_t probed;
+			for (k = 0; k < n; k++)
+				if (!strcmp(io->ptab[k].name, "misc"))
+					break;
+			pick = k;
+			if (pick >= n || !io->ptab[pick].size)
+				for (pick = 0; pick + 1 < n && !io->ptab[pick].size; pick++)
+					;
+			fprintf(stderr,
+				"WARNING: partition sizes use spd_dump divisor %d, not 10: this is UFS or the "
+				"size heuristic guessed (a row under 1 MiB lowers it); sizes may be off by 2^%d\n",
+				divisor, 10 - divisor);
+			probed = spd_check_partition(io, io->ptab[pick].name, 1, 0);
+			io->storage = saved_storage;
+			if (!probed)
+				fprintf(stderr, "check: the device did not answer a size probe for %s\n",
+					io->ptab[pick].name);
+			else if (probed == io->ptab[pick].size)
+				fprintf(stderr, "check: %s is %llu bytes on the device too; the table's unit is right\n",
+					io->ptab[pick].name, (unsigned long long)probed);
+			else
+				fprintf(stderr,
+					"WARNING: %s is %llu bytes by the table but the device answers %llu; "
+					"treat this table's sizes as suspect\n",
+					io->ptab[pick].name, (unsigned long long)io->ptab[pick].size,
+					(unsigned long long)probed);
+		}
 	}
 	/* common.c:1143 gpt_failed = 0: the session has its table now, so nothing
 	 * asks the device again. */
