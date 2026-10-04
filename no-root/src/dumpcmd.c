@@ -577,11 +577,17 @@ int spd_read_parts(struct spd *io, const char *xml_path, const char *dir, int co
 		if (spd_read_part(io, resolved, 0, size, out))
 			nfail++;
 	}
-	/* spd_dump: `if (selected_ab > 0) { "saving slot info"; dump misc 1 MiB }` */
+	/* spd_dump: `if (selected_ab > 0) { "saving slot info"; dump misc 1 MiB }`.
+	 * G8: the live misc row's size instead (spd_misc_size; 1 MiB only when the
+	 * table has no misc row), as L4 did for preset_modem: a fixed 1 MiB is a
+	 * short image on a phone whose misc is larger, and fails on one whose
+	 * misc is smaller. */
 	if (io->nparts > 0 && spd_active_slot(io) > 0) {
+		uint64_t msz = spd_misc_size(io);
 		snprintf(out, sizeof(out), "%s/misc.bin", dir);
-		fprintf(stderr, "read-parts: saving slot info -> %s\n", out);
-		if (spd_read_part(io, "misc", 0, 1048576, out))
+		fprintf(stderr, "read-parts: saving slot info -> %s (%llu bytes)\n", out,
+			(unsigned long long)msz);
+		if (spd_read_part(io, "misc", 0, msz, out))
 			nfail++;
 	}
 	free(list);

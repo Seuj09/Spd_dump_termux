@@ -127,6 +127,13 @@ ours rq "${F1[@]}" path "$tmp/ourout" read-parts "$tmp/list.xml" "$tmp/ourout"
 check "read_parts: with a destination, both copy the list into it (\"saving dump list\")" \
 	bash -c "grep -q 'saving dump list' sd_rq.log && grep -q 'saving dump list' sh_rq.log &&
 		cmp -s refout/list.xml '$tmp/list.xml' && cmp -s ourout/list.xml '$tmp/list.xml'"
+# G8: the slot-info misc is the live misc row's size, not a fixed 1 MiB.
+printf '%s\n' 'misc 2048' 'boot_a 2048' 'super 8192' 'userdata 4096' > pt2m
+printf '%s\n' '<Partitions>' '    <Partition id="boot_a" size="2"/>' '</Partitions>' > list2m.xml
+mkdir -p our2m
+MOCK_PTABLE=$tmp/pt2m ours r2m "${F1[@]}" read-parts "$tmp/list2m.xml" "$tmp/our2m"
+check "read_parts (G8): the slot-info misc.bin is the live 2 MiB misc, not 1 MiB" \
+	bash -c "[ \$(stat -c %s our2m/misc.bin 2>/dev/null || echo 0) = 2097152 ] && grep -q 'saving slot info .*(2097152 bytes)' sh_r2m.log"
 # Same reads, frame for frame. Ours is cut from our own log, the reference from
 # its own: the two logs hold the same blocks in the same order.
 for n in misc boot_a splloader super; do
