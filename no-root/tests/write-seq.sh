@@ -588,9 +588,16 @@ menu_find_release_files() {
 find_user_file fdl2-cboot.bin
 FDL1=\"$d/pkg/ums9230/infinix/fdl1-dl.bin\"
 find_gen_spl_unlock")
-	[[ $found == "$d/ums9230/infinix/fdl2-cboot.bin"$'\n'"$d/pkg/gen_spl-unlock" ]]
+	# U6: the per-phone blob comes only from beside FDL1 (here: none set, so
+	# nothing), never the legacy ums9230/infinix/ fallback; the tool lookup
+	# keeps its fallbacks.
+	found=$(cd "$d" && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c "source \"$root/scripts/menu.sh\"
+find_model_file fdl2-cboot.bin || echo none
+FDL1=\"$d/pkg/ums9230/infinix/fdl1-dl.bin\"
+find_gen_spl_unlock")
+	[[ $found == none$'\n'"$d/pkg/gen_spl-unlock" ]]
 }
-check "menu finds release fdl2-cboot.bin and gen_spl-unlock" menu_find_release_files
+check "menu: no FDL1 finds no fdl2-cboot.bin (U6); gen_spl-unlock is still found" menu_find_release_files
 check "menu verity and FRP refuse without a TTY" menu_danger_notty
 # Release menu endings: recovery and fastbootd after the images.
 sh after parts pt.txt write-parts imgs reboot-recovery; rc=$?

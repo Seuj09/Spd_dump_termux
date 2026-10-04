@@ -1974,6 +1974,34 @@ find_user_file() {
 	return 1
 }
 
+# U6: a per-phone vendor blob (fdl2-cboot.bin, spl-unlock.bin) -- the file the
+# unlock writes to uboot or runs as FDL1. find_user_file's fallbacks (the
+# package root, ../../, $PWD, beside menu.sh, ums9230/infinix/ for any chip)
+# each can answer with another phone's copy, so this looks in exactly one
+# place: the folder FDL1 was loaded from. With a model picked (SOC and DEVICE
+# set) that folder must be that model's own, fdl/<soc>/<brand>/ or
+# fdl/<soc>/<brand>/alternatif/<model>/; anything else answers nothing. With
+# loaders configured by hand (no DEVICE) the folder of the chosen FDL1 is the
+# explicit choice.
+find_model_file() {
+	local name=$1 fdir soc=${SOC:-} dev=${DEVICE:-} ok=0
+	[[ -n ${FDL1:-} ]] || return 1
+	fdir=$(cd "$(dirname "$FDL1")" 2>/dev/null && pwd) || return 1
+	if [[ -n $dev ]]; then
+		[[ -n $soc ]] || return 1
+		case $dev in
+			*/*)
+				[[ $fdir == */"$soc/${dev%%/*}/alternatif/${dev#*/}" ||
+					$fdir == */"$soc/${dev%%/*}/alternativ/${dev#*/}" ]] && ok=1 ;;
+			*)
+				[[ $fdir == */"$soc/$dev" ]] && ok=1 ;;
+		esac
+		(( ok )) || return 1
+	fi
+	[[ -f $fdir/$name ]] || return 1
+	printf '%s/%s\n' "$fdir" "$name"
+}
+
 # Release helper from the zip. These are x86-64 ELF binaries, so they run on a
 # PC and cannot execute on the phone; the built-in spdhost image tools are what
 # the menu prefers (see spdhost_has_image_tools). PATH, then the same places as
@@ -3128,8 +3156,8 @@ unlock_bootloader_menu() {
 		echo "not an unlock uboot). Pick your phone's own brand/model in menu [3] first."
 		return 1
 	fi
-	cboot=$(find_user_file fdl2-cboot.bin || true)
-	unlock=$(find_user_file spl-unlock.bin || true)
+	cboot=$(find_model_file fdl2-cboot.bin || true)
+	unlock=$(find_model_file spl-unlock.bin || true)
 	if [[ -z $unlock ]]; then
 		if spdhost_has_image_tools; then
 			can_gen=1
@@ -3140,16 +3168,14 @@ unlock_bootloader_menu() {
 	if [[ -z $cboot || ( -z $unlock && $can_gen == 0 ) ]]; then
 		echo "DANGEROUS unlock: nothing sent."
 		if [[ -z $cboot ]]; then
-			local fdl_root parent
-			fdl_root=$(pkg_fdl_root 2>/dev/null || true)
-			parent=${fdl_root%/fdl}
 			echo "Missing fdl2-cboot.bin."
-			echo "  looked beside the loaders: $(dirname "${FDL1:-<fdl1>}")/fdl2-cboot.bin"
-			if [[ -z ${DEVICE:-} ]]; then
-				[[ -n $parent ]] && echo "  and the package root: $parent/fdl2-cboot.bin"
-				echo "  and the working directory: $PWD/fdl2-cboot.bin"
+			echo "  looked only beside the loaders: $(dirname "${FDL1:-<fdl1>}")/fdl2-cboot.bin"
+			if [[ -n ${DEVICE:-} ]]; then
+				echo "  (model ${SOC:-?}/$DEVICE: only fdl/${SOC:-?}/$DEVICE is searched, and the"
+				echo "  loaders must come from that folder)"
 			else
-				echo "  (a model is selected, so only its own folder is searched)"
+				echo "  (no model picked: put this phone's fdl2-cboot.bin beside the FDL1 you"
+				echo "  configured, or pick the model in menu [3]; no other folder is searched)"
 			fi
 			echo "This is a vendor blob, one per model (fdl/<chip>/<brand>/ and"
 			echo "fdl/ums9230/<brand>/alternatif/<model>/). It is not derivable from"

@@ -4,6 +4,7 @@
 #       backup_spl/ is never reused or restored
 #   U2  splloader_bak is erased before splloader
 #   U4  the uboot backup is restored to the row it was dumped from
+#   U6  fdl2-cboot.bin / spl-unlock.bin come only from the model's own folder
 # The runner is a fake that records each session's argv and writes the files a
 # backup session would; confirm_dangerous/pause/ready are stubbed (the typed
 # word is the pty tests' job, in write-seq.sh).
@@ -34,13 +35,14 @@ esac
 exit 0
 R
 chmod +x run
-mkdir -p fdl && printf c > fdl/fdl2-cboot.bin && printf u > fdl/spl-unlock.bin && printf 1 > fdl/fdl1.bin && printf 2 > fdl/fdl2.bin
+M=fdl/ums9230/testphone
+mkdir -p $M && printf c > $M/fdl2-cboot.bin && printf u > $M/spl-unlock.bin && printf 1 > $M/fdl1.bin && printf 2 > $M/fdl2.bin
 unlock_run() { # LABEL [VAR=value ...]: one unlock_bootloader_menu run in a fresh shell
 	local L=$1; shift
 	: > "rec_$L"
 	env "$@" REC="$tmp/rec_$L" SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER="$tmp/run" SPDHOST_MENU_CONFIG="$tmp/none.conf" \
 		bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
-		FDL1=$2/fdl/fdl1.bin FDL1_ADDR=0x65000800 FDL2=$2/fdl/fdl2.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 DEVICE=testphone
+		FDL1=$2/fdl/ums9230/testphone/fdl1.bin FDL1_ADDR=0x65000800 FDL2=$2/fdl/ums9230/testphone/fdl2.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 DEVICE=testphone
 		ACTIVE_SLOT=${ACTIVE_SLOT:-a}
 		confirm_dangerous() { return 0; }; pause() { return 0; }; ready() { return 0; }; cls() { :; }
 		need_loaders() { return 0; }; exec_addr_value() { return 1; }
@@ -106,6 +108,40 @@ check "U4: a non-A/B uboot.img goes back to uboot" \
 out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
 	unlock_uboot_row /x/uboot_a.img; unlock_uboot_row /x/uboot_b.img; unlock_uboot_row /x/uboot.img; unlock_uboot_row /x/other.img' _ "$root" | tr '\n' ' ')
 check "U4: unlock_uboot_row maps file names to rows [$out]" test "$out" = "uboot_a uboot_b uboot uboot "
+
+# ---- U6 ---------------------------------------------------------------------------------
+# A release-like tree: the package root and ums9230/infinix both carry an
+# fdl2-cboot.bin (the one the old ../../ hop and the no-model fallback found).
+P=$tmp/pkg
+mkdir -p $P/fdl/ums9230/infinix $P/fdl/ums512/tecno $P/fdl/ums9230/realme/alternatif/c53 $P/ums9230/infinix $P/manual
+for d in $P/fdl/ums9230/infinix $P/fdl/ums512/tecno $P/fdl/ums9230/realme/alternatif/c53 $P/manual; do
+	printf 1 > $d/fdl1-dl.bin; printf 2 > $d/fdl2-dl.bin; done
+printf ROOT > $P/fdl2-cboot.bin; printf ROOT > $P/fdl/fdl2-cboot.bin
+printf INFX > $P/fdl/ums9230/infinix/fdl2-cboot.bin; printf INFX > $P/ums9230/infinix/fdl2-cboot.bin
+printf C53 > $P/fdl/ums9230/realme/alternatif/c53/fdl2-cboot.bin
+fm() { # SOC DEVICE FDL1 -> what find_model_file answers (run from $P)
+	(cd $P && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+		SOC=$2 DEVICE=$3 FDL1=$4; find_model_file fdl2-cboot.bin || echo NONE' _ "$root" "$@"); }
+check "U6: the model's own folder answers (ums9230/infinix)" \
+	test "$(fm ums9230 infinix $P/fdl/ums9230/infinix/fdl1-dl.bin)" = "$P/fdl/ums9230/infinix/fdl2-cboot.bin"
+check "U6: an alternatif model finds its own copy" \
+	test "$(fm ums9230 realme/c53 $P/fdl/ums9230/realme/alternatif/c53/fdl1-dl.bin)" = "$P/fdl/ums9230/realme/alternatif/c53/fdl2-cboot.bin"
+check "U6: a model with no copy gets nothing -- not ../../ (package root), not infinix's" \
+	test "$(fm ums512 tecno $P/fdl/ums512/tecno/fdl1-dl.bin)" = NONE
+check "U6: no model picked, loaders elsewhere: no cross-chip ums9230/infinix or \$PWD fallback" \
+	test "$(fm ums512 '' $P/manual/fdl1-dl.bin)" = NONE
+check "U6: a model whose FDL1 is not in that model's folder gets nothing" \
+	test "$(fm ums9230 tecno $P/fdl/ums9230/infinix/fdl1-dl.bin)" = NONE
+check "U6: no FDL1 at all gets nothing" test "$(fm ums9230 '' '')" = NONE
+printf MAN > $P/manual/fdl2-cboot.bin
+check "U6: hand-configured loaders (no model): the copy beside that FDL1 is the explicit choice" \
+	test "$(fm ums512 '' $P/manual/fdl1-dl.bin)" = "$P/manual/fdl2-cboot.bin"
+# And the menu refuses the unlock when the lookup answers nothing.
+out=$(cd $P && SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/echo bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+	SOC=ums512 DEVICE=tecno FDL1=$2/fdl/ums512/tecno/fdl1-dl.bin FDL2=$2/fdl/ums512/tecno/fdl2-dl.bin
+	unlock_bootloader_menu </dev/null' _ "$root" "$P" 2>&1)
+check "U6: unlock with no model copy sends nothing and says where it looked" \
+	bash -c '[[ $1 == *"Missing fdl2-cboot.bin"* && $1 == *"nothing sent"* && $1 != *danger-erase* ]]' _ "$out"
 
 echo "menu-unlock: $pass passed, $fail failed"
 (( fail == 0 ))
