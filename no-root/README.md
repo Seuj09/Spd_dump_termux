@@ -144,7 +144,7 @@ Three levels of gate, in increasing order:
 
 | Gate | Covers | Notes |
 |---|---|---|
-| typed `yes` (or `--yes`) | `write-part`, `w-force`, `write-files`, `write-parts*`, `repartition`, `set-active`, `reboot-*`, `reset`, `power-off` | `--yes` is for CLI automation |
+| typed `yes` (or `--yes`) | `write-part`, `w-force`, `write-files`, `write-parts*`, `repartition`, `set-active`, `reboot-*` | `--yes` is for CLI automation. `reset` and `power-off` are sent with no second prompt, the same as spd_dump; the menu asks before it runs them |
 | the word `dangerous` (or `--dangerous`) | `verity`, `frp-reset`, `danger-erase` | `--yes` is **not** enough; without a terminal they send nothing unless `--dangerous` is passed |
 | `--confirm-token SHA256` | the misc write it is passed with | authorizes one misc write whose exact bytes hash to that value; a second misc write in the same session is refused |
 
@@ -229,7 +229,8 @@ Partition table and reads:
   loader reports (often sectors). On eMMC (ums9230) the units are KiB;
   convert with `bytes = units << (20 - divisor)`, where `divisor` starts at
   10 and drops while any non-zero entry is smaller than `1 << divisor`. The
-  menu does this and writes `backup/partition_bytes.txt`.
+  menu does this and writes `partition_bytes.txt` in the dump folder
+  (`/sdcard/Download` by default, `backup/` when storage permission is missing).
   On a phone whose `user_partition` holds a standard GPT — which is every
   modern device — the rows come from that table instead and the unit is MiB,
   the same number `partition-list` writes into the XML.
@@ -244,7 +245,8 @@ Partition table and reads:
   session that reads the table, so the file to edit is always there. spdhost
   writes that same file, into `--part-xml DIR` (env `SPDHOST_PART_XML_DIR`)
   instead of the working directory; the menu points it at the dump folder, so
-  each table read leaves `/sdcard/Download/partition_<unixtime>.xml` behind and
+  each table read leaves `partition_<unixtime>.xml` there (by default
+  `/sdcard/Download`, or `backup/` without storage permission) and
   option 4 (list partitions) says so. One name per run: a session that reads the
   table twice rewrites its own copy. `--part-xml ""` turns it off.
 
@@ -485,7 +487,7 @@ sent in 528-byte chunks; `--step` is for partition reads and writes only.
 `--keep-going` lists the failures at the end and exits 1; USB timeouts and a
 device reset still stop the run. The menu's `all`/`all_lite` use it, check
 each file's size, rename short ones to `NAME.img.partial`, and add the good
-ones to `backup/SHA256SUMS`.
+ones to `SHA256SUMS` in the dump folder.
 
 If more than one USB device is plugged in, `spdhost-usb` stops and lists
 them; copy a path from `termux-usb -l` and put it first, before the `--`:
@@ -524,7 +526,7 @@ uses `--confirm-token` instead, as described above.
 The reboot submenu under `[2]` also has `[5]` wipe userdata (writes
 `misc/misc-wipe.bin` then `reset`; recovery honors `--wipe_data` and erases
 userdata on the next boot) and `[6]` restore misc from one of the
-`backup/misc-before-*.img` copies. The wipe item does **not** erase
+`misc-before-*.img` copies in the dump folder. The wipe item does **not** erase
 `persist` or `userdata` itself — the separate FRP command does that, and it
 is labeled dangerous. Use only on a sacrificial device.
 

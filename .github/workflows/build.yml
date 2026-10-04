@@ -317,8 +317,11 @@ jobs:
             echo '```'
             echo
             echo "If a zip is ever re-downloaded over an old one, \`unzip -o\` replaces"
-            echo "the files but never touches \`backup/\` or \`input/\`, so earlier dumps"
-            echo "and the images you queued to flash are still there."
+            echo "only files that are inside the zip. That includes the placeholder"
+            echo "notes \`input/PUT-IMAGES-HERE.txt\` and \`backup/PUT-DUMPS-HERE.txt\`."
+            echo "It does not replace partition images you added. The default layout"
+            echo "keeps dumps and flash images in \`/sdcard/Download\`, which the zip"
+            echo "does not contain."
           } >/tmp/body.md
 
           if gh release view "$tag" >/dev/null 2>&1; then

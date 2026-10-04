@@ -2425,7 +2425,15 @@ flash_input_menu() {
 	if (( ${#names[@]} == 0 )); then
 		echo "No partition images in $INPUT_DIR."
 		echo "That folder is there now. Copy images into it, then choose this again."
-		echo "If you just dumped from this phone, they are already here (it is the same folder)."
+		# True only in the shared one-folder layout. In the package layout
+		# dumps are in backup/ and this sentence used to send people looking
+		# in the flash folder for files that were never written there.
+		if [[ -n $INPUT_DIR && -n $DUMP_DIR ]] &&
+		   [[ $(cd "$INPUT_DIR" 2>/dev/null && pwd -P) == "$(cd "$DUMP_DIR" 2>/dev/null && pwd -P)" ]]; then
+			echo "If you just dumped from this phone, they are already here (it is the same folder)."
+		else
+			echo "Dumps are in $DUMP_DIR. Menu [9] copies partition images into this folder."
+		fi
 		echo "Name each file after the partition: boot.img, vbmeta.img, l_fixnv1.img."
 		return 1
 	fi
@@ -2656,6 +2664,9 @@ restore_backup_menu() {
 	# restore after the phone was switched lands on the wrong slot. -a and -b
 	# force one. Off an A/B phone there are no _a/_b names and this is ignored.
 	read -r -p "Restore to slot [Enter] as the backup's misc says / [a] / [b]: " slot
+	# Same trim as confirm_action. "a " must not fall through to write-parts
+	# while the line below still says the slot was forced.
+	while [[ ${slot:-} == *[$' \t\r\n'] ]]; do slot=${slot%?}; done
 	case ${slot:-} in
 		a|A) cmd=write-parts-a ;;
 		b|B) cmd=write-parts-b ;;
@@ -2730,13 +2741,21 @@ repartition_menu() {
 		echo "Wrote $out. Edit a copy of it, then run this option again and give"
 		echo "that path. The table itself was only read; the partition map is unchanged."
 		# The ending is not a read: the release menu appends its bootmode to the
-		# dump line too, and reboot-recovery/reboot-fastboot add a 2048-byte BCB
-		# write to misc after the table is read. Saying "nothing was sent" here
-		# was simply untrue whenever the user had picked one of those endings.
+		# dump line too. reboot-recovery/reboot-fastboot add a 2048-byte BCB
+		# write to misc. reset and power-off send no map write, but they do
+		# take the phone out of download mode. Say which one happened.
 		case $BOOT_AFTER in
 			reboot-recovery|reboot-fastboot)
 				echo "The ending is $BOOT_AFTER, so spdhost also wrote the 2048-byte"
 				echo "BCB to misc and the phone is rebooting. Only the map is untouched."
+				;;
+			power-off|poweroff)
+				echo "The ending is $BOOT_AFTER, so the phone powers off after the read."
+				echo "Only the map is untouched."
+				;;
+			reset)
+				echo "The ending is reset, so the phone reboots to system after the read."
+				echo "Only the map is untouched."
 				;;
 		esac
 		return 0
