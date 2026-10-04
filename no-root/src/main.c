@@ -223,9 +223,14 @@ static void usage(void)
 		"                          `e userdata` it does NOT write the wipe BCB to\n"
 		"                          misc and does NOT erase persist (factory reset is\n"
 		"                          write-part misc misc/misc-wipe.bin, menu [10]->[1]).\n"
-		"  verity 0|1              DANGEROUS. Byte 0x7B of vbmeta (spd_dump):\n"
-		"                          0 writes 0x01 (dm-verity off), 1 writes 0x00\n"
-		"                          on each vbmeta* that exists. Not byte 0x78.\n"
+		"  verity 0|1 [DIR]        DANGEROUS. Byte 0x7B of vbmeta (spd_dump): the low\n"
+		"                          byte of the AVB header's big-endian flags at 0x78.\n"
+		"                          0 writes 0x01 (HASHTREE_DISABLED, dm-verity off),\n"
+		"                          1 writes 0x00 on each vbmeta* that exists.\n"
+		"                          Refuses a partition without the AVB0 magic. Saves\n"
+		"                          each original as DIR/vbmeta-before-<name>-<time>.img\n"
+		"                          (DIR: --part-xml folder, else .) and prints its\n"
+		"                          sha256 first. Needs an UNLOCKED bootloader to boot.\n"
 		"                          Needs parts. Over 64MB is refused. --yes is not enough.\n"
 		"  frp-reset OUT           DANGEROUS. Read all of persist to OUT, check\n"
 		"                          the file size, then erase persist. A failed or\n"
@@ -2299,10 +2304,24 @@ int main(int argc, char **argv)
 			}
 			snprintf(what, sizeof(what), "%s verity (vbmeta byte 0x7b)",
 				argv[i + 1][0] == '0' ? "disable" : "enable");
-			confirm_dangerous(what);
-			if (spd_verity(io, argv[i + 1][0] == '1'))
-				return 1;
-			i += 2;
+			{
+				/* Optional DIR for the original vbmeta; else the
+				 * --part-xml folder (the menu's dump folder), else ".". */
+				const char *bdir = io->part_xml_dir;
+				int extra = 0;
+				if (i + 2 < argc && !is_command(argv[i + 2])) {
+					bdir = argv[i + 2];
+					extra = 1;
+				}
+				if (argv[i + 1][0] == '0')
+					fprintf(stderr, "verity: a patched vbmeta boots only with an UNLOCKED"
+						" bootloader (the flags are inside the signed header); a locked one"
+						" refuses it. `verity 1` (or the saved original) is the undo.\n");
+				confirm_dangerous(what);
+				if (spd_verity(io, argv[i + 1][0] == '1', bdir))
+					return 1;
+				i += 2 + extra;
+			}
 		} else if (strcmp(cmd, "frp-reset") == 0) {
 			need(argc, i, 1, "frp-reset");
 			need_fdl2(io, "frp-reset");

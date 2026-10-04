@@ -40,7 +40,9 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
  * 0x01 (verity off). enable=1 writes 0x00 on each vbmeta_* that exists.
  * Refuses a row that does not cover 0x7B or is over 64MB. Sends nothing on
  * refusal. The caller has already taken the dangerous confirm. */
-int spd_verity(struct spd *io, int enable);
+/* BACKUP_DIR (NULL/"" = ".") gets vbmeta-before-<name>-<time>.img, the
+ * partition as read, before each patch; no backup, no write. */
+int spd_verity(struct spd *io, int enable, const char *backup_dir);
 
 /* spd_dump w_mem_to_part_offset(): build the image file the wof / wov /
  * firstmode commands write and then flash, and hand back its path.

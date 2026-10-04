@@ -448,11 +448,20 @@ unchanged, or it does not reset. Like spd_dump, the command list stops after
 
 Dangerous:
 
-- `verity 0|1` — write byte `0x7B` of `vbmeta`. `0` writes `0x01` (dm-verity
+- `verity 0|1 [DIR]` — write byte `0x7B` of `vbmeta`. `0` writes `0x01` (dm-verity
   off); `1` writes `0x00` on every `vbmeta*` name that exists. This is the
-  byte spd_dump writes; it is **not** the AVB flag at `0x78`. The whole
-  partition is read and written back, and a row that does not cover `0x7B`
-  or is over 64MB is not written. Needs `parts`.
+  byte spd_dump writes, and it **is** the AVB flag byte: the vbmeta header's
+  `flags` field is a big-endian u32 at `0x78`, so `0x7B` is its low byte
+  (bit0 `HASHTREE_DISABLED` = `--disable-verity`, bit1
+  `VERIFICATION_DISABLED` = `--disable-verification`). `verity 0` sets bit0 and
+  clears bit1. The flags are inside the signed header, so **a patched vbmeta
+  only boots with an unlocked bootloader**; `verity 1` or the saved original is
+  the undo. A partition without the `AVB0` magic is refused. Each original is
+  saved as `DIR/vbmeta-before-<name>-<time>.img` (DIR defaults to the
+  `--part-xml` folder, else `.`) and its sha256 printed before anything is
+  written; no backup, no write. The whole partition is read and written back,
+  and a row that does not cover `0x7B` or is over 64MB is not written. Needs
+  `parts`.
   spd_dump writes it through its force-write path (`w_mem_to_part_offset` →
   `load_partition_force`): a REPARTITION renaming the partition to `w_force`, a
   write to that name, then the original table to put the name back. spdhost

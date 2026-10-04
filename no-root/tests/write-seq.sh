@@ -504,12 +504,13 @@ check "two dumps append the manifest (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'ok boot_a' twodump/dump-manifest.txt && grep -q 'ok boot_b' twodump/dump-manifest.txt && [ \$(stat -c %s twodump/boot_a.img) = $((4096*1024)) ]"
 
 # DANGEROUS commands. --yes is already on the sh() line and must not be enough.
+# MOCK_IMAGES=vbmeta: the mock's vbmeta starts with AVB0, which verity checks.
 cp pt pt-vb
 echo 'vbmeta 1024' >> pt-vb
-MOCK_PTABLE=$tmp/pt-vb sh verbad --dangerous parts ptv.txt verity 0; rc=$?
+MOCK_PTABLE=$tmp/pt-vb MOCK_IMAGES=vbmeta sh verbad --dangerous parts ptv.txt verity 0; rc=$?
 check "verity 0 rewrites vbmeta byte 0x7b to 01 (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'DANGEROUS verity: vbmeta byte 0x7b: .* -> 01' sh_verbad.log && grep -q '760062006d00650074006100' sh_verbad.seq"
-MOCK_PTABLE=$tmp/pt-vb sh veron --dangerous parts ptv2.txt verity 1; rc=$?
+MOCK_PTABLE=$tmp/pt-vb MOCK_IMAGES=vbmeta sh veron --dangerous parts ptv2.txt verity 1; rc=$?
 check "verity 1 writes 00 and skips missing vbmeta_* (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q 'DANGEROUS verity: vbmeta byte 0x7b: .* -> 00' sh_veron.log && grep -q 'skip vbmeta_system' sh_veron.log"
 # spd_dump patches byte 0x7b through its force-write path: w_mem_to_part_offset

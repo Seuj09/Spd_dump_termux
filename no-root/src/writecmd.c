@@ -20,6 +20,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "sha256.h"
 
 static int file_len(const char *path, uint64_t *out)
 {
@@ -158,10 +162,12 @@ struct plan_item {
 /* The *_bak half of spd_dump's load_partition_unify (common.c ~2126): on a
  * phone whose table has a same-size NAME_bak row, the image is written twice,
  * once under each name. For vbmeta the reference zeroes byte 0x7B of the image
- * first. 0x7B is Unisoc's dm-verity switch -- dm_disable() writes 0x01 there,
- * dm_enable() 0x00 (common.c 2017-2026) -- so the backup copy always lands
- * with verification enabled whatever the image carries; the primary keeps the
- * image's own byte, because it is written before this runs.
+ * first. 0x7B is the low byte of the AVB header's big-endian flags word at
+ * 0x78 (bit0 hashtree disabled, bit1 verification disabled; see avb_flags
+ * below) -- spd_dump's dm_disable() writes 0x01 there, dm_enable() 0x00
+ * (common.c 2017-2026) -- so the backup copy always lands with both flags
+ * clear, i.e. verification enabled, whatever the image carries; the primary
+ * keeps the image's own byte, because it is written before this runs.
  *
  * The reference reaches for that byte with fopen(fn, "rb+") on the file the
  * user named, so a restore silently edits their dump on disk. Patching a copy
@@ -728,9 +734,74 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 	return ops;
 }
 
+/* AvbVBMetaImageHeader (libavb avb_vbmeta_image.h): "AVB0" at 0, and
+ * `uint32_t flags` at 120 = 0x78, big-endian like every header field. 0x7B is
+ * the LOW byte of that word: bit0 AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED
+ * (avbtool --disable-verity), bit1 ..._VERIFICATION_DISABLED
+ * (--disable-verification). spd_dump's dm_disable/dm_enable write 0x01/0x00
+ * there, so verity 0 sets hashtree-disabled and clears verification-disabled.
+ * The header is inside the signed data, so only an UNLOCKED bootloader boots
+ * the patched image. */
+#define AVB_FLAGS_OFF 0x78
+
+static uint32_t avb_flags(const uint8_t *b)
+{
+	return (uint32_t)b[AVB_FLAGS_OFF] << 24 | (uint32_t)b[AVB_FLAGS_OFF + 1] << 16 |
+		(uint32_t)b[AVB_FLAGS_OFF + 2] << 8 | b[AVB_FLAGS_OFF + 3];
+}
+
+/* V1: the partition as read, saved before the patch goes out. Returns 0 and
+ * the path + sha256 printed, or -1 (nothing is written then). */
+static int verity_backup(const char *dir, const char *resolved, const uint8_t *buf, size_t len)
+{
+	char path[1024], stamp[32], hex[65];
+	time_t now = time(NULL);
+	struct tm tmv;
+	FILE *fo;
+	int n, k;
+
+	if (!dir || !dir[0])
+		dir = ".";
+	if (!localtime_r(&now, &tmv) || !strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv))
+		snprintf(stamp, sizeof(stamp), "%lld", (long long)now);
+	for (k = 0; k < 100; k++) {
+		if (k)
+			n = snprintf(path, sizeof(path), "%s/vbmeta-before-%s-%s-%d.img", dir, resolved, stamp, k);
+		else
+			n = snprintf(path, sizeof(path), "%s/vbmeta-before-%s-%s.img", dir, resolved, stamp);
+		if (n < 0 || (size_t)n >= sizeof(path)) {
+			fprintf(stderr, "verity: backup path under %s is too long; %s not written\n", dir, resolved);
+			return -1;
+		}
+		{
+			int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+			fo = fd >= 0 ? fdopen(fd, "wb") : NULL;
+			if (fd >= 0 && !fo)
+				close(fd);
+		}
+		if (fo || errno != EEXIST)
+			break;
+	}
+	if (!fo) {
+		fprintf(stderr, "verity: cannot create the backup %s: %s; %s not written\n",
+			path, strerror(errno), resolved);
+		return -1;
+	}
+	if (fwrite(buf, 1, len, fo) != len || fclose(fo) != 0) {
+		fprintf(stderr, "verity: writing the backup %s failed; %s not written\n", path, resolved);
+		remove(path);
+		return -1;
+	}
+	sha256_hex(buf, len, hex);
+	fprintf(stderr, "verity: original %s saved to %s (%llu bytes) sha256 %s\n",
+		resolved, path, (unsigned long long)len, hex);
+	return 0;
+}
+
 /* Whole-partition rewrite of one byte at 0x7B. Returns 0 written, 1 absent,
  * -1 refused or failed (a failed read does not write). */
-static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, int missing_ok)
+static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, int missing_ok,
+	const char *bdir)
 {
 	char resolved[40];
 	uint64_t sz = 0;
@@ -780,9 +851,28 @@ static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, i
 		fprintf(stderr, "verity: read %s failed; that partition was not written\n", resolved);
 		return -1;
 	}
-	fprintf(stderr, "DANGEROUS verity: %s byte 0x7b: %02x -> %02x (%llu-byte rewrite)\n",
-		resolved, buf[0x7B], val, (unsigned long long)sz);
-	buf[0x7B] = val;
+	/* V1: only a real vbmeta image is patched. A wrong row, an erased one
+	 * or garbage would otherwise get a byte flipped and go back. */
+	if (memcmp(buf, "AVB0", 4) != 0) {
+		fprintf(stderr, "verity: %s does not start with the AVB0 magic (got %02x %02x %02x %02x);"
+			" it is not a vbmeta image, so it was not patched or written\n",
+			resolved, buf[0], buf[1], buf[2], buf[3]);
+		free(buf);
+		return -1;
+	}
+	if (verity_backup(bdir, resolved, buf, (size_t)sz)) {
+		free(buf);
+		return -1;
+	}
+	{
+		uint32_t before = avb_flags(buf), after;
+		buf[0x7B] = val;
+		after = avb_flags(buf);
+		fprintf(stderr, "DANGEROUS verity: %s byte 0x7b: %02x -> %02x (%llu-byte rewrite);"
+			" AVB flags (BE u32 at 0x78) 0x%08x -> 0x%08x%s\n",
+			resolved, (unsigned)((before) & 0xff), val, (unsigned long long)sz, before, after,
+			(after & 1) ? " [hashtree disabled]" : "");
+	}
 	if (spd_write_part_buf(io, resolved, buf, (size_t)sz)) {
 		free(buf);
 		return -1;
@@ -791,7 +881,7 @@ static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, i
 	return 0;
 }
 
-int spd_verity(struct spd *io, int enable)
+int spd_verity(struct spd *io, int enable, const char *backup_dir)
 {
 	static const char *list[] = {
 		"vbmeta", "vbmeta_system", "vbmeta_vendor",
@@ -806,7 +896,7 @@ int spd_verity(struct spd *io, int enable)
 	}
 	slot = spd_active_slot(io);
 	if (!enable) {
-		rc = verity_one(io, "vbmeta", slot, val, 0);
+		rc = verity_one(io, "vbmeta", slot, val, 0, backup_dir);
 		if (rc != 0) {
 			if (rc > 0)
 				fprintf(stderr, "verity: vbmeta is not in the live table; nothing sent\n");
@@ -817,7 +907,7 @@ int spd_verity(struct spd *io, int enable)
 		return 0;
 	}
 	for (i = 0; list[i]; i++) {
-		rc = verity_one(io, list[i], slot, val, 1);
+		rc = verity_one(io, list[i], slot, val, 1, backup_dir);
 		if (rc < 0) {
 			fprintf(stderr, "verity: stopped on %s\n", list[i]);
 			return -1;

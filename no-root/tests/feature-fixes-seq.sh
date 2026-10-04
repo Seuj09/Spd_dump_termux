@@ -128,5 +128,59 @@ MOCK_PTABLE=$tmp/ptu sh u2ok --dangerous danger-erase splloader_bak danger-erase
 check "U2: both accepted: splloader_bak then splloader, then reset (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \"\$(efr sh_u2ok.seq | cut -c1-28)\" = \"\$(printf '%s\n%s' $(u16 splloader_bak) $(u16 splloader)0000 | cut -c1-28)\" ]"
 
+# ---- V1/V2: verity --------------------------------------------------------------------------
+printf '%s\n' 'misc 1024' 'boot 4096' 'vbmeta 1024' 'userdata 8192' > ptv
+export MOCK_PTABLE=$tmp/ptv
+mkdir -p v1b
+sh v1bad --dangerous parts pt.txt verity 0 v1b; rc=$?
+check "V1: a vbmeta without the AVB0 magic is refused, nothing written (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'does not start with the AVB0 magic' sh_v1bad.log && ! grep -qE '^SEQ 01 .*760062006d00650074006100' sh_v1bad.seq && [ -z \"\$(ls v1b)\" ]"
+mkdir -p vb
+MOCK_IMAGES=vbmeta sh v1ok --dangerous parts pt.txt verity 0 vb reset; rc=$?
+bk=$(ls vb/vbmeta-before-vbmeta-*.img 2>/dev/null | head -1)
+check "V1: the original is saved to DIR before the write, path and sha256 printed (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ -n '$bk' ] && [ \$(stat -c %s '$bk') = 1048576 ] &&
+		grep -q \"original vbmeta saved to $bk (1048576 bytes) sha256 \$(sha256sum '$bk' | cut -c1-64)\" sh_v1ok.log &&
+		awk '/original vbmeta saved/{b=NR} /^SEQ/{} END{exit !b}' sh_v1ok.log"
+check "V1: the saved file is the partition as read (AVB0 + the mock's bytes, byte 0x7b unpatched)" \
+	bash -c "head -c 4 '$bk' | grep -q AVB0 && [ \"\$(od -An -tx1 -j $((0x7b)) -N1 '$bk' | tr -d ' ')\" = \"\$(grep -o 'byte 0x7b: [0-9a-f]*' sh_v1ok.log | awk '{print \$3}')\" ]"
+check "V1: the AVB flags word (BE u32 at 0x78) is printed before and after" \
+	grep -qE 'AVB flags \(BE u32 at 0x78\) 0x[0-9a-f]{8} -> 0x[0-9a-f]{6}01 \[hashtree disabled\]' sh_v1ok.log
+check "V2: verity 0 warns that it needs an unlocked bootloader, before the confirm" \
+	bash -c "awk '/UNLOCKED/{w=NR} /DANGEROUS confirmed/{c=NR} END{exit !(w && c && w < c)}' sh_v1ok.log"
+check "V1: with the backup saved, the vbmeta write goes out" \
+	bash -c "grep -qE '^SEQ 01 .*760062006d00650074006100' sh_v1ok.seq"
+MOCK_IMAGES=vbmeta sh v1nodir --dangerous parts pt.txt verity 0 /nonexistent/dir reset; rc=$?
+check "V1: no backup (unwritable DIR) means no write (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'cannot create the backup' sh_v1nodir.log && ! grep -qE '^SEQ 01 .*760062006d00650074006100' sh_v1nodir.seq"
+mkdir -p px
+MOCK_IMAGES=vbmeta sh v1px --dangerous --part-xml=px parts pt.txt verity 1; rc=$?
+check "V1: without DIR the backup goes to the --part-xml folder (rc $rc)" \
+	bash -c "[ $rc = 0 ] && ls px/vbmeta-before-vbmeta-*.img >/dev/null 2>&1 && ! grep -q UNLOCKED sh_v1px.log"
+
+# Menu [verity]: passes the dump folder as DIR, records each saved original's
+# sha256 in SHA256SUMS, and warns about the unlocked bootloader. Fake runner.
+cat > vrun <<'R'
+#!/bin/bash
+printf '%s\n' "$*" >> "$REC"
+prev=; for a in "$@"; do [[ $prev == 0 || $prev == 1 ]] && [[ $pv2 == verity ]] && d=$a; pv2=$prev; prev=$a; done
+[[ -n ${d:-} ]] && printf 'AVB0orig' > "$d/vbmeta-before-vbmeta_a-20261004-000000.img"
+exit 0
+R
+chmod +x vrun
+mkdir -p mdump
+out=$(REC=$tmp/vrec SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=$tmp/vrun SPDHOST_MENU_CONFIG=$tmp/none.conf TMPDIR=$tmp bash -c '
+	source "$1/scripts/menu.sh" >/dev/null 2>&1
+	FDL1=/x/fdl1 FDL1_ADDR=0x65000800 FDL2=/x/fdl2 FDL2_ADDR=0x9efffe00 DUMP_DIR=$2/mdump
+	confirm_dangerous() { return 0; }; continue_choice() { return 0; }; ready() { return 0; }; need_loaders() { return 0; }
+	exec_addr_value() { return 1; }
+	verity_menu <<<1; echo "rc=$?"' _ "$root" "$tmp" 2>&1)
+check "V1 menu: verity 0 runs with the dump folder as DIR, no --yes/--dangerous" \
+	bash -c "grep -q 'verity 0 $tmp/mdump reset' vrec && ! grep -qE -- '--yes|--dangerous' vrec"
+check "V1 menu: the saved original gets a SHA256SUMS line" \
+	bash -c "grep -q \"\$(printf AVB0orig | sha256sum | cut -c1-64)  vbmeta-before-vbmeta_a-20261004-000000.img\" mdump/SHA256SUMS"
+check "V2 menu: warns about the unlocked bootloader and names 0x78 as the flags word" \
+	bash -c '[[ $1 == *"UNLOCKED bootloader"* && $1 == *"flags word (big-endian, 0x78-0x7B)"* && $1 != *"not the AVB flag byte"* ]]' _ "$out"
+
 echo "feature-fixes-seq: $pass passed, $fail failed"
 (( fail == 0 ))

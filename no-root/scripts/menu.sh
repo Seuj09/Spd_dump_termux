@@ -3409,11 +3409,17 @@ unlock_describe_status() {
 verity_menu() {
 	local which
 	echo "DANGEROUS: dm-verity, the same byte spd_dump writes."
-	echo "verity 0 writes 0x01 at offset 0x7B of vbmeta (the active slot name)."
+	echo "Offset 0x7B is the low byte of the AVB header's flags word (big-endian, 0x78-0x7B):"
+	echo "bit0 = hashtree (dm-verity) disabled, bit1 = verification disabled."
+	echo "verity 0 writes 0x01 at 0x7B of vbmeta (the active slot name): dm-verity off."
 	echo "verity 1 writes 0x00 at 0x7B of vbmeta, vbmeta_system, vbmeta_vendor,"
 	echo "vbmeta_system_ext, vbmeta_product, and vbmeta_odm. A missing name is skipped."
-	echo "This is not the AVB flag byte at offset 0x78. The whole partition is rewritten."
-	echo "A partition over 64MB is refused and nothing is written."
+	echo "WARNING: the flags are inside the signed vbmeta header. A patched vbmeta boots"
+	echo "only with an UNLOCKED bootloader; on a locked one the phone refuses to boot"
+	echo "until verity 1 (or the saved original) is written back."
+	echo "Each partition must start with the AVB0 magic or it is not touched. The original"
+	echo "is saved to $DUMP_DIR/vbmeta-before-<name>-<time>.img (sha256 in SHA256SUMS)"
+	echo "before the whole partition is rewritten. Over 64MB is refused."
 	echo "[1] disable (verity 0)"
 	echo "[2] enable (verity 1)"
 	echo "[0] Back"
@@ -3432,8 +3438,21 @@ verity_menu() {
 	echo "spdhost asks for the word dangerous again before it patches vbmeta."
 	echo "Then: reset."
 	ready || return 1
+	mkdir -p "$DUMP_DIR" || { echo "Cannot create $DUMP_DIR for the vbmeta backup. Nothing sent."; return 1; }
+	local mark rc f
+	mark=$(mktemp "$(spd_tmpdir)/spdhost-verity.XXXXXX") || mark=
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" verity "$which" reset
+		parts "$(parts_cache_path)" verity "$which" "$DUMP_DIR" reset
+	rc=$?
+	# V1: every original this session saved gets a SHA256SUMS line, whether or
+	# not the write after it went through.
+	if [[ -n $mark ]]; then
+		while IFS= read -r f; do
+			[[ -s $f ]] && { echo "Original vbmeta saved: $f"; record_sha256 "$f" || true; }
+		done < <(find "$DUMP_DIR" -maxdepth 1 -name 'vbmeta-before-*.img' -newer "$mark" 2>/dev/null)
+		rm -f "$mark"
+	fi
+	return $rc
 }
 
 frp_reset_menu() {
