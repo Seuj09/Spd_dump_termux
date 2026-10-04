@@ -30,6 +30,12 @@ SPDHOST_USB_CAPS=1 SPDHOST_BROM_TRACE=1 bash scripts/spdhost-usb ping
 
 and report it with the full output.
 
+### The menu stopped in the middle of an option. Do I need to replug?
+Some options run in more than one USB session, for example to ask for a typed confirmation or to back up and check `misc`. Between sessions, the target has to reconnect.
+
+- **If the menu asks you to confirm, or shows the plug-in message:** reconnect the target using the steps in the timeout answer above. Use the booting-target steps if it still boots, and the bricked-target steps if it doesn't.
+- **If it pauses without either of those:** don't unplug. That's just the tool doing its work, so wait for it to finish.
+
 ### Nothing shows up when I plug in.
 Your adapter or cable may not switch the host into OTG mode. Try another OTG adapter, and check that OTG is enabled in your host's settings.
 
