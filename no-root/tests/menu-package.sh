@@ -70,8 +70,23 @@ for soc in ums9230 sc9863a ums512; do
 		# unlock [8] writes this to uboot, so a brand the menu offers without
 		# one is a brand whose unlock refuses. The reference ships one per
 		# model and the menu offers exactly its chip+brand set.
+		if [[ $brand == universal ]]; then
+			# M2: the vendor "cboot" here was byte-identical to fdl2-dl.bin;
+			# it is not shipped and unlock refuses universal outright.
+			[[ ! -e $(dirname "${pair[0]}")/fdl2-cboot.bin ]]
+			ck "[8] $soc/universal ships NO fdl2-cboot.bin (it was only fdl2-dl.bin)" $?
+			continue
+		fi
 		[[ -f $(dirname "${pair[0]}")/fdl2-cboot.bin ]]
 		ck "[8] $soc/$brand has fdl2-cboot.bin for unlock" $?
+		# M2: every alternatif sub-model carries its own, from the root release.
+		while read -r alt; do
+			[[ -n $alt ]] || continue
+			mapfile -t ap < <(shipped_fdl_pair "$(pkg_fdl_root)" "$soc" "$brand" "$alt" || true)
+			[[ -f $(dirname "${ap[0]}")/fdl2-cboot.bin ]] &&
+				! cmp -s "$(dirname "${ap[0]}")/fdl2-cboot.bin" "${ap[1]}"
+			ck "[8] $soc/$brand/alternatif/$alt has its own fdl2-cboot.bin (not its fdl2-dl.bin)" $?
+		done < <(shipped_alt_models "$(pkg_fdl_root)" "$soc" "$brand" || true)
 	done < <(soc_brands "$soc")
 	soc_profile "$soc"
 	exec_stub_present "$EXEC_ADDR_DEFAULT"
@@ -134,8 +149,19 @@ ck "[8] an alternatif sub-model resolves a loader directory" $?
 _soc=$SOC _dev=$DEVICE _f1=$FDL1 _f2=$FDL2
 SOC=ums9230 DEVICE="realme/${alts[0]}" FDL1="${altpair[0]}" FDL2="${altpair[1]}"
 got=$(find_user_file fdl2-cboot.bin || true)
-[[ -z $got || $got == "$altsub"/* ]]
-ck "[8] an alternatif sub-model never inherits the brand-level fdl2-cboot.bin" $?
+[[ $got == "$altsub/fdl2-cboot.bin" ]]
+ck "[8] an alternatif sub-model finds its OWN fdl2-cboot.bin, never the brand-level one" $?
+# M3: with a model chosen, a stray fdl2-cboot.bin in the working directory is
+# never picked up, even when the model's own folder has none.
+_pwd=$PWD; strayd=$(mktemp -d); cd "$strayd"; printf x > fdl2-cboot.bin
+SOC=ums9230 DEVICE=universal FDL1="$(pkg_fdl_root)/ums9230/universal/fdl1-dl.bin" FDL2="$(pkg_fdl_root)/ums9230/universal/fdl2-dl.bin"
+got=$(find_user_file fdl2-cboot.bin || true)
+[[ -z $got ]]
+ck "[8] DEVICE set: \$PWD/fdl2-cboot.bin is not a fallback (got '${got}')" $?
+unl=$(unlock_bootloader_menu 2>&1 </dev/null)
+grep -q "no model-specific fdl2-cboot.bin" <<<"$unl" && ! grep -q "erase" <<<"$(grep -i '^+ ' <<<"$unl")"
+ck "[8] unlock refuses the universal set before anything is sent" $?
+cd "$_pwd"; rm -rf "$strayd"
 # ...but the same lookup from the brand-level loaders still finds it, so the
 # rule above cannot have been met by refusing the lookup outright.
 mapfile -t bpair < <(shipped_fdl_pair "$(pkg_fdl_root)" ums9230 realme || true)
@@ -149,15 +175,14 @@ SOC=$_soc DEVICE=$_dev FDL1=$_f1 FDL2=$_f2
 echo
 echo "universal, the startup wizard's generic ums9230 set"
 uni=$(pkg_fdl_root)/ums9230/universal
-for f in fdl1-dl.bin fdl2-dl.bin fdl2-cboot.bin; do
+for f in fdl1-dl.bin fdl2-dl.bin; do
 	[[ -f $uni/$f ]]
 	ck "[wizard] fdl/ums9230/universal/$f ships" $?
 done
-# unlock_bootloader_menu finds fdl2-cboot.bin beside the loaders, so the
-# universal set has to carry it too; the vendor zip ships the same bytes under
-# both names.
-cmp -s "$uni/fdl2-cboot.bin" "$uni/fdl2-dl.bin"
-ck "[wizard] universal fdl2-cboot.bin is the fdl2 the pair ships" $?
+# M2: the vendor zip's universal "fdl2-cboot.bin" was the same bytes as its
+# fdl2-dl.bin -- not an unlock uboot -- so it is no longer shipped.
+[[ ! -e $uni/fdl2-cboot.bin ]]
+ck "[wizard] universal ships no fdl2-cboot.bin (unlock refuses universal)" $?
 [[ $(grep -c '^universal$' < <(soc_brands ums9230)) == 1 ]]
 ck "[wizard] ums9230 offers exactly one universal entry" $?
 [[ $(soc_brands ums9230 | tail -1) == universal ]]

@@ -1900,11 +1900,16 @@ find_user_file() {
 			places+=("$fdir/../../$name")
 		fi
 	fi
-	places+=(
-		"$PWD/$name"
-		"$base/$name"
-		"$base/../$name"
-	)
+	# M3: once a model is chosen (DEVICE set) only its own folder counts. A
+	# stray copy in the working directory or beside menu.sh belongs to no
+	# model in particular, and this lookup feeds the uboot write.
+	if [[ -z $dev ]]; then
+		places+=(
+			"$PWD/$name"
+			"$base/$name"
+			"$base/../$name"
+		)
+	fi
 	# Legacy release layout: menu at the package root, loaders under
 	# ums9230/infinix/. Only when no model has been chosen yet, or the chosen
 	# one is that very pair — otherwise this is a different phone's file. A
@@ -3040,11 +3045,20 @@ unlock_make_spl_unlock() {
 }
 
 # Release-menu unlock. fdl2-cboot.bin ships per model for every chip+brand the
-# menu offers (fdl/<soc>/<brand>/), but not for alternatif sub-models, whose
-# own image the vendor package does not carry. A missing blob, or a missing
-# dump, does not continue into the erase. --dangerous is not passed.
+# menu offers (fdl/<soc>/<brand>/) and for the ums9230 alternatif sub-models
+# (fdl/ums9230/<brand>/alternatif/<model>/, from the root release package).
+# The generic ums9230 "universal" set has none: the vendor zip's file there
+# was just its fdl2-dl.bin, so unlock refuses it. A missing blob, or a
+# missing dump, does not continue into the erase. --dangerous is not passed.
 unlock_bootloader_menu() {
 	local cboot unlock can_gen=0 work spl uboot slotf rc erase_rc=0
+	if [[ ${DEVICE:-} == universal ]]; then
+		echo "DANGEROUS unlock: nothing sent."
+		echo "The generic 'universal' loader set has no model-specific fdl2-cboot.bin"
+		echo "(the vendor zip's copy was only fdl2-dl.bin under another name, which is"
+		echo "not an unlock uboot). Pick your phone's own brand/model in menu [3] first."
+		return 1
+	fi
 	cboot=$(find_user_file fdl2-cboot.bin || true)
 	unlock=$(find_user_file spl-unlock.bin || true)
 	if [[ -z $unlock ]]; then
@@ -3062,13 +3076,16 @@ unlock_bootloader_menu() {
 			parent=${fdl_root%/fdl}
 			echo "Missing fdl2-cboot.bin."
 			echo "  looked beside the loaders: $(dirname "${FDL1:-<fdl1>}")/fdl2-cboot.bin"
-			[[ -n $parent ]] && echo "  and the package root: $parent/fdl2-cboot.bin"
-			echo "  and the working directory: $PWD/fdl2-cboot.bin"
-			echo "This is a vendor blob, one per model (fdl/<chip>/<brand>/)."
-			echo "It ships for every chip+brand the menu offers, but not for the"
-			echo "alternatif sub-models, whose own image the vendor package does"
-			echo "not carry. It is not derivable from the other files, and another"
-			echo "phone's copy must not be used, so nothing is written."
+			if [[ -z ${DEVICE:-} ]]; then
+				[[ -n $parent ]] && echo "  and the package root: $parent/fdl2-cboot.bin"
+				echo "  and the working directory: $PWD/fdl2-cboot.bin"
+			else
+				echo "  (a model is selected, so only its own folder is searched)"
+			fi
+			echo "This is a vendor blob, one per model (fdl/<chip>/<brand>/ and"
+			echo "fdl/ums9230/<brand>/alternatif/<model>/). It is not derivable from"
+			echo "the other files, and another phone's copy must not be used, so"
+			echo "nothing is written."
 		fi
 		if [[ -z $unlock && $can_gen == 0 ]]; then
 			echo "Missing spl-unlock.bin, and nothing here can build it."
@@ -3221,7 +3238,11 @@ unlock_restore_help() {
 }
 
 unlock_pick_uboot() {
-	local d=$1 tag name pick=
+	local d=$1 tag name pick= slotpick= want other
+	# L5: on A/B the bootloader runs uboot_<active slot>; that copy is the one
+	# to patch. ACTIVE_SLOT comes from misc (load_parts_state).
+	want=uboot_${ACTIVE_SLOT:-a}
+	if [[ $want == uboot_a ]]; then other=uboot_b; else other=uboot_a; fi
 	# The manifest names the image this dump actually wrote. An older
 	# uboot_a.img left in the folder must not win over a new uboot.img.
 	if [[ -f $d/dump-manifest.txt ]]; then
@@ -3231,18 +3252,23 @@ unlock_pick_uboot() {
 				uboot|uboot_a|uboot_b)
 					if [[ -s $d/$name.img ]]; then
 						pick=$d/$name.img
+						[[ $name == "$want" ]] && slotpick=$d/$name.img
 					fi
 					;;
 			esac
 		done < "$d/dump-manifest.txt"
+	fi
+	if [[ -n $slotpick ]]; then
+		printf '%s\n' "$slotpick"
+		return 0
 	fi
 	if [[ -n $pick ]]; then
 		printf '%s\n' "$pick"
 		return 0
 	fi
 	if [[ -s $d/uboot.img ]]; then printf '%s\n' "$d/uboot.img"; return 0; fi
-	if [[ -s $d/uboot_a.img ]]; then printf '%s\n' "$d/uboot_a.img"; return 0; fi
-	if [[ -s $d/uboot_b.img ]]; then printf '%s\n' "$d/uboot_b.img"; return 0; fi
+	if [[ -s $d/$want.img ]]; then printf '%s\n' "$d/$want.img"; return 0; fi
+	if [[ -s $d/$other.img ]]; then printf '%s\n' "$d/$other.img"; return 0; fi
 	return 1
 }
 
