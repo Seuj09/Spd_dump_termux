@@ -39,14 +39,25 @@ usb_pace_since() {
 }
 
 # Print the vendor as hex with no 0x prefix, or nothing.
+# Same rules as usb_list.c parse_id/find_id: the key starts at a
+# [^A-Za-z0-9_] boundary, only '"', ':', '=' and blanks may sit between the
+# key and the value, 0x... is hex, a QUOTED value with no 0x ("1782") is hex
+# ID text (sysfs/lsusb style), and an unquoted number (6018) is decimal.
 usb_vid_in() {
-	local s=$1 hex dec
-	if [[ $s =~ (^|[^A-Za-z0-9_])vendor_id[^0-9A-Fa-f]*0[xX]([0-9A-Fa-f]+) ]]; then
+	local s=$1 hex dec sep='["[:space:]:=]*'
+	if [[ $s =~ (^|[^A-Za-z0-9_])vendor_id${sep}0[xX]([0-9A-Fa-f]+) ]]; then
 		hex=${BASH_REMATCH[2],,}
+		(( ${#hex} > 8 )) && hex=${hex:0:8}
 		printf '%x' "0x$hex"
 		return 0
 	fi
-	if [[ $s =~ (^|[^A-Za-z0-9_])vendor_id[^0-9]*([0-9]+) ]]; then
+	if [[ $s =~ (^|[^A-Za-z0-9_])vendor_id${sep}\"([0-9A-Fa-f]+) ]]; then
+		hex=${BASH_REMATCH[2],,}
+		(( ${#hex} > 8 )) && hex=${hex:0:8}
+		printf '%x' "0x$hex"
+		return 0
+	fi
+	if [[ $s =~ (^|[^A-Za-z0-9_])vendor_id${sep}([0-9]+) ]]; then
 		dec=${BASH_REMATCH[2]}
 		if (( ${#dec} > 8 )); then
 			return 0

@@ -61,11 +61,19 @@ static int parse_id(const char *s, const char *end, unsigned *out)
 	unsigned v = 0;
 	int digits = 0;
 
+	const char *s0 = s;
+
 	while (s < end && (*s == '"' || *s == ':' || *s == ' ' || *s == '\t' ||
 			*s == '\n' || *s == '\r' || *s == '='))
 		s++;
 	if (s + 1 < end && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
 		s += 2;
+		hex = 1;
+	} else if (s > s0 && s[-1] == '"') {
+		/* A quoted ID with no 0x ("vendor_id":"1782") is USB ID text, the
+		 * way sysfs idVendor and lsusb print it: hex. An unquoted JSON
+		 * number (6018) is decimal. usb-pick.sh usb_vid_in reads both the
+		 * same way. */
 		hex = 1;
 	}
 	while (s < end && digits < 8) {
@@ -97,7 +105,9 @@ static int find_id(const char *start, const char *end, const char *key, unsigned
 	if (!start || start >= end)
 		return 0;
 	for (p = start; p + klen <= end; p++) {
-		if (p != start && isalnum((unsigned char)p[-1]))
+		/* Same boundary as usb-pick.sh ([^A-Za-z0-9_]): x_vendor_id is
+		 * another key, not vendor_id. */
+		if (p != start && (isalnum((unsigned char)p[-1]) || p[-1] == '_'))
 			continue;
 		if (memcmp(p, key, klen) == 0 && parse_id(p + klen, end, out))
 			return 1;
