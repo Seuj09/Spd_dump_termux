@@ -231,6 +231,38 @@ static int write_bak_image(struct spd *io, const char *bak, const char *path,
  * (dump_partition takes uint32_t), so a partition past 4 GiB cannot be read
  * into a file to patch in the first place. */
 
+/* G11: on a dynamic-partition phone (a super row in the table) system,
+ * vendor, product and the rest are logical partitions inside super, so the
+ * table has no row for them. Say so rather than leave a bare "not in the
+ * table". Returns "" when no note applies. */
+static const char *dynamic_part_note(struct spd *io, const char *name)
+{
+	static const char *const logical[] = {
+		"system", "system_ext", "vendor", "product", "odm",
+		"vendor_dlkm", "odm_dlkm", "system_dlkm", NULL
+	};
+	char base[40];
+	size_t L;
+	int i, super = 0;
+	if (!io || !name)
+		return "";
+	for (i = 0; i < io->nparts; i++)
+		if (!strcmp(io->ptab[i].name, "super") || !strcmp(io->ptab[i].name, "super_a") ||
+			!strcmp(io->ptab[i].name, "super_b"))
+			super = 1;
+	if (!super)
+		return "";
+	snprintf(base, sizeof(base), "%s", name);
+	L = strlen(base);
+	if (L > 2 && (!strcmp(base + L - 2, "_a") || !strcmp(base + L - 2, "_b")))
+		base[L - 2] = 0;
+	for (i = 0; logical[i]; i++)
+		if (!strcmp(base, logical[i]))
+			return " -- this phone uses dynamic partitions (it has super), so this "
+				"image lives inside super.img; flash super.img instead";
+	return "";
+}
+
 int spd_mem_to_part_file(struct spd *io, const char *name, uint64_t offset,
 	const uint8_t *mem, size_t len, const char *dir, int slot, char *out, size_t out_sz)
 {
@@ -339,7 +371,8 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	}
 	lk = spd_lookup_part(io, name, slot, resolved, sizeof(resolved), &psz);
 	if (lk == -1) {
-		fprintf(stderr, "write %s: not in the live partition table\n", name);
+		fprintf(stderr, "write %s: not in the live partition table%s\n", name,
+			dynamic_part_note(io, name));
 		return -1;
 	}
 	if (lk == -2)
@@ -650,8 +683,8 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 			lk = spd_lookup_part(io, items[i].name, slot, resolved, sizeof(resolved), &psz);
 			if (lk != 0) {
 				fprintf(stderr,
-					"write-parts: skip %s (not in the live table); the rest of this restore continues\n",
-					items[i].name);
+					"write-parts: skip %s (not in the live table%s); the rest of this restore continues\n",
+					items[i].name, dynamic_part_note(io, items[i].name));
 				continue;
 			}
 			if (!strcmp(resolved, "calinv")) {

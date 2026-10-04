@@ -83,6 +83,23 @@ MOCK_PTABLE=$tmp/ptnofrp sh g10p --dangerous parts pt.txt frp-reset g10p.img; rc
 check "G10: without an frp row it is still persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10p.img) = 1048576 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10p.seq"
 
+# ---- G11: on a table with super, a skipped system.img says it lives in super.img ----
+mkdir -p g11 && printf 'S' > g11/system.img && printf 'V' > g11/vendor_a.img && printf 'B' > g11/boot.img
+printf '%s\n' 'misc 1024' 'boot 4096' 'super 8192' > ptsuper
+MOCK_PTABLE=$tmp/ptsuper sh g11 --yes parts pt.txt write-files g11; rc=$?
+check "G11: with super, system/vendor_a are skipped with the super.img note, boot is still written (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'skip system (not in the live table -- this phone uses dynamic partitions (it has super), so this image lives inside super.img; flash super.img instead)' sh_g11.log &&
+		grep -q 'skip vendor_a (not in the live table -- this phone uses dynamic partitions' sh_g11.log &&
+		grep -qE '^SEQ 01 .*$(printf boot | od -An -tx1 | tr -d ' \n' | sed 's/../&00/g')' sh_g11.seq"
+printf '%s\n' 'misc 1024' 'boot 4096' 'system 8192' > ptnosuper
+mkdir -p g11b && printf 'V' > g11b/vendor.img
+MOCK_PTABLE=$tmp/ptnosuper sh g11b --yes parts pt.txt write-files g11b; rc=$?
+check "G11: without super, the plain skip line has no super.img note (rc $rc)" \
+	bash -c "grep -q 'skip vendor (not in the live table); the rest' sh_g11b.log && ! grep -q 'super.img' sh_g11b.log"
+MOCK_PTABLE=$tmp/ptsuper sh g11c --yes parts pt.txt write-part product_b g11/system.img; rc=$?
+check "G11: write-part product_b on a super table carries the note (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q 'write product_b: not in the live partition table -- this phone uses dynamic partitions' sh_g11c.log"
+
 # ---- R2: repartition checks ------------------------------------------------------------------
 # KiB rows: misc 1, prodnv 1, boot 4, super 8, userdata 16 MiB = 30 MiB in all.
 printf '%s\n' 'misc 1024' 'prodnv 1024' 'boot 4096' 'super 8192' 'userdata 16384' > ptr

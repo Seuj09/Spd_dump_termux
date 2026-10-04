@@ -2704,6 +2704,7 @@ flash_input_menu() {
 	echo "Each file is written under its own name, including an inactive _a or _b image."
 	echo "A .bin is flashed under its stripped name; the file itself is not renamed."
 	echo "A name that is not on the phone is skipped. The other images are still written."
+	echo "On a phone with a super partition, system/vendor/product.img are inside super.img: flash super.img."
 	echo "An empty image, or one larger than its partition, aborts the flash before anything is sent."
 	echo "misc.img, if present, is backed up and verified. Writing it also restores the"
 	echo "slot record it was dumped with; no other file here can change the slot."
@@ -2885,6 +2886,7 @@ restore_backup_menu() {
 		echo "This is the same folder menu [6] flashes from, so images you put there to flash are listed here too."
 	fi
 	echo "A name that is not on the phone is skipped. The other images are still written."
+	echo "On a phone with a super partition, system/vendor/product.img are inside super.img: flash super.img."
 	echo "A broken l_fixnv1 image is skipped. An empty or oversized image aborts the restore before anything is sent."
 	echo "splloader.img is capped at 256 KiB (the size of a splloader dump); a larger one aborts the restore."
 	echo "A misc.img that is not 2048 bytes or the whole live misc partition is skipped with a warning; the rest is written."
