@@ -708,15 +708,17 @@ runner.write_text("""#!/bin/sh
 printf '%%s\\n' "$*" >> "%s"
 case "$*" in
   *read-part*splloader*|*dump*splloader*)
-    mkdir -p "%s/backup_spl"
-    printf spl > "%s/backup_spl/splloader.img"
-    printf ub > "%s/backup_spl/uboot_a.img"
-    printf 'old\\n' > "%s/backup_spl/uboot.img"
-    printf 'slot a\\nok uboot_a\\n' > "%s/backup_spl/dump-manifest.txt"
+    # U1: the menu names a fresh folder each run; write where it says.
+    prev=; spl=; for a in "$@"; do [ "$prev" = 262144 ] && spl=$a; prev=$a; done
+    d=$(dirname "$spl")
+    head -c 262144 /dev/zero > "$spl"
+    printf ub > "$d/uboot_a.img"
+    printf 'old\\n' > "$d/uboot.img"
+    printf 'slot a\\nok uboot_a\\n' > "$d/dump-manifest.txt"
     ;;
 esac
 exit 0
-""" % (rec, work, work, work, work, work))
+""" % (rec,))
 runner.chmod(0o755)
 fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
 fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
@@ -795,17 +797,18 @@ runner.write_text("""#!/bin/sh
 printf '%%s\\n' "$*" >> "%s"
 case "$*" in
   *read-part" "splloader" "0" "262144*)
-    mkdir -p "%s/backup_spl"
-    printf spl > "%s/backup_spl/splloader.img"
-    printf ub > "%s/backup_spl/uboot_a.img"
-    printf 'slot a\\nok uboot_a\\n' > "%s/backup_spl/dump-manifest.txt"
+    prev=; spl=; for a in "$@"; do [ "$prev" = 262144 ] && spl=$a; prev=$a; done
+    d=$(dirname "$spl")
+    head -c 262144 /dev/zero > "$spl"
+    printf ub > "$d/uboot_a.img"
+    printf 'slot a\\nok uboot_a\\n' > "$d/dump-manifest.txt"
     ;;
   *write-part" "splloader*uboot_a.img*)
     exit 3
     ;;
 esac
 exit 0
-""" % (rec, work, work, work, work))
+""" % (rec,))
 runner.chmod(0o755)
 fdl1 = root / "fdl/ums9230/infinix/fdl1-dl.bin"
 fdl2 = root / "fdl/ums9230/infinix/fdl2-dl.bin"
@@ -852,8 +855,9 @@ text = out.read_text()
 bad = []
 if rc == 0:
     bad.append("rc 0: the menu reported success with the loader still erased")
-for want in ("RESTORE FAILED", "backup_spl/splloader.img", "backup_spl/uboot_a.img"):
-    if want not in text:
+import re
+for want in ("RESTORE FAILED", r"backup_spl/unlock-[0-9-]+/splloader\.img", r"backup_spl/unlock-[0-9-]+/uboot_a\.img"):
+    if not re.search(want, text):
         bad.append("no %r in output:\n%s" % (want, text))
 if bad:
     raise SystemExit("; ".join(bad))

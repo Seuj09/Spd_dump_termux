@@ -3176,36 +3176,38 @@ unlock_bootloader_menu() {
 		return 1
 	fi
 	need_loaders || return 1
-	work=$PWD/backup_spl
-	mkdir -p "$work"
-	spl=$work/splloader.img
-	# Only a whole 256 KiB read is a usable restore point. The release menu reads
-	# splloader with `r splloader`, which is 262144 bytes; a shorter file left by
-	# an interrupted run would be written back over the erased loader and leave
-	# the phone unbootable, so anything that size gets dumped again.
-	if [[ -s $spl && $(stat -c %s "$spl" 2>/dev/null || echo -1) != 262144 ]]; then
-		echo "Ignoring $spl: $(stat -c %s "$spl" 2>/dev/null || echo '?') bytes, not 262144."
+	# U1: the restore point is always taken in THIS run, from THIS phone, into
+	# a folder of its own. An older backup_spl/ may come from another unit or
+	# from the firmware before an OTA, and writing that back over an erased
+	# splloader is a wrong-device flash, so nothing from an earlier run is
+	# reused or restored. It is 256 KiB plus uboot, so the cost is one session.
+	work=$PWD/backup_spl/unlock-$(date +%Y%m%d-%H%M%S)
+	[[ -e $work ]] && work=$work-$$
+	if ! mkdir -p "$work"; then
+		echo "Cannot create $work. Nothing sent."
+		return 1
 	fi
+	spl=$work/splloader.img
+	echo "Backing up splloader and uboot into $work (a new folder for this run;"
+	echo "an earlier backup is never reused). Nothing is erased in this session."
+	echo "splloader is read as 256 KiB, the size the release menu's r splloader uses."
+	ready || return 1
+	if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		parts "$(parts_cache_path)" \
+		read-part splloader 0 262144 "$spl" \
+		dump uboot "$work" reset; then
+		echo "Backup failed. splloader was not erased. Nothing further sent."
+		return 1
+	fi
+	# Only a whole 256 KiB read is a usable restore point: a shorter file
+	# written back over the erased loader leaves the phone unbootable.
 	if [[ ! -s $spl || $(stat -c %s "$spl" 2>/dev/null || echo -1) != 262144 ]] \
 		|| ! uboot=$(unlock_pick_uboot "$work"); then
-		echo "Backing up splloader and uboot into $work. Nothing is erased in this session."
-		echo "splloader is read as 256 KiB, the size the release menu's r splloader uses."
-		ready || return 1
-		rm -f "$work/dump-manifest.txt"
-		if ! run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-			parts "$(parts_cache_path)" \
-			read-part splloader 0 262144 "$spl" \
-			dump uboot "$work" reset; then
-			echo "Backup failed. splloader was not erased. Nothing further sent."
-			return 1
-		fi
-		if [[ ! -s $spl ]] || ! uboot=$(unlock_pick_uboot "$work"); then
-			echo "Backup files are missing. splloader was not erased. Nothing further sent."
-			return 1
-		fi
-	else
-		echo "Reusing $spl and $uboot. The erase still runs."
+		echo "Backup files are missing or short ($spl: $(stat -c %s "$spl" 2>/dev/null || echo none) bytes)."
+		echo "splloader was not erased. Nothing further sent."
+		return 1
 	fi
+	echo "Backup: $spl and $uboot."
 	if [[ -z $unlock ]]; then
 		unlock=$work/spl-unlock.bin
 		echo "Building spl-unlock.bin from $spl."
