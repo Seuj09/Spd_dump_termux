@@ -118,7 +118,14 @@ static int force_row_write(struct spd *io, int idx, const char *resolved, const 
 {
 	int rc;
 
-	if (spd_repartition_echo(io, idx, "w_force")) {
+	rc = spd_repartition_echo(io, idx, "w_force");
+	if (rc == -2) {
+		fprintf(stderr, "%s %s: refused before anything was sent; nothing written"
+			" (the table has a row that is not a whole MiB, listed above)\n",
+			what, resolved);
+		return -1;
+	}
+	if (rc) {
 		fprintf(stderr, "%s %s: the device refused the temporary table; nothing written\n",
 			what, resolved);
 		return -1;
@@ -381,6 +388,15 @@ int spd_write_named(struct spd *io, const char *name, const char *path, int slot
 	 * reference, and it is the same probe read-part uses for a 0xffffffff size
 	 * -- so the frames here are the reference's, including the NAND fallback
 	 * that sets io->storage. */
+	/* H1: the primary half echoes the whole table back to the phone in MiB.
+	 * A row that is not a whole MiB would go back rounded down, so refuse the
+	 * pair here, before any frame -- the probe below included. */
+	if (spd_ptab_mib_unsafe(io, (unsigned)io->nparts, "write")) {
+		fprintf(stderr, "write %s: refused; %s has a %s_bak twin, which spd_dump writes with"
+			" a temporary repartition, and this table cannot be sent back unchanged."
+			" Nothing written.\n", resolved, resolved, resolved);
+		return -1;
+	}
 	live = spd_check_partition(io, resolved, 1, slot);
 
 	/* The primary half. load_partition_force() renames the row to "w_force"

@@ -184,8 +184,13 @@ int spd_xml_partitions(const char *path, const char *what, struct spd_xml_part *
 /* <Partitions><Partition id=".." size=".."/> XML. Size is the XML integer (MiB, or ~0). */
 int spd_repartition_xml(struct spd *io, const char *path);
 /* Send the live table with row IDX renamed to NEWNAME (IDX < 0 = unchanged).
- * spd_dump's load_partition_force() pair for a force write. 0 = accepted. */
+ * spd_dump's load_partition_force() pair for a force write. 0 = accepted,
+ * -1 = refused by the device, -2 = refused before sending (H1). */
 int spd_repartition_echo(struct spd *io, int idx, const char *newname);
+/* H1: count (and name on stderr, under WHAT) the rows before the last of the
+ * first COUNT table rows that are 0 or not a whole MiB -- rows a table echo or
+ * a partition XML would round down. 0 = every row converts exactly. */
+int spd_ptab_mib_unsafe(const struct spd *io, unsigned count, const char *what);
 int spd_erase_part(struct spd *io, const char *name);
 int spd_list_parts(struct spd *io, const char *out_path);
 /* Read [offset, offset+size) of NAME into MEM (exactly size bytes or error). */

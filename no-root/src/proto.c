@@ -2273,6 +2273,17 @@ int spd_repartition_xml(struct spd *io, const char *path)
 		free(list);
 		return -1;
 	}
+	/* H1: a 0 before the last row is a partition of nothing, and every one
+	 * after it moves down. The last row may be anything ("take the rest"). */
+	for (i = 0; i + 1 < n; i++) {
+		if (list[i].size == 0) {
+			fprintf(stderr, "repartition: row %d %s has size 0; only the last row may be 0"
+				" or 0xffffffff. Refused; nothing was sent.\n", i + 1, list[i].name);
+			free(list);
+			free(buf);
+			return -1;
+		}
+	}
 	w = buf;
 	for (i = 0; i < n; i++) {
 		int k;
@@ -2325,6 +2336,34 @@ int spd_repartition_xml(struct spd *io, const char *path)
 	return 0;
 }
 
+/* H1: the device table, the force echo and the XML all carry MiB, so a row
+ * that is not a whole number of MiB goes back to the device rounded DOWN
+ * (`size >> 20`, the same as spd_dump's load_partition_force and
+ * partition_list) -- and a row under 1 MiB goes back as 0. If the FDL applies
+ * that table, every partition after it moves. The last row is sent as ~0
+ * ("take the rest"), so only the rows before it matter. Returns the number of
+ * offending rows (each one named on stderr under WHAT) and 0 when every row
+ * converts exactly. */
+int spd_ptab_mib_unsafe(const struct spd *io, unsigned count, const char *what)
+{
+	unsigned i;
+	int bad = 0;
+
+	for (i = 0; i + 1 < count; i++) {
+		uint64_t sz = io->ptab[i].size;
+		if (sz != 0 && (sz & 0xfffffu) == 0)
+			continue;
+		if (!bad)
+			fprintf(stderr, "%s: the table carries sizes in whole MiB, and these rows are not;"
+				" sending or saving them would round them down and move every partition"
+				" after them:\n", what);
+		fprintf(stderr, "  row %u %s: %llu bytes (%s)\n", i + 1, io->ptab[i].name,
+			(unsigned long long)sz, sz == 0 ? "0" : "not a multiple of 1 MiB");
+		bad++;
+	}
+	return bad;
+}
+
 /* Send the live table back to the device, with row IDX renamed to NEWNAME
  * (IDX < 0 = send it unchanged). spd_dump load_partition_force() (common.c
  * ~1302) does exactly this twice around a write: rename the target to
@@ -2338,7 +2377,8 @@ int spd_repartition_xml(struct spd *io, const char *path)
  * scan_xml_partitions writes into it, which is the XML's MiB unchanged. io->ptab
  * holds bytes whichever unit the read used, so the conversion here is the fixed
  * >> 20 and not the read shift.
- * 0 = accepted, -1 = refused. io->ptab is left alone either way. */
+ * 0 = accepted, -1 = refused by the device, -2 = refused here before anything
+ * was sent (a row that is not a whole MiB, H1). io->ptab is left alone. */
 int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 {
 	uint8_t *buf, *w;
@@ -2349,6 +2389,11 @@ int spd_repartition_echo(struct spd *io, int idx, const char *newname)
 	if (idx >= io->nparts) {
 		fprintf(stderr, "repartition: row %d is past the %d-entry table\n", idx + 1, io->nparts);
 		return -1;
+	}
+	if (spd_ptab_mib_unsafe(io, (unsigned)io->nparts, "repartition (force write)")) {
+		fprintf(stderr, "repartition: refused; nothing was sent. A force write echoes the whole"
+			" table back to the phone, and this table cannot be echoed without changing it.\n");
+		return -2;
 	}
 	buf = calloc((size_t)io->nparts, 0x4c);
 	if (!buf)
@@ -2424,7 +2469,7 @@ static void xml_body(FILE *fo, const struct spd *io, unsigned count)
 static void part_xml_auto(struct spd *io, unsigned count)
 {
 	static char path[512];
-	static int named, warned;
+	static int named, warned, mib_warned;
 	FILE *fo;
 
 	if (!io->part_xml_dir || !io->part_xml_dir[0])
@@ -2444,6 +2489,14 @@ static void part_xml_auto(struct spd *io, unsigned count)
 	}
 	if (!path[0])
 		return;
+	if (mib_warned)
+		return;
+	if (spd_ptab_mib_unsafe(io, count, "auto partition xml")) {
+		mib_warned = 1;
+		fprintf(stderr, "auto partition xml: %s not written; an XML of this table would"
+			" round the rows above (the session continues)\n", path);
+		return;
+	}
 	fo = fopen(path, "w");
 	if (!fo) {
 		if (!warned++)
@@ -2852,6 +2905,11 @@ int spd_part_xml(struct spd *io, const char *out_path)
 	count = (unsigned)io->nparts;
 	if (count < 1) {
 		fprintf(stderr, "partition-list: the device reported an empty table\n");
+		return -1;
+	}
+	if (spd_ptab_mib_unsafe(io, count, "partition-list")) {
+		fprintf(stderr, "partition-list: refused; no XML written. Feeding a rounded XML back"
+			" to `repartition` would resize those rows.\n");
 		return -1;
 	}
 	fo = (!out_path || !strcmp(out_path, "-")) ? stdout : fopen(out_path, "w");
