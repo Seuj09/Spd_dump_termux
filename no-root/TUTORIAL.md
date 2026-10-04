@@ -66,11 +66,12 @@ Back up boot, misc and any partition you plan to touch before you write anything
 Run from the unzipped folder:
 
 ```sh
-bash scripts/spdhost-usb exec_addr 0x65015f08 fdl/ums9230/custom_exec_no_verify_65015f08.bin fdl fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 fdl fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 parts read-part boot_a 0 full ~/boot_a.img
+bash scripts/spdhost-usb exec_addr 0x65015f08 fdl/ums9230/custom_exec_no_verify_65015f08.bin fdl fdl/ums9230/infinix/fdl1-dl.bin 0x65000800 fdl fdl/ums9230/infinix/fdl2-dl.bin 0x9efffe00 parts read-part boot 0 full ~/boot.img
 ```
 
 - For another brand, swap `infinix` for its folder under `fdl/ums9230/` (universal, tecno, realme, itel, or an `alternatif/<model>` pair).
-- Swap `boot_a` for any name from the `parts` list, and the last argument for the output file.
+- `boot` is resolved against the live table: on an A/B phone it reads `boot_a` or `boot_b` for the active slot, and on a non-A/B phone it reads plain `boot`. Name a slot explicitly (`boot_b`) only if the `parts` list has it.
+- Swap `boot` for any name from the `parts` list, and the last argument for the output file.
 
 ## Other chips: ums512 and sc9863a
 

@@ -14,12 +14,12 @@ The host is the phone running Termux. The target is the phone you're flashing, i
 **If the target still boots normally:**
 1. Press Ctrl+C to stop the menu while it is still running, then start it again and pick the option.
 2. Hold power for about 8 seconds until the target boots.
-3. Then hold **power + volume down** with the USB cable plugged in.
+3. Then hold the target's download-mode keys with the USB cable plugged in. On many Unisoc phones (Infinix, for example) that is **power + volume down**; other models use volume up, both volume keys, or a boot key, so use whatever your model needs.
 4. Wait for the confirmation to appear.
 
 **If the target is bricked and won't turn on:**
 1. Unplug the cable and restart the menu.
-2. Hold **power + volume down** for 6-8 seconds.
+2. Hold the download-mode keys (on Infinix and many other Unisoc phones **power + volume down**; check your model) for 6-8 seconds.
 3. Plug in the cable and wait for the confirmation.
 
 Repeat the steps if the error keeps coming back. If it still persists, run:
