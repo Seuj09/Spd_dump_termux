@@ -71,6 +71,14 @@ Any flasher can. spdhost asks for a typed confirmation before every write, refus
 ### Can I unbrick a phone that won't boot?
 If it still enters download mode, usually yes. Flash back your dumped partitions or stock images from the menu.
 
+### My phone bootloops after I repartitioned.
+Repartitioning wipes `super`, so after a repartition you **must** flash a `super.img`. Skipping it leaves `super` empty or mismatched, so system, vendor and product can't mount and the phone bootloops. This isn't a tool bug: any repartition that touches `super` needs a matching `super.img` flash.
+
+- **If you changed `super`'s size:** flash a `super.img` built for the new size. Rebuild it with `lpmake` or resize it. The stock `super.img` is sized for the stock `super` and won't boot in a differently sized one.
+- **If you didn't change `super`'s size:** flash the stock `super.img` again.
+
+Changing the size of `super` doesn't break boot by itself. The empty or mismatched `super` does.
+
 ### Does it work with A/B and non-A/B phones?
 A/B is tested. Non-A/B is supported in the code but less tested.
 
