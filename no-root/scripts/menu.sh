@@ -805,6 +805,19 @@ configure_loaders_manual() {
 		echo "Nothing saved. Use option 3's shipped models, or type the chip's own address." >&2
 		return 1
 	fi
+	# G9: FDL2's address is the chip's too (0x9efffe00 on all three shipped
+	# chips); a typo there sends FDL2 to the wrong RAM address. Same refusal.
+	if [[ $choice != 4 && $(( na2 )) != $(( SOC_FDL2_ADDR )) ]]; then
+		echo "Refusing: FDL2 address $na2 does not go with that chip (its FDL2 loads at $SOC_FDL2_ADDR)." >&2
+		echo "Nothing saved. Use option 3's shipped models, or type the chip's own address." >&2
+		return 1
+	fi
+	# Another chip: nothing to check against, but every shipped chip uses
+	# 0x9efffe00, so anything else is said out loud.
+	if [[ $choice == 4 && $(( na2 )) != $(( 0x9efffe00 )) ]]; then
+		echo "warning: FDL2 address $na2 is not 0x9efffe00, which every shipped chip uses." >&2
+		echo "Saving it because you picked 'another chip'; check it against your phone's own flash tool." >&2
+	fi
 	FDL1=$nf1
 	FDL1_ADDR=$na1
 	FDL2=$nf2

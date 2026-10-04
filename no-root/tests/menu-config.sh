@@ -264,6 +264,17 @@ check "manual [3]: a path/chip disagreement still warns" has "$out" "the loaders
 check "manual [3]: the picked chip's addresses are written" \
 	has "$out" "RESULT SOC=ums512 EXEC_ADDR=0x3ee8"
 
+# G9: FDL2's address is checked too, not only FDL1's.
+out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9f000000 2 |
+	menu_run "$tmp/ums.conf" manual_probe 2>&1)
+check "manual [2] (G9): an FDL2 address that is not the chip's is refused" \
+	has "$out" "Refusing: FDL2 address 0x9f000000 does not go with that chip (its FDL2 loads at 0x9efffe00)"
+check "manual [2] (G9): nothing saved for it" lacks "$out" "RESULT SOC=sc9863a"
+out=$(printf '%s\n' "$tmp/plain/fdl1.bin" 0x65000800 "$tmp/plain/fdl2.bin" 0x9f000000 4 |
+	menu_run "$tmp/ums.conf" manual_probe 2>&1)
+check "manual [4] (G9): an unusual FDL2 address is saved with a warning" \
+	bash -c '[[ $1 == *"FDL2 address 0x9f000000 is not 0x9efffe00"* && $1 == *"RESULT SOC= EXEC_ADDR=0"* ]]' _ "$out"
+
 # ----------------------------------------- ums9230 back-fill sets a whole chip
 # With no loaders set, the shipped pair is applied: chip, both addresses and
 # the exec stub follow together, so a foreign chip cannot be left half-set.
