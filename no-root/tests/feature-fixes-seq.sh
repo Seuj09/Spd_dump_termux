@@ -55,26 +55,31 @@ sh r1p --yes parts pt.txt write-part boot ub.img; rc=$?
 check "R1: a plain write (no twin) is not blocked by the latch (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(grep -cE '^SEQ 0b ' sh_r1p.seq) = 0 ]"
 
-# verity and frp-reset size their row from the same table: they use the
-# device's own size for the row instead of the doubled one.
+# N2: under-2MiB probe answers are "not sized" for dump/frp/verity. On a guessed
+# unit where the device returns 1 MiB, refuse rather than trust the doubled table
+# row. L1 unit correction still uses the raw probe (covered in table-unit.sh).
 cp pt9 pt9vp; printf '%s\n' 'vbmeta 1024' 'persist 1024' >> pt9vp
 # MOCK_NOPROBE=uboot: the fetch's probe row will not be sized, so the unit stays a
 # guess (an answered probe at << 10 would correct the whole table instead, G1).
 MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp MOCK_IMAGES=vbmeta sh r1v --dangerous parts pt.txt verity 0; rc=$?
-check "R1: verity on a guessed unit uses the device's 1 MiB for vbmeta, not the table's 2 MiB (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q \"using the device's size for vbmeta: 1048576 bytes (table says 2097152)\" sh_r1v.log && grep -q '(1048576-byte rewrite)' sh_r1v.log"
+check "R1: verity on a guessed unit refuses when the device's vbmeta size is under 2 MiB (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -q \"table unit unverified and the device gave no size for vbmeta\" sh_r1v.log && ! grep -q '(1048576-byte rewrite)' sh_r1v.log"
 MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-reset r1persist.img; rc=$?
-check "R1: frp-reset on a guessed unit backs up the device's 1 MiB persist (rc $rc)" \
-	bash -c "[ $rc = 0 ] && [ \$(stat -c %s r1persist.img) = 1048576 ] && grep -q \"using the device's size for persist\" sh_r1p2.log"
+check "R1: frp-reset on a guessed unit refuses when the device's persist size is under 2 MiB (rc $rc)" \
+	bash -c "[ $rc != 0 ] && [ ! -e r1persist.img ] && grep -q \"table unit unverified and the device gave no size for persist\" sh_r1p2.log"
 
-# ---- G10: a separate frp partition is the one frp-reset backs up and erases ----
+# ---- G10/N3: prefer persist when both exist; SPDHOST_FRP_PART=frp forces frp ----
 printf '%s\n' 'misc 1024' 'persist 2048' 'frp 512' 'boot 4096' > ptfrp
 MOCK_PTABLE=$tmp/ptfrp sh g10 --dangerous parts pt.txt frp-reset g10frp.img; rc=$?
-# ERASE_FLASH (0x0a) names the partition in UTF-16LE: frp = 66 00 72 00 70 00 00.
-check "G10: with an frp row, frp-reset backs up frp (512 KiB) and erases frp, not persist (rc $rc)" \
-	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp.img) = 524288 ] && grep -q 'separate frp partition' sh_g10.log &&
-		grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10.seq"
-check "G10: the confirm names frp" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup frp, then erase it)' sh_g10.log
+# Default (no env): persist. ERASE_FLASH UTF-16LE persist = 70 00 65 00 72 00 73 00...
+check "G10: with both frp and persist, frp-reset defaults to persist (2 MiB) (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp.img) = 2097152 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10.seq"
+check "G10: the confirm names persist by default" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup persist, then erase it)' sh_g10.log
+SPDHOST_FRP_PART=frp MOCK_PTABLE=$tmp/ptfrp sh g10frp --dangerous parts pt.txt frp-reset g10frp2.img; rc=$?
+check "G10: with SPDHOST_FRP_PART=frp, backs up frp (512 KiB) and erases frp, not persist (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp2.img) = 524288 ] && grep -q 'separate frp partition' sh_g10frp.log &&
+		grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10frp.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10frp.seq"
+check "G10: SPDHOST_FRP_PART=frp confirm names frp" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup frp, then erase it)' sh_g10frp.log
 MOCK_PTABLE=$tmp/ptfrp sh g10gate --yes parts pt.txt frp-reset g10no.img; rc=$?
 check "G10: --yes still does not authorize it, nothing erased (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0a ' sh_g10gate.seq && [ ! -e g10no.img ]"
@@ -193,8 +198,9 @@ MOCK_IMAGES=vbmeta sh v1px --dangerous --part-xml=px parts pt.txt verity 1; rc=$
 check "V1: without DIR the backup goes to the --part-xml folder (rc $rc)" \
 	bash -c "[ $rc = 0 ] && ls px/vbmeta-before-vbmeta-*.img >/dev/null 2>&1 && ! grep -q UNLOCKED sh_v1px.log"
 
-# Menu [verity]: passes the dump folder as DIR, records each saved original's
-# sha256 in SHA256SUMS, and warns about the unlocked bootloader. Fake runner.
+# Menu [verity]: passes DUMP_DIR/meta as DIR (vbmeta-before-* live with other
+# sidecars), records each saved original's sha256 in SHA256SUMS, and warns about
+# the unlocked bootloader. Fake runner.
 cat > vrun <<'R'
 #!/bin/bash
 printf '%s\n' "$*" >> "$REC"
@@ -210,10 +216,10 @@ out=$(REC=$tmp/vrec SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=$tmp/vrun SPDHOST_MEN
 	confirm_dangerous() { return 0; }; continue_choice() { return 0; }; ready() { return 0; }; need_loaders() { return 0; }
 	exec_addr_value() { return 1; }
 	verity_menu <<<1; echo "rc=$?"' _ "$root" "$tmp" 2>&1)
-check "V1 menu: verity 0 runs with the dump folder as DIR, no --yes/--dangerous" \
-	bash -c "grep -q 'verity 0 $tmp/mdump reset' vrec && ! grep -qE -- '--yes|--dangerous' vrec"
+check "V1 menu: verity 0 runs with DUMP_DIR/meta as DIR, no --yes/--dangerous" \
+	bash -c "grep -q 'verity 0 $tmp/mdump/meta reset' vrec && ! grep -qE -- '--yes|--dangerous' vrec"
 check "V1 menu: the saved original gets a SHA256SUMS line" \
-	bash -c "grep -q \"\$(printf AVB0orig | sha256sum | cut -c1-64)  vbmeta-before-vbmeta_a-20261004-000000.img\" mdump/SHA256SUMS"
+	bash -c "grep -qE \"\$(printf AVB0orig | sha256sum | cut -c1-64)  (meta/)?vbmeta-before-vbmeta_a-20261004-000000.img\" mdump/SHA256SUMS"
 check "V2 menu: warns about the unlocked bootloader and names 0x78 as the flags word" \
 	bash -c '[[ $1 == *"UNLOCKED bootloader"* && $1 == *"flags word (big-endian, 0x78-0x7B)"* && $1 != *"not the AVB flag byte"* ]]' _ "$out"
 

@@ -172,10 +172,13 @@ check "[9] in one folder it writes no second copy" test "$(ls "$share/Download" 
 # The flash folder is now the user's own Download folder. The old code renamed
 # every *.bin to *.img before filtering, which would rename unrelated files a
 # user had put there. Nothing in the folder may change.
-rm -rf "$share/Download"; mkdir -p "$share/Download"
+rm -rf "$share/Download"; mkdir -p "$share/Download/meta"
 printf 'image\n' >"$share/Download/boot.bin"
 printf 'vendor blob\n' >"$share/Download/lk.bin"
 printf 'notes\n' >"$share/Download/notes.txt"
+# B1-1: flash needs a verified parts table (shared Download == DUMP_DIR).
+printf '%s\n' '# spdhost-parts shift 10 verified 1' 'boot 4096' 'misc 1024' \
+	>"$share/Download/meta/partition_list.txt"
 cat >"$tmp/flash.sh" <<R
 #!/usr/bin/env bash
 source "$root/scripts/menu.sh" >/dev/null 2>&1

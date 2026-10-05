@@ -43,6 +43,11 @@ chmod +x "$tmp/runner"
 # A backup folder with one image per slot, so write-parts has something to
 # filter. Contents do not matter: the runner is a stub.
 : >"$tmp/dump/boot_a.img"; : >"$tmp/dump/boot_b.img"; : >"$tmp/dump/misc.img"
+# B1-1/B2-5.1: flash/restore and pack-slot write need a verified A/B table.
+mkdir -p "$tmp/dump/meta"
+printf '%s\n' '# spdhost-parts shift 10 verified 1' \
+	'uboot_a 1024' 'uboot_b 1024' 'boot_a 4096' 'boot_b 4096' 'misc 1024' 'cache 1024' \
+	>"$tmp/dump/meta/partition_list.txt"
 
 cat >"$tmp/conf" <<EOF
 FDL1=$tmp/fdl1-dl.bin
@@ -90,7 +95,7 @@ tr=$(menu restore_backup_menu \
 	"Restore to slot" 'b\r' \
 	"Press Enter to continue" '\r')
 check "restore [b]: the command is write-parts-b" ran_has "write-parts-b $tmp/dump"
-check "restore [b]: parts runs first in the same session" ran_has "parts $tmp/dump/partition_list.txt write-parts-b"
+check "restore [b]: parts runs first in the same session" ran_has "parts $tmp/dump/meta/partition_list.txt write-parts-b"
 check "restore [b]: never passes --yes" ran_lacks --yes
 check "restore [b]: the pty says which slot was forced" pty_has "$tr" "forced slot b"
 
@@ -109,7 +114,7 @@ check "restore: a typed 'no' starts no session" test ! -s "$tmp/ran/log"
 tr=$(menu check_part_action \
 	"Partition name" 'boot_a\r' \
 	"Press Enter to continue" '\r')
-check "part-size: parts then part-size in one session" ran_has "parts $tmp/dump/partition_list.txt part-size boot_a"
+check "part-size: parts then part-size in one session" ran_has "parts $tmp/dump/meta/partition_list.txt part-size boot_a"
 check "part-size: nothing else is sent" ran_lacks "write-part"
 check "part-size: never passes --yes" ran_lacks --yes
 
@@ -138,7 +143,7 @@ tr=$(menu erase_part_action \
 	"type dangerous to erase cache" 'dangerous\r' \
 	"Press Enter to continue" '\r')
 check "erase-part: the typed word runs parts + erase-part + reset" \
-	ran_has "parts $tmp/dump/partition_list.txt erase-part cache reset"
+	ran_has "parts $tmp/dump/meta/partition_list.txt erase-part cache reset"
 check "erase-part: never passes --yes (spdhost asks itself)" ran_lacks --yes
 
 # ------------------------------------------ pack-slot (offline, for real)
@@ -193,7 +198,7 @@ check "pack-slot L1: the write names partition misc, not misc-slota" \
 check "pack-slot L1: the token is the sha256 of the slot image" \
 	ran_has "--confirm-token=$out3_sha"
 check "pack-slot L1: misc is checked against the source dump before the write" \
-	ran_has "misc-backup-expect $tmp/dump/misc-before-[0-9-]*.img $in3_sha write-part misc"
+	ran_has "misc-backup-expect $tmp/dump/meta/misc-before-[0-9-]*.img $in3_sha write-part misc"
 check "pack-slot L1: never passes --yes" ran_lacks --yes
 
 # promote_dump_action -- menu [9]. Filesystem only, no phone. The point is

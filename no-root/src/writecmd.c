@@ -79,7 +79,8 @@ static int junk_file(const char *raw, const char *name)
 		return 1;
 	if (!strcmp(name, "SHA256SUMS") || !strcmp(name, "misc-slotinfo") ||
 		!strncmp(name, "misc-before-", 12) || !strncmp(name, "persist-before-", 15) ||
-		!strncmp(name, "frp-before-", 11))
+		!strncmp(name, "frp-before-", 11) ||
+		!strncmp(name, "vbmeta-before-", 14))
 		return 1;
 	return 0;
 }

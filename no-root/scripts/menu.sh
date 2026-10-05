@@ -2766,7 +2766,7 @@ part_image_candidate() {
 	name=${base%.*}
 	[[ $base == "$name" ]] && name=$base
 	case $name in
-		*_bak|misc-slotinfo|misc-before-*|persist-before-*|frp-before-*) return 1 ;;
+		*_bak|misc-slotinfo|misc-before-*|persist-before-*|frp-before-*|vbmeta-before-*) return 1 ;;
 	esac
 	return 0
 }
@@ -3046,7 +3046,7 @@ restore_backup_menu() {
 	fi
 	echo "Restore these images from $DUMP_DIR, then $BOOT_AFTER:"
 	printf '  %s\n' "${names[@]}"
-	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, frp-before-*.img, *_bak.img."
+	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, frp-before-*.img, vbmeta-before-*.img, *_bak.img."
 	if [[ $INPUT_DIR == "$DUMP_DIR" ]]; then
 		echo "This is the same folder menu [6] flashes from, so images you put there to flash are listed here too."
 	fi
@@ -3846,7 +3846,7 @@ verity_menu() {
 	echo "only with an UNLOCKED bootloader; on a locked one the phone refuses to boot"
 	echo "until verity 1 (or the saved original) is written back."
 	echo "Each partition must start with the AVB0 magic or it is not touched. The original"
-	echo "is saved to $DUMP_DIR/vbmeta-before-<name>-<time>.img (sha256 in SHA256SUMS)"
+	echo "is saved to $DUMP_DIR/meta/vbmeta-before-<name>-<time>.img (sha256 in SHA256SUMS)"
 	echo "before the whole partition is rewritten. Over 64MB is refused."
 	echo "[1] disable (verity 0)"
 	echo "[2] enable (verity 1)"
@@ -3866,18 +3866,18 @@ verity_menu() {
 	echo "spdhost asks for the word dangerous again before it patches vbmeta."
 	echo "Then: reset."
 	ready || return 1
-	mkdir -p "$DUMP_DIR" || { echo "Cannot create $DUMP_DIR for the vbmeta backup. Nothing sent."; return 1; }
-	local mark rc f
+	local vmeta mark rc f
+	vmeta=$(dump_meta_dir) || { echo "Cannot create $DUMP_DIR/meta for the vbmeta backup. Nothing sent."; return 1; }
 	mark=$(mktemp "$(spd_tmpdir)/spdhost-verity.XXXXXX") || mark=
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
-		parts "$(parts_cache_path)" verity "$which" "$DUMP_DIR" reset
+		parts "$(parts_cache_path)" verity "$which" "$vmeta" reset
 	rc=$?
 	# V1: every original this session saved gets a SHA256SUMS line, whether or
-	# not the write after it went through.
+	# not the write after it went through. Look in meta/ (new) and DUMP_DIR (legacy).
 	if [[ -n $mark ]]; then
 		while IFS= read -r f; do
 			[[ -s $f ]] && { echo "Original vbmeta saved: $f"; record_sha256 "$f" || true; }
-		done < <(find "$DUMP_DIR" -maxdepth 1 -name 'vbmeta-before-*.img' -newer "$mark" 2>/dev/null)
+		done < <(find "$vmeta" "$DUMP_DIR" -maxdepth 1 -name 'vbmeta-before-*.img' -newer "$mark" 2>/dev/null)
 		rm -f "$mark"
 	fi
 	return $rc
@@ -3887,8 +3887,9 @@ frp_reset_menu() {
 	local out
 	echo "DANGEROUS: Reset FRP."
 	echo "Reads the whole FRP partition into a backup file, checks that file's size, then"
-	echo "erases that partition, then reset. The FRP partition is 'frp' when the phone's"
-	echo "table has one (persist is then left alone), else persist (or persist_a / persist_b)."
+	echo "erases that partition, then reset. When the table has both frp and persist,"
+	echo "spdhost prefers persist (Unisoc sample ro.frp.pst=persist); set SPDHOST_FRP_PART=frp"
+	echo "to force the separate frp row. A table with only one of the two uses that one."
 	echo "spdhost names the one it picked before it asks you to confirm."
 	echo "A failed or short read does not erase. Factory reset still does not erase persist."
 	echo "erase-part persist stays refused."

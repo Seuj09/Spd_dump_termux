@@ -33,7 +33,7 @@ cl() { local L=$1; shift; printf 'MOCK_LOG=%q/%q.seq MOCK_MISC_OUT=%q/%q.misc ti
 # No controlling tty at all (setsid), stdin = pipe with DATA.
 nopty() { local L=$1 data=$2; shift 2; printf '%b' "$data" | setsid bash -c "$(cl "$L" "$@") 7</dev/null >$L.out 2>$L.log"; }
 # Frames that write: write start/data/end (01 76+ = start with a name, 02, 03) after FDL2 exec, or reset (05).
-nowrite() { ! awk '/^SEQ 04 /{on=1; next} on' "$1.seq" | grep -qE '^SEQ (01 len=7[6-9]|02 |03 |05 )'; }
+nowrite() { [[ -f $1.seq ]] || return 0; ! awk '/^SEQ 04 /{on=1; next} on' "$1.seq" | grep -qE '^SEQ (01 len=7[6-9]|02 |03 |05 )'; }
 export -f nowrite
 G=(parts pt.txt misc-backup)
 
@@ -114,7 +114,7 @@ python3 "$drive" m3.pty "Choice:" '3\n' "y = continue" 'y\n' "type yes to contin
 check "menu [3] fastbootd: token = fastbootd BCB sha, written" bash -c "grep -q -- '--confirm-token=$FB' m3.pty && cmp -s <(head -c 2048 m3.misc) '$root/misc/misc-fastbootd.bin'"
 python3 "$drive" m5.pty "Choice:" '5\n' "y = continue" 'y\n' "erase userdata" 'yes\n' -- "export M=5; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [5] wipe: token = misc-wipe.bin sha, written" bash -c "grep -q -- '--confirm-token=$WIPE' m5.pty && grep -q 'misc-verify: OK' m5.err"
-b=$(ls -1t mdump/misc-before-*.img | head -1); BS=$(sha256sum "$b" | awk '{print $1}')
+b=$(ls -1t mdump/meta/misc-before-*.img mdump/misc-before-*.img 2>/dev/null | head -1); BS=$(sha256sum "$b" | awk '{print $1}')
 python3 "$drive" m6.pty "Choice:" '6\n' "y = continue" 'y\n' "Restore which" '\n' "type yes to write misc" 'yes\n' -- "export M=6; source $tmp/menu_env.sh; reboot_mode"; rc=$?
 check "menu [6] restore: token = backup image sha, misc == backup" bash -c "grep -q -- '--confirm-token=$BS' m6.pty && cmp -s m6.misc '$b'"
 

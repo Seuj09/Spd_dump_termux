@@ -501,7 +501,7 @@ check "oversized image aborts the plan before START (rc $rc)" \
 mkdir -p twodump
 sh twodump parts pt.txt dump boot_a twodump dump boot_b twodump; rc=$?
 check "two dumps append the manifest (rc $rc)" \
-	bash -c "[ $rc = 0 ] && grep -q 'ok boot_a' twodump/dump-manifest.txt && grep -q 'ok boot_b' twodump/dump-manifest.txt && [ \$(stat -c %s twodump/boot_a.img) = $((4096*1024)) ]"
+	bash -c "[ $rc = 0 ] && grep -q 'ok boot_a' twodump/meta/dump-manifest.txt && grep -q 'ok boot_b' twodump/meta/dump-manifest.txt && [ \$(stat -c %s twodump/boot_a.img) = $((4096*1024)) ]"
 
 # DANGEROUS commands. --yes is already on the sh() line and must not be enough.
 # MOCK_IMAGES=vbmeta: the mock's vbmeta starts with AVB0, which verity checks.
@@ -832,7 +832,7 @@ case "$*" in
     printf ub > "$d/uboot_a.img"
     printf 'slot a\\nok uboot_a\\n' > "$d/dump-manifest.txt"
     ;;
-  *write-part-plain" "splloader*uboot_a.img*)
+  *write-part" "splloader*write-part*uboot_a.img*)
     exit 3
     ;;
 esac
