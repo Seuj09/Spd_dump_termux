@@ -1337,6 +1337,91 @@ load_parts_state() {
 	return 0
 }
 
+# B1-1: flash/restore/write-files need a verified parts unit, same as unlock.
+require_parts_verified() {
+	local why=${1:-this write}
+	if ! load_parts_state; then
+		echo "REFUSED: no partition table on disk, so $why cannot check sizes."
+		echo "Fetch the table (menu dump/refresh) with a current spdhost first."
+		return 1
+	fi
+	if [[ -z $PARTS_VERIFIED || $PARTS_VERIFIED == 0 ]]; then
+		if [[ -z $PARTS_VERIFIED ]]; then
+			echo "REFUSED: the partition table has no spdhost-parts header (older spdhost)."
+		else
+			echo "REFUSED: this table's size unit is a guess the device did not confirm"
+			echo "(shift $PARTS_SHIFT, verified 0)."
+		fi
+		echo "Nothing written. Re-fetch the table with a current spdhost before $why."
+		return 1
+	fi
+	return 0
+}
+
+# B1-2: require free space (KiB) on the filesystem that holds DIR.
+# NEED_BYTES is the planned payload; HEADROOM_MIB (default 64) is extra.
+require_free_space() {
+	local dir=$1 need_bytes=$2 head_mib=${3:-64} avail_k need_k label=${4:-operation}
+	[[ -d $dir ]] || mkdir -p "$dir" || return 1
+	avail_k=$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 { print $4 }')
+	if [[ ! $avail_k =~ ^[0-9]+$ ]]; then
+		echo "note: could not read free space for $dir; continuing without a preflight."
+		return 0
+	fi
+	if [[ ! $need_bytes =~ ^[0-9]+$ ]]; then
+		need_bytes=0
+	fi
+	need_k=$(( (need_bytes + 1023) / 1024 + head_mib * 1024 ))
+	if (( avail_k < need_k )); then
+		echo "REFUSED: not enough free space for $label."
+		echo "  need about $need_k KiB (payload + ${head_mib} MiB headroom), have $avail_k KiB free on $dir"
+		return 1
+	fi
+	return 0
+}
+
+# Sum byte sizes of regular files in DIR (for flash staging preflight).
+sum_file_bytes() {
+	local dir=$1 f n=0
+	shopt -s nullglob
+	for f in "$dir"/*; do
+		[[ -f $f ]] || continue
+		n=$((n + $(stat -c %s "$f" 2>/dev/null || echo 0)))
+	done
+	shopt -u nullglob
+	printf '%s\n' "$n"
+}
+
+# Planned dump size from the byte table for TARGET (all / all_lite / name).
+planned_dump_bytes() {
+	local target=$1 bytes total=0 name size
+	bytes=$(parts_bytes_path)
+	[[ -s $bytes ]] || { printf '0\n'; return 0; }
+	case $target in
+		all)
+			while read -r name size _; do
+				[[ $name == \#* || ! $size =~ ^[0-9]+$ ]] && continue
+				case $name in userdata*|cache*|blackbox*) continue ;; esac
+				total=$((total + size))
+			done < "$bytes"
+			total=$((total + 262144)) # splloader
+			;;
+		all_lite)
+			while read -r name size _; do
+				[[ $name == \#* || ! $size =~ ^[0-9]+$ ]] && continue
+				case $name in userdata*|cache*|blackbox*|super|system*|vendor*|product*|metadata) continue ;; esac
+				total=$((total + size))
+			done < "$bytes"
+			total=$((total + 262144))
+			;;
+		*)
+			size=$(awk -v n="$target" '$1 == n || $1 == n"_a" || $1 == n"_b" { print $2; exit }' "$bytes")
+			[[ $size =~ ^[0-9]+$ ]] && total=$size || total=0
+			;;
+	esac
+	printf '%s\n' "$total"
+}
+
 fmt_size() {
 	local n=$1 i=0 d=1 t
 	local -a u=(B K M G T)
@@ -1697,12 +1782,17 @@ verify_dump_manifest() {
 # TARGET: all, all_lite, splloader, or a partition name (NAME or NAME without
 # the slot suffix: spdhost adds the live active slot).
 dump_live_session() {
-	local target=$1 raw rc
+	local target=$1 raw rc need
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	dump_meta_dir >/dev/null
 	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)" "$DUMP_DIR/misc-slotinfo.img"
 	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
+	# B1-2: free-space preflight from the cached byte table when present.
+	if load_parts_state 2>/dev/null; then
+		need=$(planned_dump_bytes "$target")
+		require_free_space "$DUMP_DIR" "$need" 64 "dump $target" || return 1
+	fi
 	ready || return 1
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$raw" dump "$target" "$DUMP_DIR" "$BOOT_AFTER"
@@ -2754,6 +2844,14 @@ flash_input_menu() {
 		return 1
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
+	if ! require_parts_verified "flash"; then
+		rm -rf "$stage"
+		return 1
+	fi
+	if ! require_free_space "$(spd_tmpdir 2>/dev/null || echo /tmp)" "$(sum_file_bytes "$stage")" 64 "flash staging"; then
+		rm -rf "$stage"
+		return 1
+	fi
 	if ! ready; then
 		rm -rf "$stage"
 		return 1
@@ -2947,6 +3045,8 @@ restore_backup_menu() {
 	esac
 	echo "Using $cmd (${slot:+forced slot ${slot,,}; }the other slot's images are skipped)."
 	echo "spdhost asks once more on the terminal before it sends anything."
+	require_parts_verified "folder restore" || return 1
+	require_free_space "$DUMP_DIR" "$(sum_file_bytes "$DUMP_DIR")" 64 "folder restore" || return 1
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" "$cmd" "$DUMP_DIR" "$BOOT_AFTER"

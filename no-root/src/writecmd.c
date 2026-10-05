@@ -572,6 +572,13 @@ struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, in
 		fprintf(stderr, "write-parts: no partition table (run parts in this session first)\n");
 		return NULL;
 	}
+	/* B1-1: same gate as unlock — a guessed unit makes the empty/oversized
+	 * check wrong either way. Refuse before any frame. */
+	if (!spd_ptab_sizes_verified(io)) {
+		fprintf(stderr, "write-parts: REFUSED: this table's size unit is unverified"
+			" (parts header missing or verified 0); nothing written\n");
+		return NULL;
+	}
 	dp = opendir(dir);
 	if (!dp) {
 		fprintf(stderr, "write-parts: open %s: %s\n", dir, strerror(errno));
