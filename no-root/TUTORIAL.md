@@ -28,26 +28,30 @@ Without these, the USB permission prompt and device handoff can fail or get kill
 
 Check your Termux architecture with `uname -m`.
 
-Use the **latest pre-release of the `experiment/brom-hello-diagnostics` branch**
-(or the tip SHA after a release is cut from it). Do **not** install the older
-`spdhost-exp-audit-f616c0f` zip: that build still has the G3/G4/H2 bugs this
-tutorial describes as fixed.
+Use the **latest `spdhost-exp-audit4-*` pre-release** on the
+`experiment/brom-hello-diagnostics` branch (not an older `spdhost-exp-audit-f616c0f`
+or `spdhost-exp-multidev-*` zip — those still have bugs this tutorial treats as fixed).
 
-**64-bit** (`aarch64`) — replace `TAG` with the current release tag (or tip SHA):
+On the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases), open the newest
+`spdhost-exp-audit4-*` pre-release and copy its **tag** plus the **arm64 or arm32
+zip asset name** (the zip ends in the short git SHA of that build).
+
+**64-bit** (`aarch64`):
 
 ```sh
-# After a release is published from this branch, TAG looks like spdhost-exp-audit-<sha>
-TAG=spdhost-exp-audit-PLACEHOLDER
-curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/spdhost-arm64-static-${TAG#spdhost-exp-audit-}.zip"
-unzip -o "spdhost-arm64-static-${TAG#spdhost-exp-audit-}.zip" -d ~ && cd ~/spdhost-arm64
+TAG=spdhost-exp-audit4-<sha>            # e.g. spdhost-exp-audit4-8a57e33
+ZIP=spdhost-arm64-static-<sha>.zip
+curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
+unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm64
 ```
 
 **32-bit** (`armv7l` or `armv8l`):
 
 ```sh
-TAG=spdhost-exp-audit-PLACEHOLDER
-curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/spdhost-arm32-static-${TAG#spdhost-exp-audit-}.zip"
-unzip -o "spdhost-arm32-static-${TAG#spdhost-exp-audit-}.zip" -d ~ && cd ~/spdhost-arm32
+TAG=spdhost-exp-audit4-<sha>
+ZIP=spdhost-arm32-static-<sha>.zip
+curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
+unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm32
 ```
 
 Or open the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases),
