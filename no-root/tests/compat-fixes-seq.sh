@@ -118,6 +118,12 @@ check "H1: ack lost after misc-verify OK -> success, 'device left the bus on res
 	bash -c "[ $rc = 0 ] && grep -q 'misc-verify: OK' sh_gone.log && grep -q 'device left the bus on reset (expected)' sh_gone.log"
 check "H1: status file reports misc-verify=ok and reset=left-bus separately" \
 	bash -c "grep -qx 'misc-verify=ok' sh_gone.st && grep -qx 'reset=left-bus' sh_gone.st"
+
+# B2-7.1: PIPE (stall) must NOT count as left-bus success.
+MOCK_RESET_PIPE=1 sh pipe --confirm-token="$REC" parts pt.txt reboot-recovery; rc=$?
+check "B2-7.1: PIPE on reset ack -> failure, not left-bus (rc $rc)" \
+	bash -c "[ $rc != 0 ] && grep -qE 'stall; device still on the bus|usb-error|FAILED: USB error' sh_pipe.log &&
+		! grep -q 'device left the bus on reset \(expected\)' sh_pipe.log"
 MOCK_RESET_SILENT=1 sh silent --confirm-token="$REC" parts pt.txt reboot-recovery; rc=$?
 check "H1: a reset TIMEOUT is still a failure, misc-verify still reported ok (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'timeout waiting for the ack' sh_silent.log && grep -qx 'misc-verify=ok' sh_silent.st && grep -qx 'reset=timeout' sh_silent.st"

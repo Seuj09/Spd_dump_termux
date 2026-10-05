@@ -485,12 +485,17 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		(unsigned char *)buf, len, &sent, u->timeout_ms);
 	if (err < 0) {
 		fprintf(stderr, "usb send: %s\n", libusb_error_name(err));
-		/* NO_DEVICE/PIPE/IO after EXEC usually means the device left the bus.
-		 * Mark gone so reopen_if_gone can reacquire; return -1 for all three. */
-		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
+		/* B2-7.1: only a real disconnect counts as "left the bus". PIPE is a
+		 * stall (device still enumerated); treating it as gone made reset/
+		 * power-off look successful while the phone sat in FDL2. IO can be a
+		 * disconnect mid-transfer on some hosts -- keep marking gone for IO
+		 * and NO_DEVICE so reopen_if_gone still works after EXEC. */
+		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO) {
 			u->gone = 1;
 			return -1;
 		}
+		if (err == LIBUSB_ERROR_PIPE)
+			return -1;
 		/* TIMEOUT (and other non-disconnect errors): -2, gone unset.
 		 * BootROM hello may soft-retry TIMEOUT; other callers treat <0 as fail. */
 		return -2;
@@ -523,9 +528,15 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 		}
 		return 0;
 	}
-	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
+	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO) {
 		u->gone = 1;
 		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));
+		return -1;
+	}
+	if (err == LIBUSB_ERROR_PIPE) {
+		/* Stall: endpoint halted, device still on the bus. Not a disconnect. */
+		fprintf(stderr, "usb recv: %s (stall; device still on the bus)\n",
+			libusb_error_name(err));
 		return -1;
 	}
 	if (err < 0) {

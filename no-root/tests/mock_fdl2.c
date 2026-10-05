@@ -30,6 +30,7 @@
  *                     the rest of the last unit (wr_off up to the next N) is
  *                     zero-filled, so a bare 2048-byte BCB write wipes
  *                     [0x800,N) -- the A/B slot block (H3).
+ *   MOCK_RESET_PIPE=1 those two get LIBUSB_ERROR_PIPE (stall; device still there).
  *   MOCK_RESET_GONE=1 NORMAL_RESET (0x05) / POWER_OFF (0x17) get no reply and
  *                     every later IN read is LIBUSB_ERROR_NO_DEVICE: the
  *                     loader reset before its ack left (H1).
@@ -60,6 +61,7 @@ static int connects;
 static int midst_count;
 static uint8_t *miscmem; static uint64_t misclen;
 static int bus_gone;
+static int bus_pipe;
 static char wr_part[40]; static uint64_t wr_off, wr_size; static int wr_on; static int wmid_count;
 static void misc_init(void);
 static void misc_save(void)
@@ -345,6 +347,7 @@ static void log_out(const uint8_t *buf, int len)
 		make_reply(0x80, NULL, 0, crc); return;
 	case 0x05: case 0x17:
 		if (getenv("MOCK_RESET_GONE")) { bus_gone = 1; reply_len = reply_pos = 0; return; }
+		if (getenv("MOCK_RESET_PIPE")) { bus_pipe = 1; reply_len = reply_pos = 0; return; }
 		if (getenv("MOCK_RESET_SILENT")) { reply_len = reply_pos = 0; return; }
 		make_reply(0x80, NULL, 0, crc); return;
 	case 0x0a: { /* ERASE: name[36]wchar. MOCK_FAIL_ERASE=NAME refuses that one
@@ -409,7 +412,11 @@ int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned cha
 	(void)h; (void)t;
 	if (!(ep & 0x80)) { log_out(d, len); *got = len; return 0; }
 	if (bus_gone) { *got = 0; return LIBUSB_ERROR_NO_DEVICE; }
-	if (reply_pos >= reply_len) { *got = 0; return LIBUSB_ERROR_TIMEOUT; }
+	if (reply_pos >= reply_len) {
+		*got = 0;
+		if (bus_pipe) { bus_pipe = 0; return LIBUSB_ERROR_PIPE; }
+		return LIBUSB_ERROR_TIMEOUT;
+	}
 	if (len > reply_len - reply_pos) len = reply_len - reply_pos;
 	memcpy(d, reply + reply_pos, len); *got = len; reply_pos += len; return 0;
 }
