@@ -562,7 +562,7 @@ Options go before the commands, and never in front of the device path.
 `--step` defaults to 4096, or 0xf800 once an `fdl` goes to `0x5500` or
 `0x65000800` (spd_dump's highspeed `blk_size`). sc9863a (FDL1 at `0x5000`)
 stays at 4096, as it does in spd_dump, so a full dump there is slow. To try
-bigger chunks, start the menu with `SPDHOST_STEP=0xf800 ./menu.sh` (or pass
+bigger chunks, start the menu with `SPDHOST_STEP=0xf800 bash scripts/menu.sh` (or pass
 `--step 0xf800` to spdhost); it is not the default because it has not been
 confirmed on a sc9863a loader. If reads then time out, drop it again. Loader downloads are always
 sent in 528-byte chunks; `--step` is for partition reads and writes only.
@@ -791,6 +791,9 @@ repartition and also copies the image into `uboot_bak`, all while splloader
 is erased, and a plain `uboot` write has not been proven on a real non-A/B
 phone. The cboot image goes to `uboot` only (`write-part-plain`), and the
 final restore reports the splloader write and the uboot write separately.
+If neither signature pattern matches the dumped SPL, the unlock stops before
+the erase. Experts only: `SPDHOST_UNLOCK_FORCE_UNPATCHED=1` continues with an
+unpatched `spl-unlock.bin` (the stock SPL) — that is almost never useful.
 
 Smoke test `[5]` is a safe, read-only check: `--self-test`, an environment
 check, a summary of the current BootROM-hello settings, and — only if

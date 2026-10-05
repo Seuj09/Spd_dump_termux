@@ -4,7 +4,7 @@
 No. You need Termux, Termux:API (both from F-Droid) and an OTG adapter. See the [tutorial](TUTORIAL.md).
 
 ### Which phones are supported?
-It's tested on Infinix ums9230 (Unisoc T606 family). FDL sets for other ums9230 brands (Tecno, Realme, itel, universal) and ums512 are included but less tested. Please report your results.
+It's tested on Infinix ums9230 (Unisoc T606 family). FDL sets for other ums9230 brands (Tecno, Realme, itel, universal), ums512, and sc9863a (itel, realme) are included but less tested. Please report your results.
 
 ### What's the "host" and what's the "target"?
 The host is the phone running Termux. The target is the phone you're flashing, in download mode.
@@ -14,8 +14,9 @@ The host is the phone running Termux. The target is the phone you're flashing, i
 **If the target still boots normally:**
 1. Press Ctrl+C to stop the menu while it is still running, then start it again and pick the option.
 2. Hold power for about 8 seconds until the target boots.
-3. Then hold the target's download-mode keys with the USB cable plugged in. On many Unisoc phones (Infinix, for example) that is **power + volume down**; other models use volume up, both volume keys, or a boot key, so use whatever your model needs.
-4. Wait for the confirmation to appear.
+3. Wait until the menu says **Plug the target in NOW**.
+4. Only then hold the target's download-mode keys and plug the cable in. On many Unisoc phones (Infinix, for example) that is **power + volume down**; other models use volume up, both volume keys, or a boot key, so use whatever your model needs.
+5. Tap Allow on the permission dialog as soon as it appears (it appears on every plug-in).
 
 **If the target is bricked and won't turn on:**
 1. Unplug the cable and restart the menu.
@@ -40,30 +41,28 @@ Some options run in more than one USB session, for example to ask for a typed co
 Your adapter or cable may not switch the host into OTG mode. Try another OTG adapter, and check that OTG is enabled in your host's settings.
 
 ### "Display over other apps" is greyed out or disabled for Termux:API.
-Some systems block it. Grant it with a command.
+`SYSTEM_ALERT_WINDOW` is an **app-op**, not a runtime permission: `pm grant … SYSTEM_ALERT_WINDOW` fails ("not a changeable permission type"), and Termux's own uid cannot grant it either.
 
-From a PC with adb:
-
-```sh
-adb shell pm grant com.termux.api android.permission.SYSTEM_ALERT_WINDOW
-```
-
-From Termux (the same command without `adb shell`):
+From a PC with adb (or wireless adb / Shizuku):
 
 ```sh
-pm grant com.termux.api android.permission.SYSTEM_ALERT_WINDOW
+adb shell appops set com.termux.api SYSTEM_ALERT_WINDOW allow
 ```
 
-For another app, replace `com.termux.api` with its package name.
+Or open **Settings → Apps → Termux:API → Display over other apps** and allow it there. Root-only alternative: `su -c 'appops set com.termux.api SYSTEM_ALERT_WINDOW allow'`.
 
 ### arm32 or arm64 zip?
 Run `uname -m`. `aarch64` means arm64, and `armv7l` or `armv8l` means arm32.
 
 ### Which FDL files should I use?
-Use your brand's folder under `fdl/ums9230/`. If your model has its own `alternatif/<model>` folder, use that. `universal` is the fallback.
+Pick your **chip first** (menu option 3, or the first-run wizard). Then use your brand's folder under `fdl/<chip>/` (for example `fdl/ums9230/infinix` or `fdl/sc9863a/...`). If your model has its own `alternatif/<model>` folder, use that. `universal` exists **only for ums9230** as a fallback for that chip — do not use a ums9230 loader on sc9863a or ums512.
 
 ### Where do dumps go?
 The menu prints the folder after each dump. Every dump comes with a `SHA256SUMS` file so you can check it.
+
+
+### A cable blip mid-dump or mid-flash aborted the transfer. Will it resume?
+No. Mid-transfer reconnect is **deferred** (not implemented). If the phone resets or the cable drops during a read or write, that partition is not resumed — replug and run the same option again. `--keep-going` only continues after a failed **read**; a failed **write** always stops the plan (by design).
 
 ### Can this brick my phone?
 Any flasher can. spdhost asks for a typed confirmation before every write, refuses unsafe partition-table writes, protects critical partitions, and backs up `misc` before reboots and slot changes. Always dump first.

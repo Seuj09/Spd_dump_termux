@@ -60,6 +60,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# B2-7.2: take the wake lock BEFORE the wait loop / found path so the
+# found->termux-usb -e critical path never blocks on am startservice.
+# Released by the EXIT trap. SPD_WAKE_LOCK=0 skips it.
+if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
+	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
+fi
+
 # Monotonic-ish ms since script start (EPOCHREALTIME / %s%N / seconds*1000).
 _usb_t0=
 _usb_now_ms() {
@@ -346,11 +353,6 @@ if [[ -z $dev ]]; then
 fi
 
 usb_log "listed $dev"
-
-# Keep the CPU awake for long dumps (released on exit).
-if [[ ${SPD_WAKE_LOCK:-1} != 0 ]] && command -v termux-wake-lock >/dev/null 2>&1; then
-	termux-wake-lock >/dev/null 2>&1 && wl=1 || true
-fi
 
 # -r request permission (Android asks again after every replug) unless
 # SPD_USB_SKIP_REQUEST=1 (warm already-authorized experiments).
