@@ -16,6 +16,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* SPLLOADER_BYTES lives in proto.h: spd_list_parts() prints the same id. */
@@ -651,9 +652,21 @@ int spd_dump(struct spd *io, const char *target, const char *outdir, int yes)
 		return -1;
 	}
 	{
-		char mp[1100], sp[1100];
-		snprintf(mp, sizeof(mp), "%s/dump-manifest.txt", outdir);
-		snprintf(sp, sizeof(sp), "%s/misc-slotinfo.img", outdir);
+		char meta[1050], mp[1100], sp[1100];
+		int n;
+		/* Side files (manifest, slotinfo) go in outdir/meta/ so DUMP_DIR stays
+		 * image-only for flash/restore. Partition .img files still land in outdir. */
+		n = snprintf(meta, sizeof(meta), "%s/meta", outdir);
+		if (n <= 0 || (size_t)n >= sizeof(meta)) {
+			fprintf(stderr, "dump: outdir/meta path is too long\n");
+			return -1;
+		}
+		if (mkdir(meta, 0755) != 0 && errno != EEXIST) {
+			fprintf(stderr, "dump: mkdir %s: %s\n", meta, strerror(errno));
+			return -1;
+		}
+		snprintf(mp, sizeof(mp), "%s/dump-manifest.txt", meta);
+		snprintf(sp, sizeof(sp), "%s/misc-slotinfo.img", meta);
 		manifest = fopen(mp, manifest_started ? "a" : "w");
 		if (!manifest) {
 			fprintf(stderr, "dump: cannot write %s: %s\n", mp, strerror(errno));

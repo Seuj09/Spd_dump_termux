@@ -41,21 +41,22 @@ export SPDHOST_EXEC_ADDR=0x65015f08 SPDHOST_TIMEOUT=1000
 source "$root/scripts/menu.sh" || { echo "cannot source menu.sh"; exit 1; }
 FDL1="$tmp/fdl1-dl.bin" FDL1_ADDR=0x65000800 FDL2="$tmp/fdl2-dl.bin" FDL2_ADDR=0x9efffe00
 bytes_of() { awk -v n="$1" '$1 == n { print $2; exit }' "$(parts_bytes_path)"; }
+meta_of() { dump_meta_file "$1" read; }
 fsize() { stat -c %s "$1" 2>/dev/null || echo -1; }
 in_sums() { grep -q " $1\$" "$DUMP_DIR/SHA256SUMS" 2>/dev/null; }
 
 # ---- the menu side alone: header wins over the loop; no header keeps the loop ----
 DUMP_DIR=$tmp/m0; mkdir -p "$DUMP_DIR"
-printf '%s\n' 'prodnv 5' 'miscdata 2' 'boot_a 64' > "$DUMP_DIR/partition_list.txt"
+printf '%s\n' 'prodnv 5' 'miscdata 2' 'boot_a 64' > "$(meta_of partition_list.txt)"
 load_parts_state
 check "no header (older spdhost): divisor loop fallback, shift 19, unverified unknown" \
 	bash -c "[ '$PARTS_SHIFT' = 19 ] && [ -z '$PARTS_VERIFIED' ] && [ '$(bytes_of boot_a)' = 33554432 ]"
-printf '%s\n' '# spdhost-parts shift 20 verified 1' 'prodnv 5' 'miscdata 2' 'boot_a 64' > "$DUMP_DIR/partition_list.txt"
+printf '%s\n' '# spdhost-parts shift 20 verified 1' 'prodnv 5' 'miscdata 2' 'boot_a 64' > "$(meta_of partition_list.txt)"
 load_parts_state
 check "header shift 20: boot_a 64 MiB, header line not a row" \
 	bash -c "[ '$PARTS_SHIFT' = 20 ] && [ '$PARTS_VERIFIED' = 1 ] && [ '$(bytes_of boot_a)' = 67108864 ] &&
 		! grep -q '^#' '$(parts_bytes_path)' && [ \$(wc -l < '$(parts_bytes_path)') = 3 ]"
-printf '%s\n' '# spdhost-parts shift 10 verified 1' 'sml_a 512' 'boot_a 2048' > "$DUMP_DIR/partition_list.txt"
+printf '%s\n' '# spdhost-parts shift 10 verified 1' 'sml_a 512' 'boot_a 2048' > "$(meta_of partition_list.txt)"
 load_parts_state
 m=$(resolve_part_query sml "$(parts_bytes_path)" 2>/dev/null)
 check "header shift 10: a 512 KiB row is 524288, resolvable by name ($m)" \
@@ -68,8 +69,8 @@ DUMP_DIR=$tmp/u1
 export MOCK_PTABLE=$tmp/pt_ufs MOCK_PTABLE_MIB=1 MOCK_SLOT=a
 fetch_parts_table </dev/null >"$tmp/u1.log" 2>&1
 check "UFS: parts file header says shift 20, verified, corrected" \
-	grep -qx '# spdhost-parts shift 20 verified 1 corrected 1' "$DUMP_DIR/partition_list.txt"
-check "UFS: raw rows unchanged (boot_a 64)" grep -qx 'boot_a 64' "$DUMP_DIR/partition_list.txt"
+	grep -qx '# spdhost-parts shift 20 verified 1 corrected 1' "$(meta_of partition_list.txt)"
+check "UFS: raw rows unchanged (boot_a 64)" grep -qx 'boot_a 64' "$(meta_of partition_list.txt)"
 check "UFS: spdhost said it corrected the unit" grep -q "every row's size is corrected to units << 20" "$tmp/u1.log"
 check "UFS: menu byte table boot_a = 64 MiB (was 32 MiB)" test "$(bytes_of boot_a)" = 67108864
 check "UFS: menu reports the correction, no 'guess' warning" \
@@ -88,7 +89,7 @@ DUMP_DIR=$tmp/u2
 export MOCK_NOPROBE=prodnv
 fetch_parts_table </dev/null >"$tmp/u2.log" 2>&1
 check "unverified: header says verified 0 at the guessed shift" \
-	grep -qx '# spdhost-parts shift 19 verified 0' "$DUMP_DIR/partition_list.txt"
+	grep -qx '# spdhost-parts shift 19 verified 0' "$(meta_of partition_list.txt)"
 check "unverified: the menu warns the unit is a guess" grep -q 'unit is a guess the device did not confirm' "$tmp/u2.log"
 dump_live_session boot </dev/null >"$tmp/u2d.log" 2>&1; rc=$?
 check "unverified: dump boot sizes boot_a by the device: 64 MiB, ok (rc $rc)" \
@@ -97,7 +98,7 @@ check "unverified: dump boot sizes boot_a by the device: 64 MiB, ok (rc $rc)" \
 dump_live_session prodnv </dev/null >"$tmp/u2p.log" 2>&1; rc=$?
 check "unverified: a row the device will not size is UNVERIFIED, not ok, not in SHA256SUMS (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'UNVERIFIED prodnv' '$tmp/u2p.log' && [ -f '$DUMP_DIR/prodnv.img' ] &&
-		! grep -q ' prodnv.img\$' '$DUMP_DIR/SHA256SUMS' && grep -qx 'unverified prodnv' '$DUMP_DIR/dump-manifest.txt'"
+		! grep -q ' prodnv.img\$' '$DUMP_DIR/SHA256SUMS' && grep -qx 'unverified prodnv' '$(meta_of dump-manifest.txt)'"
 unset MOCK_NOPROBE MOCK_PTABLE_MIB
 
 # ---- 4 KiB-sector GPT with a 512 KiB row ----
@@ -107,8 +108,8 @@ export MOCK_GPT=4k MOCK_PTABLE=$tmp/pt_gpt MOCK_SLOT=a
 fetch_parts_table </dev/null >"$tmp/g1.log" 2>&1
 check "GPT 4k: spdhost read 4096-byte sectors" grep -q '4 entries from the standard GPT (4096-byte sectors)' "$tmp/g1.log"
 check "GPT 4k: header shift 10 (the 512 KiB row needs it), verified" \
-	grep -qx '# spdhost-parts shift 10 verified 1' "$DUMP_DIR/partition_list.txt"
-check "GPT 4k: sml_a is 512, not 0" grep -qx 'sml_a 512' "$DUMP_DIR/partition_list.txt"
+	grep -qx '# spdhost-parts shift 10 verified 1' "$(meta_of partition_list.txt)"
+check "GPT 4k: sml_a is 512, not 0" grep -qx 'sml_a 512' "$(meta_of partition_list.txt)"
 check "GPT 4k: menu bytes sml_a 524288, boot_a 2 MiB (not halved), super 6 MiB" \
 	bash -c "[ '$(bytes_of sml_a)' = 524288 ] && [ '$(bytes_of boot_a)' = 2097152 ] && [ '$(bytes_of super)' = 6291456 ]"
 dump_live_session all </dev/null >"$tmp/g1a.log" 2>&1; rc=$?
@@ -123,7 +124,7 @@ DUMP_DIR=$tmp/k1
 export MOCK_PTABLE=$tmp/pt_kib
 fetch_parts_table </dev/null >"$tmp/k1.log" 2>&1
 check "KiB: header shift 10 verified 1, boot_a 4 MiB" \
-	bash -c "grep -qx '# spdhost-parts shift 10 verified 1' '$DUMP_DIR/partition_list.txt' && [ '$(bytes_of boot_a)' = 4194304 ]"
+	bash -c "grep -qx '# spdhost-parts shift 10 verified 1' '$(meta_of partition_list.txt)' && [ '$(bytes_of boot_a)' = 4194304 ]"
 
 
 # ---- N2: probe under 2 MiB is not sized (sub-MiB row on an unverified table) ----
@@ -137,7 +138,7 @@ export MOCK_PTABLE=$tmp/pt_n2 MOCK_NOPROBE=prodnv
 unset MOCK_SLOT MOCK_PTABLE_MIB MOCK_GPT
 fetch_parts_table </dev/null >"$tmp/n2f.log" 2>&1
 check "N2: header verified 0 (sub-MiB row + failed large-row probe)" \
-	grep -qE '^# spdhost-parts shift [0-9]+ verified 0$' "$DUMP_DIR/partition_list.txt"
+	grep -qE '^# spdhost-parts shift [0-9]+ verified 0$' "$(meta_of partition_list.txt)"
 dump_live_session sml </dev/null >"$tmp/n2d.log" 2>&1; rc=$?
 check "N2: sml probe under 2 MiB is treated as not sized (no trust of ~1 MiB)" \
 	bash -c "grep -qE 'partition_size_pc: sml, 0x[0-9a-f]+ \(under 2 MiB' '$tmp/n2d.log' ||
@@ -145,7 +146,7 @@ check "N2: sml probe under 2 MiB is treated as not sized (no trust of ~1 MiB)" \
 check "N2: sml does not trust the ~1 MiB probe (no 'using the device' size; did-not-size path)" \
 	bash -c "! grep -qE 'dump: sml: table unit unverified; using the device.s' '$tmp/n2d.log' &&
 		grep -q 'dump: sml: table unit unverified and the device did not size' '$tmp/n2d.log' &&
-		! grep -qE '^start sml 1047552 ' '$DUMP_DIR/dump-manifest.txt'"
+		! grep -qE '^start sml 1047552 ' '$(meta_of dump-manifest.txt)'"
 unset MOCK_NOPROBE MOCK_PTABLE
 
 echo "table-unit: $pass passed, $fail failed"

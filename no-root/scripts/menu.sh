@@ -1187,7 +1187,8 @@ run_session() {
 	# ran from. That is the file a repartition edit is made from, and having it
 	# appear without asking is the point. SPDHOST_PART_XML_DIR= (empty) turns
 	# the copy off for a caller that does not want it.
-	local -x SPDHOST_PART_XML_DIR="${SPDHOST_PART_XML_DIR-$DUMP_DIR}"
+	# Side XML + sprdpart.bin go under DUMP_DIR/meta/ (image files stay in DUMP_DIR).
+	local -x SPDHOST_PART_XML_DIR="${SPDHOST_PART_XML_DIR-$(dump_meta_dir)}"
 	echo "+ ${RUNNER[*]} ${prefix[*]} $*"
 	"${RUNNER[@]}" "${prefix[@]}" "$@"
 	local rc=$?
@@ -1195,24 +1196,53 @@ run_session() {
 	return "$rc"
 }
 
+# Dump side files (tables, XML, manifest, slotinfo) live in DUMP_DIR/meta/ so
+# the dump folder stays image-only for flash/restore. SHA256SUMS stays next to
+# the .img files. Older dumps that still have these files in DUMP_DIR keep
+# working: readers prefer meta/, then fall back to DUMP_DIR.
+dump_meta_dir() {
+	mkdir -p "$DUMP_DIR/meta" || return 1
+	printf '%s\n' "$DUMP_DIR/meta"
+}
+
+# Resolve a meta artifact for reading: meta/NAME if present, else DUMP_DIR/NAME
+# (legacy layout). For writing, prefer the meta/ path (create the folder).
+dump_meta_file() {
+	local name=$1 prefer=${2:-read} meta dir
+	dir=$(dump_meta_dir) || return 1
+	meta=$dir/$name
+	if [[ $prefer == write ]]; then
+		printf '%s\n' "$meta"
+		return 0
+	fi
+	if [[ -e $meta ]]; then
+		printf '%s\n' "$meta"
+	elif [[ -e $DUMP_DIR/$name ]]; then
+		printf '%s\n' "$DUMP_DIR/$name"
+	else
+		printf '%s\n' "$meta"
+	fi
+}
+
 # Cached live partition table from the last `parts` run, exactly as spdhost
 # wrote it: "name units". Units are NOT bytes (KiB on eMMC); see
 # parts_units_to_bytes. The byte table used for dumping is parts_bytes_path.
 parts_cache_path() {
-	mkdir -p "$DUMP_DIR"
-	printf '%s\n' "$DUMP_DIR/partition_list.txt"
+	dump_meta_file partition_list.txt write
 }
 
 parts_bytes_path() {
-	mkdir -p "$DUMP_DIR"
-	printf '%s\n' "$DUMP_DIR/partition_bytes.txt"
+	dump_meta_file partition_bytes.txt write
 }
 
 # 32-byte bootloader_control from misc+0x800 (spd_dump select_ab). An older
 # full misc image (>= 0x820 bytes) is still accepted by slot_from_misc.
 slot_misc_path() {
-	mkdir -p "$DUMP_DIR"
-	printf '%s\n' "$DUMP_DIR/misc-slotinfo.img"
+	dump_meta_file misc-slotinfo.img write
+}
+
+dump_manifest_path() {
+	dump_meta_file dump-manifest.txt "${1:-read}"
 }
 
 SPD_SLOT_OFF=0x800
@@ -1298,11 +1328,12 @@ slot_from_misc() {
 # Rebuild the byte table + active slot from the cached raw table and misc.
 load_parts_state() {
 	local raw bytes
-	raw=$(parts_cache_path)
+	# Prefer meta/, fall back to DUMP_DIR for older dumps; byte table always in meta/.
+	raw=$(dump_meta_file partition_list.txt read)
 	bytes=$(parts_bytes_path)
 	[[ -s $raw ]] || return 1
 	parts_units_to_bytes "$raw" "$bytes" || return 1
-	ACTIVE_SLOT=$(slot_from_misc "$(slot_misc_path)" "$bytes")
+	ACTIVE_SLOT=$(slot_from_misc "$(dump_meta_file misc-slotinfo.img read)" "$bytes")
 	return 0
 }
 
@@ -1600,7 +1631,8 @@ dump_matched_parts() {
 # of exactly BYTES; good ones go to SHA256SUMS, others are listed as failed
 # (spdhost leaves a short read as NAME.img.partial and keeps an older NAME.img).
 verify_dump_manifest() {
-	local rc=$1 man="$DUMP_DIR/dump-manifest.txt" tag name bytes file sz n=0
+	local rc=$1 man tag name bytes file sz n=0
+	man=$(dump_manifest_path read)
 	local -a failed=()
 	local -A okset=()
 	if [[ ! -f $man ]]; then
@@ -1668,7 +1700,8 @@ dump_live_session() {
 	local target=$1 raw rc
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
-	rm -f "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)"
+	dump_meta_dir >/dev/null
+	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)" "$DUMP_DIR/misc-slotinfo.img"
 	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
 	ready || return 1
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
@@ -1718,7 +1751,7 @@ dump_many_session() {
 	mkdir -p "$DUMP_DIR"
 	echo "One session: refresh the table, then dump $*."
 	ready || return 1
-	rm -f "$DUMP_DIR/dump-manifest.txt"
+	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt"
 	for name in "$@"; do
 		args+=(dump "$name" "$DUMP_DIR")
 	done
@@ -1848,7 +1881,7 @@ list_partitions_menu() {
 	echo
 	# The session above read the table, so spdhost also left it as the
 	# repartition XML in the dump folder -- the file option 8 edits a copy of.
-	echo "The same table was written as repartition XML to $DUMP_DIR"
+	echo "The same table was written as repartition XML under $DUMP_DIR/meta/"
 	echo "(partition_<unixtime>.xml). Copy and edit that for option 8."
 	pause
 }
@@ -2369,7 +2402,7 @@ guarded_misc_session() {
 	fi
 	ts=$(date +%Y%m%d-%H%M%S)
 	mkdir -p "$DUMP_DIR"
-	backup="$DUMP_DIR/misc-before-$ts.img"
+	backup="$(dump_meta_dir)/misc-before-$ts.img"
 	raw=$(parts_cache_path)
 	echo "misc will be backed up to $backup first; the write is skipped if that fails."
 	ready || return 1
@@ -2473,7 +2506,7 @@ read_misc_image() {
 restore_misc_menu() {
 	local f reply
 	local -a list=()
-	mapfile -t list < <(ls -1t "$DUMP_DIR"/misc-before-*.img 2>/dev/null)
+	mapfile -t list < <(ls -1t "$(dump_meta_dir)"/misc-before-*.img "$DUMP_DIR"/misc-before-*.img 2>/dev/null)
 	if (( ${#list[@]} == 0 )); then
 		echo "No $DUMP_DIR/misc-before-*.img backups."
 		return 1
@@ -2487,8 +2520,10 @@ restore_misc_menu() {
 	reply=${reply:-1}
 	[[ $reply =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#list[@]} )) || { echo "Unchanged."; return 1; }
 	f=${list[reply - 1]}
-	if [[ -f $DUMP_DIR/SHA256SUMS ]] && grep -q " ${f##*/}\$" "$DUMP_DIR/SHA256SUMS"; then
-		( cd "$DUMP_DIR" && grep " ${f##*/}\$" SHA256SUMS | sha256sum -c --quiet ) || { echo "sha256 mismatch for $f; refusing." >&2; return 1; }
+	local sumkey=$f
+	[[ $sumkey == "$DUMP_DIR"/* ]] && sumkey=${sumkey#"$DUMP_DIR"/}
+	if [[ -f $DUMP_DIR/SHA256SUMS ]] && { grep -q " $sumkey\$" "$DUMP_DIR/SHA256SUMS" || grep -q " ${f##*/}\$" "$DUMP_DIR/SHA256SUMS"; }; then
+		( cd "$DUMP_DIR" && { grep " $sumkey\$" SHA256SUMS || grep " ${f##*/}\$" SHA256SUMS; } | sha256sum -c --quiet ) || { echo "sha256 mismatch for $f; refusing." >&2; return 1; }
 		echo "sha256 OK (SHA256SUMS)"
 	else
 		echo "note: $f has no SHA256SUMS line"
@@ -2966,7 +3001,7 @@ repartition_menu() {
 	echo "Size is MiB, and the last row is normally 0xffffffff (\"take the rest\")."
 	echo "If you do not have one, spdhost can write the phone's current table as a"
 	echo "starting point; edit that copy rather than writing one by hand."
-	echo "Any path works, e.g. $DUMP_DIR/repart.xml or $DUMP_DIR/partition_<unixtime>.xml"
+	echo "Any path works, e.g. $DUMP_DIR/meta/repart.xml or $DUMP_DIR/meta/partition_<unixtime>.xml"
 	echo "(spdhost leaves that second one in the dump folder on every table read)."
 	read -r -p "Partition XML path, or 'new' to dump the current table first: " xml
 	if [[ -z ${xml:-} ]]; then
@@ -3601,7 +3636,10 @@ unlock_pick_uboot() {
 	if [[ $want == uboot_a ]]; then other=uboot_b; else other=uboot_a; fi
 	# The manifest names the image this dump actually wrote. An older
 	# uboot_a.img left in the folder must not win over a new uboot.img.
-	if [[ -f $d/dump-manifest.txt ]]; then
+	# Manifest lives in meta/ (new) or in $d (older dumps).
+	local man=$d/meta/dump-manifest.txt
+	[[ -f $man ]] || man=$d/dump-manifest.txt
+	if [[ -f $man ]]; then
 		while read -r tag name _; do
 			[[ $tag == ok ]] || continue
 			case $name in
@@ -3612,7 +3650,7 @@ unlock_pick_uboot() {
 					fi
 					;;
 			esac
-		done < "$d/dump-manifest.txt"
+		done < "$man"
 	fi
 	if [[ -n $slotpick ]]; then
 		printf '%s\n' "$slotpick"
@@ -3711,7 +3749,7 @@ frp_reset_menu() {
 	fi
 	need_loaders || return 1
 	mkdir -p "$DUMP_DIR"
-	out=$DUMP_DIR/frp-before-$(date +%Y%m%d-%H%M%S).img
+	out=$(dump_meta_dir)/frp-before-$(date +%Y%m%d-%H%M%S).img
 	echo "Backup: $out"
 	echo "spdhost asks for the word dangerous again before the read."
 	ready || return 1

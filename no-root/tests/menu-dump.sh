@@ -39,6 +39,9 @@ export SPDHOST_EXEC_ADDR=0x65015f08 SPDHOST_TIMEOUT=1000
 # shellcheck source=/dev/null
 source "$root/scripts/menu.sh" || { echo "cannot source menu.sh"; exit 1; }
 FDL1="$tmp/fdl1-dl.bin" FDL1_ADDR=0x65000800 FDL2="$tmp/fdl2-dl.bin" FDL2_ADDR=0x9efffe00
+# Dump side files live under DUMP_DIR/meta/ (legacy: DUMP_DIR itself).
+meta_of() { dump_meta_file "$1" read; }
+
 
 spd_all() { # DIR MODE ENV...
 	local d=$1 m=$2; shift 2; mkdir -p "$d"
@@ -61,14 +64,14 @@ same_as_spd() { # MENUDIR SPDDIR
 DUMP_DIR=$tmp/b1
 export MOCK_PTABLE=$tmp/pt MOCK_SLOT=a
 fetch_parts_table </dev/null >"$tmp/c1.log" 2>&1
-check "KiB table: parts session ok" test -s "$DUMP_DIR/partition_list.txt"
-check "KiB table: raw units kept (boot_a 4096)" grep -qx 'boot_a 4096' "$DUMP_DIR/partition_list.txt"
+check "KiB table: parts session ok" test -s "$(meta_of partition_list.txt)"
+check "KiB table: raw units kept (boot_a 4096)" grep -qx 'boot_a 4096' "$(meta_of partition_list.txt)"
 check "KiB table: bytes = units<<10 (boot_a 4194304, misc 1048576)" \
-	bash -c "grep -qx 'boot_a 4194304' '$DUMP_DIR/partition_bytes.txt' && grep -qx 'misc 1048576' '$DUMP_DIR/partition_bytes.txt'"
+	bash -c "grep -qx 'boot_a 4194304' '$(meta_of partition_bytes.txt)' && grep -qx 'misc 1048576' '$(meta_of partition_bytes.txt)'"
 check "KiB table: shift 10 like spd_dump" test "$PARTS_SHIFT" = 10
 # Every table read also leaves the XML a repartition edit is made from, in the
 # folder the dumps go to (spd_dump writes the same file wherever it runs).
-autox=$(ls "$DUMP_DIR"/partition_*.xml 2>/dev/null | head -1)
+autox=$(ls "$(dump_meta_dir)"/partition_*.xml 2>/dev/null | head -1)
 check "KiB table: the parts session left partition_<unixtime>.xml in the dump folder" \
 	test -n "$autox"
 check "auto XML is the live table in MiB (boot_a 4096 KiB -> 4, last row 0xffffffff)" \
@@ -76,11 +79,11 @@ check "auto XML is the live table in MiB (boot_a 4096 KiB -> 4, last row 0xfffff
 		grep -q 'Partition id=\"blackbox\" size=\"0xffffffff\"' '$autox'"
 check "fmt_size 4194304=4M 1572864=1.5M 262144=256K 6442450944=6G" \
 	test "$(fmt_size 4194304) $(fmt_size 1572864) $(fmt_size 262144) $(fmt_size 6442450944)" = "4M 1.5M 256K 6G"
-sz=$(stat -c %s "$DUMP_DIR/misc-slotinfo.img" 2>/dev/null || echo 0)
+sz=$(stat -c %s "$(meta_of misc-slotinfo.img)" 2>/dev/null || echo 0)
 check "slot record is 32 bytes at misc+0x800 (got $sz)" test "$sz" = 32
 spd_all "$tmp/s1" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=a
 dd if="$tmp/s1/misc.bin" of="$tmp/slot.exp" bs=1 skip=2048 count=32 status=none
-check "slot record == spd_dump misc.bin[0x800:0x820]" cmp -s "$DUMP_DIR/misc-slotinfo.img" "$tmp/slot.exp"
+check "slot record == spd_dump misc.bin[0x800:0x820]" cmp -s "$(meta_of misc-slotinfo.img)" "$tmp/slot.exp"
 # One READ_MIDST: 32 bytes at offset 0x800 (le32 length, le32 offset). Not a 1 MiB misc read.
 check "slot read is one 32-byte MIDST at 0x800" \
 	grep -q '^SEQ 11 len=8 2000000000080000 ' "$tmp/mock.seq"
@@ -102,14 +105,14 @@ spd_all "$tmp/s2" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
 check "slot b all_lite rc=0, keeps _b, drops _a" \
 	bash -c "[ $rc = 0 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ] && [ ! -e '$DUMP_DIR/uboot_a.img' ]"
 check "slot b all_lite == spd_dump r all_lite" same_as_spd "$DUMP_DIR" "$tmp/s2"
-DUMP_DIR=$tmp/b2all; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
+DUMP_DIR=$tmp/b2all; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 load_parts_state
 dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c2a.log" 2>&1; rc=$?
 spd_all "$tmp/s2all" all MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
 check "all (rc=$rc) == spd_dump r all (both slots, splloader, no userdata/cache/blackbox)" same_as_spd "$DUMP_DIR" "$tmp/s2all"
 
 # ---- case 3: one partition fails, the rest still dumped ----
-DUMP_DIR=$tmp/b3; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
+DUMP_DIR=$tmp/b3; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 load_parts_state
 echo stale > "$DUMP_DIR/boot_b.img"   # an older file must not pass the size check
 MOCK_FAIL_MID=boot_b dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c3.log" 2>&1; rc=$?
@@ -122,7 +125,7 @@ check "failure: partitions after it still dumped + verified" \
 	bash -c "cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 5 ] && grep -q ' uboot_b.img\$' SHA256SUMS && sha256sum -c --quiet SHA256SUMS"
 check "failure: spdhost logged the failed partition" grep -q 'dump failed (1): boot_b' "$tmp/c3.log"
 check "failure: older boot_b.img called out" grep -q 'OLDER copy' "$tmp/c3.log"
-DUMP_DIR=$tmp/b3n; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
+DUMP_DIR=$tmp/b3n; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 load_parts_state
 MOCK_FAIL_START=uboot_a dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c3n.log" 2>&1; rc=$?
 check "READ_START NACK: rc=$rc, uboot_a failed (no file), 5 others ok" \
@@ -176,7 +179,7 @@ spd_all "$tmp/s5" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
 check "one-session all_lite (slot b): 1 spdhost run, rc=$rc" bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c5.log') = 1 ] && grep -q ' parts .* dump all_lite ' '$tmp/c5.log'"
 check "one-session all_lite == spd_dump r all_lite (slot b)" same_as_spd "$DUMP_DIR" "$tmp/s5"
 check "one-session: table cache refreshed, slot b, SHA256SUMS ok" \
-	bash -c "grep -qx 'boot_b 4096' '$DUMP_DIR/partition_list.txt' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 4 ] && sha256sum -c --quiet SHA256SUMS"
+	bash -c "grep -qx 'boot_b 4096' '$(meta_of partition_list.txt)' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 4 ] && sha256sum -c --quiet SHA256SUMS"
 DUMP_DIR=$tmp/b6
 dump_live_session all </dev/null >"$tmp/c6.log" 2>&1; rc=$?
 spd_all "$tmp/s6" all MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
@@ -188,7 +191,7 @@ dump_live_session "$t" </dev/null >"$tmp/c7.log" 2>&1; rc=$?
 check "one-session single 'boot.img' (no cache) -> boot_b from live slot, rc=$rc" \
 	bash -c "[ $rc = 0 ] && [ '$t' = boot ] && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp' && grep -q ' boot_b.img\$' '$DUMP_DIR/SHA256SUMS' && [ ! -e '$DUMP_DIR/boot_a.img' ]"
 # cached table said slot a (boot_a) but the live device is slot b: live wins
-t=$(ACTIVE_SLOT=a; live_dump_target boot "$tmp/b1/partition_bytes.txt")
+t=$(ACTIVE_SLOT=a; live_dump_target boot "$tmp/b1/meta/partition_bytes.txt")
 check "cached match boot_a is passed as 'boot' so the live slot decides ($t)" test "$t" = boot
 DUMP_DIR=$tmp/b8
 t=$(live_dump_target splloader "$tmp/none")
@@ -202,12 +205,12 @@ DUMP_DIR=$tmp/b10
 dump_live_session nosuch </dev/null >"$tmp/c10.log" 2>&1; rc=$?
 check "one-session unknown name: nonzero rc ($rc), reported" bash -c "[ $rc != 0 ] && grep -q 'nosuch(not in live table)' '$tmp/c10.log'"
 # dump_partition end to end (answers on stdin): cached table + 'y' refresh -> one session
-DUMP_DIR=$tmp/b11; mkdir -p "$DUMP_DIR"; cp "$tmp/b1/partition_list.txt" "$DUMP_DIR/"
+DUMP_DIR=$tmp/b11; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b1/meta/partition_list.txt" "$DUMP_DIR/meta/"
 cls() { :; }; pause() { :; }; ready() { :; }
 printf 'y\nall_lite\n' | dump_partition >"$tmp/c11.log" 2>&1; rc=$?
 check "menu Refresh=y then all_lite: ONE session, slot b live (rc=$rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c11.log') = 1 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ]"
-DUMP_DIR=$tmp/b12; mkdir -p "$DUMP_DIR"; cp "$tmp/b2/partition_list.txt" "$tmp/b2/misc-slotinfo.img" "$DUMP_DIR/"
+DUMP_DIR=$tmp/b12; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 printf 'n\nboot\n' | dump_partition >"$tmp/c12.log" 2>&1; rc=$?
 check "menu Refresh=n still re-reads the live table and slot (rc=$rc)" \
 	bash -c "[ $rc = 0 ] && grep -q ' parts .* dump boot ' '$tmp/c12.log' && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp'"
@@ -220,16 +223,16 @@ unset MOCK_SLOT
 DUMP_DIR=$tmp/g1
 MISC_CONFIRM_TOKEN=$(misc_bcb_sha256 reboot-fastboot)
 MOCK_MISC_OUT=$tmp/g1.misc guarded_misc_session reboot-fastboot reboot-fastboot </dev/null >"$tmp/g1.log" 2>&1; rc=$?
-b=$(ls "$DUMP_DIR"/misc-before-*.img 2>/dev/null | head -1)
+b=$(ls "$(dump_meta_dir)"/misc-before-*.img "$DUMP_DIR"/misc-before-*.img 2>/dev/null | head -1)
 "$tmp/gen_expected" misc 0 1048576 > "$tmp/misc0.exp"
 check "guarded reboot-fastboot: rc=$rc, backup 1 MiB == old misc, sha recorded, verified" \
-	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -q ' ${b##*/}\$' '$DUMP_DIR/SHA256SUMS' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
+	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -qE ' (meta/)?${b##*/}\$' '$DUMP_DIR/SHA256SUMS' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
 check "guarded: menu command line has --confirm-token=<BCB sha>, no --yes" bash -c "grep '^+ ' '$tmp/g1.log' | grep -q -- '--confirm-token=$(misc_bcb_sha256 reboot-fastboot)' && ! grep '^+ ' '$tmp/g1.log' | grep -q -- '--yes'"
 DUMP_DIR=$tmp/g2
 MISC_CONFIRM_TOKEN=$(misc_bcb_sha256 reboot-recovery)
 MOCK_FAIL_MID=misc guarded_misc_session reboot-recovery reboot-recovery </dev/null >"$tmp/g2.log" 2>&1; rc=$?
 check "guarded: failed pre-dump aborts: rc=$rc, no misc write, no reset, no backup kept" \
-	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' '$tmp/g2.log' && grep -q 'write was NOT done' '$tmp/g2.log' && ! grep -qE '^SEQ (02 len=2048|05 )' '$tmp/mock.seq' && ! ls '$DUMP_DIR'/misc-before-*.img >/dev/null 2>&1"
+	bash -c "[ $rc != 0 ] && grep -q 'misc-backup FAILED' '$tmp/g2.log' && grep -q 'write was NOT done' '$tmp/g2.log' && ! grep -qE '^SEQ (02 len=2048|05 )' '$tmp/mock.seq' && ! ls '$DUMP_DIR'/misc-before-*.img '$DUMP_DIR'/meta/misc-before-*.img >/dev/null 2>&1"
 DUMP_DIR=$tmp/g3; mkdir -p "$DUMP_DIR"
 MISC_CONFIRM_TOKEN=$(sha256sum "$b" | awk '{print $1}')
 MOCK_MISC_OUT=$tmp/g3.misc guarded_misc_session "restore misc" write-part misc "$b" reset </dev/null >"$tmp/g3.log" 2>&1; rc=$?

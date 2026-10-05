@@ -88,5 +88,9 @@ That's a known bug in the current beta, and a fix is coming. Use slot A for now.
 ### Is it the same as spd_dump?
 It does the same job and uses the same command logic, rewritten for non-root Termux USB access with extra safety checks.
 
+
+### Where do dump files go?
+Partition images (`NAME.img`) and `SHA256SUMS` stay in the dump folder. Side files — the parts table (`partition_list.txt`), `dump-manifest.txt`, `partition_*.xml`, `misc-slotinfo.img`, and `*-before-*.img` backups — go under `meta/` inside that folder. Older dumps that still have those files at the top of the dump folder keep working.
+
 ### Where do I report bugs?
 Open an [issue](https://github.com/Seuj09/Spd_dump_termux/issues) with your host phone, target model, FDL folder and the full output.
