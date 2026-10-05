@@ -3439,9 +3439,13 @@ unlock_bootloader_menu() {
 	row=$(unlock_uboot_row "$uboot")
 	st=$(mktemp "$(spd_tmpdir 2>/dev/null || echo /tmp)/spdhost-status.XXXXXX" 2>/dev/null) || st=
 	rc=0
+	# N1: A/B restore uses plain write-part. On slot>0 that is the same code path
+	# as write-part-plain (writecmd.c), and it works with an older spdhost that
+	# does not know write-part-plain -- so the printed restore command below can
+	# still bring the phone back after a version-skew erase.
 	SPDHOST_STATUS_FILE=$st run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" \
-		write-part-plain splloader "$spl" write-part-plain "$row" "$uboot" reset || rc=$?
+		write-part splloader "$spl" write-part "$row" "$uboot" reset || rc=$?
 	wspl=$( [[ -n $st ]] && awk -F= '$1 == "write-splloader" { v = $2 } END { print v }' "$st" 2>/dev/null)
 	wub=$( [[ -n $st ]] && awk -F= -v k="write-$row" '$1 == k { v = $2 } END { print v }' "$st" 2>/dev/null)
 	[[ -n $st ]] && rm -f "$st"
@@ -3472,10 +3476,17 @@ unlock_bootloader_menu() {
 		echo "RESTORE FAILED. splloader is still erased and the phone will not boot."
 		echo "Do not unplug. Keep it in download mode and run this session again"
 		echo "until it succeeds; the backups are still on disk:"
-	else
+	elif [[ $wub != ok ]]; then
 		echo
 		echo "RESTORE INCOMPLETE: only $row is left. Run the restore again for it;"
 		echo "the backups are still on disk:"
+	else
+		# N6: both writes reported ok; the session exit is from the ending
+		# (reset/power-off not acked). The phone has its loader back.
+		echo
+		echo "RESTORE: both writes succeeded (splloader and $row); only the ending"
+		echo "(reset/power-off) failed. The phone should boot; replug if it is still"
+		echo "in download mode. Backups are still on disk:"
 	fi
 	echo "  $spl"
 	echo "  $uboot"
@@ -3503,10 +3514,21 @@ unlock_preflight() {
 		echo "The backup stays in $work."
 		return 1
 	fi
-	if [[ $PARTS_VERIFIED == 0 || ( -z $PARTS_VERIFIED && $PARTS_SHIFT != 10 ) ]]; then
-		echo "UNLOCK REFUSED: this table's size unit is a guess the device did not confirm"
-		echo "(shift $PARTS_SHIFT), so the uboot size cannot be checked."
-		echo "Nothing was erased or written. The backup stays in $work."
+	# N1: an empty PARTS_VERIFIED means the parts file has no "# spdhost-parts"
+	# header -- that is a pre-G1 spdhost. Those builds also lack write-part-plain,
+	# so accepting the table here would erase splloader and then fail every
+	# restore write. Refuse anything that is not verified 1.
+	if [[ -z $PARTS_VERIFIED || $PARTS_VERIFIED == 0 ]]; then
+		if [[ -z $PARTS_VERIFIED ]]; then
+			echo "UNLOCK REFUSED: the partition table has no spdhost-parts header."
+			echo "That means this menu is talking to an older spdhost that cannot write"
+			echo "the backup back (no write-part-plain). Rebuild spdhost (make -C no-root)"
+			echo "and try again. Nothing was erased or written. The backup stays in $work."
+		else
+			echo "UNLOCK REFUSED: this table's size unit is a guess the device did not confirm"
+			echo "(shift $PARTS_SHIFT), so the uboot size cannot be checked."
+			echo "Nothing was erased or written. The backup stays in $work."
+		fi
 		return 1
 	fi
 	if ! grep -qE '^uboot_[ab][[:space:]]' "$bytes"; then
@@ -3547,7 +3569,7 @@ unlock_restore_help() {
 		cmd+=(exec_addr "$ea" "$stub")
 	fi
 	cmd+=(fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" parts "$(parts_cache_path)"
-		write-part-plain splloader "$spl" write-part-plain "$(unlock_uboot_row "$uboot")" "$uboot" reset)
+		write-part splloader "$spl" write-part "$(unlock_uboot_row "$uboot")" "$uboot" reset)
 	echo
 	echo "splloader may still be erased. An erased SPL should still drop into BootROM download mode"
 	echo "(power off, hold the download-mode keys, plug in), so it is recoverable with this tool."

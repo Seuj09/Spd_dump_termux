@@ -33,7 +33,7 @@ printf '%s\n' "$*" >> "$REC"
 if [[ -n ${FAIL_ON:-} && "$*" == $FAIL_ON ]]; then exit 3; fi
 prev=; for a in "$@"; do
   if [[ $prev == parts ]]; then
-    { echo "# spdhost-parts shift 10 verified ${VERIFIED:-1}"
+    { if [[ -z ${NOHEADER:-} ]]; then echo "# spdhost-parts shift 10 verified ${VERIFIED:-1}"; fi
       if [[ ${SLOTFILE:-uboot_a} == uboot ]]; then echo "uboot ${UBOOT_KIB:-1024}"; echo "uboot_bak ${UBOOT_KIB:-1024}"
       else echo "uboot_a ${UBOOT_KIB:-1024}"; echo "uboot_b ${UBOOT_KIB:-1024}"; fi
       echo "misc 1024"; echo "miscdata 1024"; } > "$a"
@@ -41,7 +41,7 @@ prev=; for a in "$@"; do
   prev=$a
 done
 prev=; for a in "$@"; do
-  if [[ $prev == write-part-plain ]]; then
+  if [[ $prev == write-part-plain || $prev == write-part ]]; then
     if [[ $a == "${FAIL_WRITE:-}" ]]; then
       [[ -n ${SPDHOST_STATUS_FILE:-} ]] && echo "write-$a=failed" >> "$SPDHOST_STATUS_FILE"; exit 1
     fi
@@ -88,7 +88,7 @@ unlock_run u1
 check "U1: the backup session runs even though backup_spl/ looks complete" \
 	grep -q 'read-part splloader 0 262144 .*/backup_spl/unlock-[0-9-]*/splloader.img' rec_u1
 check "U1: the restore writes this run's files, never the stale ones" \
-	bash -c "grep 'write-part-plain splloader' rec_u1 | grep -q '/backup_spl/unlock-[0-9-]*/splloader.img' && ! grep -q 'backup_spl/splloader.img\|backup_spl/uboot_a.img' rec_u1"
+	bash -c "grep 'write-part splloader' rec_u1 | grep -q '/backup_spl/unlock-[0-9-]*/splloader.img' && ! grep -q 'backup_spl/splloader.img\|backup_spl/uboot_a.img' rec_u1"
 check "U1: the backup is dumped before the erase" \
 	bash -c "awk '/read-part splloader 0 262144/{b=NR} /danger-erase/{e=NR} END{exit !(b && e && b < e)}' rec_u1"
 check "U1: the stale backup is left alone" bash -c "head -c 9 backup_spl/splloader.img | grep -q STALE-SPL"
@@ -120,21 +120,21 @@ check "U2: the erase session names splloader_bak first, then splloader" \
 	bash -c "grep -q 'danger-erase splloader_bak danger-erase splloader reset' rec_u1"
 unlock_run u2fail FAIL_ON='*danger-erase*'
 check "U2: a failed erase session skips cboot and the unlock loader but still restores" \
-	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part-plain splloader' rec_u2fail"
+	bash -c "grep -q 'splloader was never erased' out_u2fail && ! grep -q 'fdl2-cboot.bin' rec_u2fail && ! grep -q 'spl-unlock.bin' rec_u2fail && grep -q 'write-part splloader' rec_u2fail"
 
 # ---- U4 ---------------------------------------------------------------------------------
 # The phone dumped uboot_b (slot b active at backup time); the menu's own
 # ACTIVE_SLOT says a. The restore must go to uboot_b, not to the active name.
 unlock_run u4 SLOTFILE=uboot_b ACTIVE_SLOT=a
 check "U4: a uboot_b backup is restored to uboot_b" \
-	bash -c "grep 'write-part-plain splloader' rec_u4 | grep -q 'write-part-plain uboot_b .*/uboot_b.img'"
-unlock_run u4fail SLOTFILE=uboot_b ACTIVE_SLOT=a FAIL_ON='*write-part-plain splloader*'
+	bash -c "grep 'write-part splloader' rec_u4 | grep -q 'write-part uboot_b .*/uboot_b.img'"
+unlock_run u4fail SLOTFILE=uboot_b ACTIVE_SLOT=a FAIL_ON='*write-part splloader*'
 check "U4: the printed restore command also targets uboot_b" \
-	bash -c "grep -q 'RESTORE FAILED' out_u4fail && grep -A30 'Restore command' out_u4fail | grep -q 'write-part-plain uboot_b .*uboot_b.img'"
+	bash -c "grep -q 'RESTORE FAILED' out_u4fail && grep -A30 'Restore command' out_u4fail | grep -q 'write-part uboot_b .*uboot_b.img'"
 
 # ---- G2 ---------------------------------------------------------------------------------
 check "G2: cboot goes to uboot only (write-part-plain), never a twin write-part" \
-	bash -c "grep -q 'write-part-plain uboot .*fdl2-cboot.bin' rec_u1 && ! grep -q 'write-part uboot' rec_u1"
+	bash -c "grep -q 'write-part-plain uboot .*fdl2-cboot.bin' rec_u1 && ! grep -qE 'write-part uboot([[:space:]]|$)' rec_u1"
 unlock_run g2nab SLOTFILE=uboot
 check "G2: non-A/B (uboot + uboot_bak, no uboot_a/_b) is refused after the backup, before any erase or write" \
 	bash -c "grep -q 'UNLOCK REFUSED: this phone is not A/B' out_g2nab && grep -q 'rc=1' out_g2nab &&
@@ -153,6 +153,51 @@ check "G2: restore reports splloader and uboot apart: splloader RESTORED, uboot_
 unlock_run g2ok
 check "G2: a clean restore says both were written" \
 	bash -c "grep -q 'Restore: splloader written, uboot_a written.' out_g2ok && grep -q 'rc=0' out_g2ok"
+# N1: headerless table (pre-G1 spdhost) must refuse before erase.
+unlock_run n1skew NOHEADER=1
+check "N1: a headerless parts table is refused before erase (version skew)" \
+	bash -c "grep -q 'UNLOCK REFUSED: the partition table has no spdhost-parts header' out_n1skew &&
+		grep -q 'rc=1' out_n1skew && grep -q 'read-part splloader 0 262144' rec_n1skew &&
+		! grep -q 'danger-erase\|write-part' rec_n1skew"
+# N1: A/B restore uses write-part (not write-part-plain); printed command too.
+check "N1: restore session uses write-part for splloader and uboot_a" \
+	bash -c "grep -qE 'write-part splloader .* write-part uboot_a' rec_g2ok &&
+		! grep -qE 'write-part-plain splloader' rec_g2ok"
+# N6: both writes ok, reset fails -> say both written, only ending failed.
+cat > run_resetfail <<'R'
+#!/bin/bash
+printf '%s\n' "$*" >> "$REC"
+prev=; for a in "$@"; do
+  if [[ $prev == parts ]]; then
+    { echo "# spdhost-parts shift 10 verified 1"
+      echo "uboot_a 1024"; echo "uboot_b 1024"; echo "misc 1024"; echo "miscdata 1024"; } > "$a"
+  fi
+  if [[ $prev == write-part || $prev == write-part-plain ]]; then
+    [[ -n ${SPDHOST_STATUS_FILE:-} ]] && echo "write-$a=ok" >> "$SPDHOST_STATUS_FILE"
+  fi
+  prev=$a
+done
+case "$*" in
+  *"read-part splloader 0 262144 "*)
+    prev=; spl=; for a in "$@"; do [[ $prev == 262144 ]] && spl=$a; prev=$a; done
+    d=$(dirname "$spl")
+    printf 'FRESH-SPL' > "$spl"; head -c $((262144 - 9)) /dev/zero >> "$spl"
+    printf 'FRESH-UB' > "$d/uboot_a.img"
+    printf 'ok uboot_a x\n' > "$d/dump-manifest.txt"
+    ;;
+esac
+[[ "$*" == *"write-part splloader"* ]] && { echo "reset: no ack (timeout)" >&2; exit 1; }
+exit 0
+R
+chmod +x run_resetfail
+cp run run_full_n6; cp run_resetfail run
+unlock_run n6reset
+cp run_full_n6 run
+check "N6: both writes ok and only reset fails: say both written, ending failed" \
+	bash -c "grep -q 'RESTORE: both writes succeeded' out_n6reset &&
+		grep -q 'only the ending' out_n6reset &&
+		! grep -q 'RESTORE INCOMPLETE: only uboot_a is left' out_n6reset &&
+		! grep -q 'splloader is still erased' out_n6reset && grep -q 'rc=1' out_n6reset"
 out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
 	unlock_uboot_row /x/uboot_a.img; unlock_uboot_row /x/uboot_b.img; unlock_uboot_row /x/uboot.img; unlock_uboot_row /x/other.img' _ "$root" | tr '\n' ' ')
 check "U4: unlock_uboot_row maps file names to rows [$out]" test "$out" = "uboot_a uboot_b uboot uboot "
