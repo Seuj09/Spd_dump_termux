@@ -199,7 +199,7 @@ check "V1: without DIR the backup goes to the --part-xml folder (rc $rc)" \
 	bash -c "[ $rc = 0 ] && ls px/vbmeta-before-vbmeta-*.img >/dev/null 2>&1 && ! grep -q UNLOCKED sh_v1px.log"
 
 # Menu [verity]: passes DUMP_DIR/meta as DIR (vbmeta-before-* live with other
-# sidecars), records each saved original's sha256 in SHA256SUMS, and warns about
+# sidecars), records each saved original's sha256 in meta/SHA256SUMS, and warns about
 # the unlocked bootloader. Fake runner.
 cat > vrun <<'R'
 #!/bin/bash
@@ -219,7 +219,7 @@ out=$(REC=$tmp/vrec SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=$tmp/vrun SPDHOST_MEN
 check "V1 menu: verity 0 runs with DUMP_DIR/meta as DIR, no --yes/--dangerous" \
 	bash -c "grep -q 'verity 0 $tmp/mdump/meta reset' vrec && ! grep -qE -- '--yes|--dangerous' vrec"
 check "V1 menu: the saved original gets a SHA256SUMS line" \
-	bash -c "grep -qE \"\$(printf AVB0orig | sha256sum | cut -c1-64)  (meta/)?vbmeta-before-vbmeta_a-20261004-000000.img\" mdump/SHA256SUMS"
+	bash -c "grep -qE \"\$(printf AVB0orig | sha256sum | cut -c1-64)  (meta/)?vbmeta-before-vbmeta_a-20261004-000000.img\" mdump/meta/SHA256SUMS"
 check "V2 menu: warns about the unlocked bootloader and names 0x78 as the flags word" \
 	bash -c '[[ $1 == *"UNLOCKED bootloader"* && $1 == *"flags word (big-endian, 0x78-0x7B)"* && $1 != *"not the AVB flag byte"* ]]' _ "$out"
 

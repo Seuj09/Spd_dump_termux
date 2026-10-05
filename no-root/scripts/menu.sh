@@ -1213,10 +1213,10 @@ run_session() {
 	return "$rc"
 }
 
-# Dump side files (tables, XML, manifest, slotinfo) live in DUMP_DIR/meta/ so
-# the dump folder stays image-only for flash/restore. SHA256SUMS stays next to
-# the .img files. Older dumps that still have these files in DUMP_DIR keep
-# working: readers prefer meta/, then fall back to DUMP_DIR.
+# Dump side files (tables, XML, manifest, slotinfo, SHA256SUMS) live in
+# DUMP_DIR/meta/ so the dump folder stays image-only for flash/restore.
+# Older dumps that still have these files in DUMP_DIR keep working: readers
+# prefer meta/, then fall back to DUMP_DIR.
 dump_meta_dir() {
 	mkdir -p "$DUMP_DIR/meta" || return 1
 	printf '%s\n' "$DUMP_DIR/meta"
@@ -1653,17 +1653,30 @@ should_skip_bulk() {
 	return 1
 }
 
+# SHA256SUMS lives under DUMP_DIR/meta/ (image-only dump folder). Entry name is
+# the path relative to DUMP_DIR. Writers always use meta/; if an older dump
+# still has SHA256SUMS at the dump root, the first write moves it into meta/.
+sha256sums_path() {
+	local prefer=${1:-read} sums
+	sums=$(dump_meta_file SHA256SUMS "$prefer") || return 1
+	if [[ $prefer == write && ! -f $sums && -f $DUMP_DIR/SHA256SUMS ]]; then
+		mv "$DUMP_DIR/SHA256SUMS" "$sums" || return 1
+	fi
+	printf '%s\n' "$sums"
+}
+
 # SHA256SUMS entry name: path relative to DUMP_DIR when inside it.
 record_sha256() {
-	local f=$1 sums="$DUMP_DIR/SHA256SUMS" key digest tmp
+	local f=$1 sums key digest tmp
+	sums=$(sha256sums_path write) || return 1
 	key=$f
 	[[ $key == "$DUMP_DIR"/* ]] && key=${key#"$DUMP_DIR"/}
 	digest=$(sha256sum "$f" | awk '{print $1}') || return 1
 	if [[ -f $sums ]]; then
 		tmp=$(mktemp "$sums.XXXXXX") || return 1
 		# A failed filter or rename used to leave the mktemp file sitting in
-		# the dump folder while the new line was still appended below, so the
-		# next run's `ls` would show a stray SHA256SUMS.XXXXXX. Drop it.
+		# meta/ while the new line was still appended below, so the next run's
+		# `ls` would show a stray SHA256SUMS.XXXXXX. Drop it.
 		if ! awk -v k="$key" '{ n = $0; sub(/^[0-9a-f]+  /, "", n); if (n != k) print }' "$sums" > "$tmp" ||
 			! mv "$tmp" "$sums"; then
 			rm -f "$tmp"
@@ -1693,7 +1706,7 @@ run_dump_queue() {
 	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" "${args[@]}" "$BOOT_AFTER"
 	rc=$?
 	echo
-	echo "Verifying $n file(s) (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
+	echo "Verifying $n file(s) (size == expected, then sha256 -> $DUMP_DIR/meta/SHA256SUMS)"
 	for (( i = 0; i < n; i++ )); do
 		out=${DQ_OUTS[i]}
 		sz=$(stat -c %s "$out" 2>/dev/null || echo -1)
@@ -1750,7 +1763,7 @@ verify_dump_manifest() {
 		[[ $tag == unverified ]] && unver[$name]=1
 	done < "$man"
 	echo
-	echo "Verifying (size == expected, then sha256 -> $DUMP_DIR/SHA256SUMS)"
+	echo "Verifying (size == expected, then sha256 -> $DUMP_DIR/meta/SHA256SUMS)"
 	while read -r tag name bytes file; do
 		case $tag in
 			missing) failed+=("$name(not in live table)"); continue ;;
@@ -1770,8 +1783,9 @@ verify_dump_manifest() {
 			sz=$(stat -c %s "$file" 2>/dev/null || echo -1)
 			echo "UNVERIFIED $name: $sz bytes at a guessed table unit; the device would not size it."
 			echo "     kept as ${file##*/}; NOT recorded in SHA256SUMS; may be truncated."
-			if [[ -f $DUMP_DIR/SHA256SUMS ]]; then
-				local sums=$DUMP_DIR/SHA256SUMS key=${name}.img tmp
+			local sums key=${name}.img tmp
+			sums=$(dump_meta_file SHA256SUMS read)
+			if [[ -f $sums ]]; then
 				tmp=$(mktemp "$sums.XXXXXX") || true
 				if [[ -n $tmp ]] && awk -v k="$key" '{ n=$0; sub(/^[0-9a-f]+  /,"",n); if (n != k) print }' "$sums" > "$tmp"; then
 					mv "$tmp" "$sums"
@@ -2642,10 +2656,11 @@ restore_misc_menu() {
 	reply=${reply:-1}
 	[[ $reply =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#list[@]} )) || { echo "Unchanged."; return 1; }
 	f=${list[reply - 1]}
-	local sumkey=$f
+	local sumkey=$f sums
 	[[ $sumkey == "$DUMP_DIR"/* ]] && sumkey=${sumkey#"$DUMP_DIR"/}
-	if [[ -f $DUMP_DIR/SHA256SUMS ]] && { grep -q " $sumkey\$" "$DUMP_DIR/SHA256SUMS" || grep -q " ${f##*/}\$" "$DUMP_DIR/SHA256SUMS"; }; then
-		( cd "$DUMP_DIR" && { grep " $sumkey\$" SHA256SUMS || grep " ${f##*/}\$" SHA256SUMS; } | sha256sum -c --quiet ) || { echo "sha256 mismatch for $f; refusing." >&2; return 1; }
+	sums=$(dump_meta_file SHA256SUMS read)
+	if [[ -f $sums ]] && { grep -q " $sumkey\$" "$sums" || grep -q " ${f##*/}\$" "$sums"; }; then
+		( cd "$DUMP_DIR" && { grep " $sumkey\$" "$sums" || grep " ${f##*/}\$" "$sums"; } | sha256sum -c --quiet ) || { echo "sha256 mismatch for $f; refusing." >&2; return 1; }
 		echo "sha256 OK (SHA256SUMS)"
 	else
 		echo "note: $f has no SHA256SUMS line"
@@ -2931,6 +2946,8 @@ promote_dump_action() {
 		return 1
 	fi
 	mkdir -p "$INPUT_DIR" || { echo "Could not create $INPUT_DIR" >&2; return 1; }
+	# Top-level DUMP_DIR only (not meta/): before-* backups and SHA256SUMS live
+	# under meta/ and must not appear as flashable images.
 	shopt -s nullglob
 	for f in "$DUMP_DIR"/*; do
 		[[ -f $f ]] || continue
@@ -3018,6 +3035,7 @@ promote_dump_action() {
 # Names write-parts will look at: regular files in this directory that
 # part_image_candidate does not reject. Prints one name per line.
 restore_image_names() {
+	# Top-level dir only (not meta/): same image-only rule as menu [6]/[9].
 	local dir=$1 f base
 	shopt -s nullglob
 	for f in "$dir"/*; do

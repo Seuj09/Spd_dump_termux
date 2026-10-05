@@ -43,7 +43,7 @@ FDL1="$tmp/fdl1-dl.bin" FDL1_ADDR=0x65000800 FDL2="$tmp/fdl2-dl.bin" FDL2_ADDR=0
 bytes_of() { awk -v n="$1" '$1 == n { print $2; exit }' "$(parts_bytes_path)"; }
 meta_of() { dump_meta_file "$1" read; }
 fsize() { stat -c %s "$1" 2>/dev/null || echo -1; }
-in_sums() { grep -q " $1\$" "$DUMP_DIR/SHA256SUMS" 2>/dev/null; }
+in_sums() { grep -q " $1\$" "$(dump_meta_file SHA256SUMS read)" 2>/dev/null; }
 
 # ---- the menu side alone: header wins over the loop; no header keeps the loop ----
 DUMP_DIR=$tmp/m0; mkdir -p "$DUMP_DIR"
@@ -77,7 +77,7 @@ check "UFS: menu reports the correction, no 'guess' warning" \
 	bash -c "grep -q 'spdhost corrected' '$tmp/u1.log' && ! grep -q 'unit is a guess' '$tmp/u1.log'"
 dump_live_session boot </dev/null >"$tmp/u1d.log" 2>&1; rc=$?
 check "UFS: dump boot -> boot_a.img is the full 64 MiB, ok (rc $rc)" \
-	bash -c "[ $rc = 0 ] && [ $(fsize "$DUMP_DIR/boot_a.img") = 67108864 ] && grep -q ' boot_a.img\$' '$DUMP_DIR/SHA256SUMS'"
+	bash -c "[ $rc = 0 ] && [ $(fsize "$DUMP_DIR/boot_a.img") = 67108864 ] && grep -q ' boot_a.img\$' '$(dump_meta_file SHA256SUMS read)'"
 DUMP_DIR=$tmp/u1all
 dump_live_session all </dev/null >"$tmp/u1a.log" 2>&1; rc=$?
 check "UFS: all: every image is the device's size (prodnv 5 MiB, super 96 MiB, rc $rc)" \
@@ -93,13 +93,13 @@ check "unverified: header says verified 0 at the guessed shift" \
 check "unverified: the menu warns the unit is a guess" grep -q 'unit is a guess the device did not confirm' "$tmp/u2.log"
 dump_live_session boot </dev/null >"$tmp/u2d.log" 2>&1; rc=$?
 check "unverified: dump boot sizes boot_a by the device: 64 MiB, ok (rc $rc)" \
-	bash -c "[ $rc = 0 ] && [ $(fsize "$DUMP_DIR/boot_a.img") = 67108864 ] && grep -q ' boot_a.img\$' '$DUMP_DIR/SHA256SUMS' &&
+	bash -c "[ $rc = 0 ] && [ $(fsize "$DUMP_DIR/boot_a.img") = 67108864 ] && grep -q ' boot_a.img\$' '$(dump_meta_file SHA256SUMS read)' &&
 		grep -q \"using the device's 67108864 bytes (table says 33554432)\" '$tmp/u2d.log'"
 dump_live_session prodnv </dev/null >"$tmp/u2p.log" 2>&1; rc=$?
 check "unverified: a row the device will not size is UNVERIFIED, not ok, not in SHA256SUMS (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'UNVERIFIED prodnv' '$tmp/u2p.log' &&
 		{ [ -f '$DUMP_DIR/prodnv.img.unverified' ] || [ -f '$DUMP_DIR/prodnv.img' ]; } &&
-		! grep -q ' prodnv.img\$' '$DUMP_DIR/SHA256SUMS' && grep -qx 'unverified prodnv' '$(meta_of dump-manifest.txt)'"
+		! grep -q ' prodnv.img\$' '$(dump_meta_file SHA256SUMS read)' && grep -qx 'unverified prodnv' '$(meta_of dump-manifest.txt)'"
 unset MOCK_NOPROBE MOCK_PTABLE_MIB
 
 # ---- 4 KiB-sector GPT with a 512 KiB row ----
@@ -116,7 +116,7 @@ check "GPT 4k: menu bytes sml_a 524288, boot_a 2 MiB (not halved), super 6 MiB" 
 dump_live_session all </dev/null >"$tmp/g1a.log" 2>&1; rc=$?
 check "GPT 4k: all keeps the sub-MiB row and dumps every row at full size (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ $(fsize "$DUMP_DIR/sml_a.img") = 524288 ] && [ $(fsize "$DUMP_DIR/boot_a.img") = 2097152 ] &&
-		[ $(fsize "$DUMP_DIR/super.img") = 6291456 ] && grep -q ' sml_a.img\$' '$DUMP_DIR/SHA256SUMS'"
+		[ $(fsize "$DUMP_DIR/super.img") = 6291456 ] && grep -q ' sml_a.img\$' '$(dump_meta_file SHA256SUMS read)'"
 unset MOCK_GPT
 
 # ---- eMMC KiB table: unchanged behaviour, header shift 10 ----

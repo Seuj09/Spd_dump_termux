@@ -75,7 +75,7 @@ bash scripts/menu.sh
 ## 5. Always dump first
 
 Back up boot, misc and any partition you plan to touch before you write anything.
-Images land in the dump folder; the parts table, XML, manifest and slotinfo go under `meta/` inside it (`SHA256SUMS` stays next to the images).
+Images land alone in the dump folder; the parts table, XML, manifest, slotinfo and `SHA256SUMS` go under `meta/` inside it.
 
 ## One-line dump without the menu (Infinix ums9230)
 

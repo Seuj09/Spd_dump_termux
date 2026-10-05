@@ -41,6 +41,7 @@ source "$root/scripts/menu.sh" || { echo "cannot source menu.sh"; exit 1; }
 FDL1="$tmp/fdl1-dl.bin" FDL1_ADDR=0x65000800 FDL2="$tmp/fdl2-dl.bin" FDL2_ADDR=0x9efffe00
 # Dump side files live under DUMP_DIR/meta/ (legacy: DUMP_DIR itself).
 meta_of() { dump_meta_file "$1" read; }
+sums_of() { dump_meta_file SHA256SUMS read; }
 
 
 spd_all() { # DIR MODE ENV...
@@ -91,7 +92,7 @@ check "slot a detected" test "$ACTIVE_SLOT" = a
 dump_matched_parts all_lite "$(parts_bytes_path)" </dev/null >"$tmp/c1d.log" 2>&1; rc=$?
 check "slot a all_lite rc=0 ($rc)" test "$rc" = 0
 check "slot a all_lite == spd_dump r all_lite (files+bytes, incl. splloader 256K)" same_as_spd "$DUMP_DIR" "$tmp/s1"
-check "SHA256SUMS verifies" bash -c "cd '$DUMP_DIR' && sha256sum -c --quiet SHA256SUMS"
+check "SHA256SUMS verifies under meta/" bash -c "[ -f '$DUMP_DIR/meta/SHA256SUMS' ] && [ ! -e '$DUMP_DIR/SHA256SUMS' ] && cd '$DUMP_DIR' && sha256sum -c --quiet meta/SHA256SUMS"
 
 # ---- case 2: slot b ----
 DUMP_DIR=$tmp/b2
@@ -120,16 +121,16 @@ check "failure: nonzero rc ($rc)" test "$rc" != 0
 check "failure: failed list names boot_b only" grep -qx 'FAILED (1 of 6): boot_b' "$tmp/c3.log"
 check "failure: boot_b.img.partial kept, short" bash -c "[ -f '$DUMP_DIR/boot_b.img.partial' ] && (( \$(stat -c %s '$DUMP_DIR/boot_b.img.partial') < 4194304 ))"
 check "failure: previous boot_b.img kept, not in SHA256SUMS" \
-	bash -c "[ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && ! grep -q ' boot_b.img\$' '$DUMP_DIR/SHA256SUMS'"
+	bash -c "[ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && ! grep -q ' boot_b.img\$' '$(sums_of)'"
 check "failure: partitions after it still dumped + verified" \
-	bash -c "cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 5 ] && grep -q ' uboot_b.img\$' SHA256SUMS && sha256sum -c --quiet SHA256SUMS"
+	bash -c "cd '$DUMP_DIR' && [ \$(wc -l < meta/SHA256SUMS) = 5 ] && grep -q ' uboot_b.img\$' meta/SHA256SUMS && sha256sum -c --quiet meta/SHA256SUMS"
 check "failure: spdhost logged the failed partition" grep -q 'dump failed (1): boot_b' "$tmp/c3.log"
 check "failure: older boot_b.img called out" grep -q 'OLDER copy' "$tmp/c3.log"
 DUMP_DIR=$tmp/b3n; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 load_parts_state
 MOCK_FAIL_START=uboot_a dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c3n.log" 2>&1; rc=$?
 check "READ_START NACK: rc=$rc, uboot_a failed (no file), 5 others ok" \
-	bash -c "[ $rc != 0 ] && grep -qx 'FAILED (1 of 6): uboot_a' '$tmp/c3n.log' && [ ! -e '$DUMP_DIR/uboot_a.img' ] && [ \$(wc -l < '$DUMP_DIR/SHA256SUMS') = 5 ]"
+	bash -c "[ $rc != 0 ] && grep -qx 'FAILED (1 of 6): uboot_a' '$tmp/c3n.log' && [ ! -e '$DUMP_DIR/uboot_a.img' ] && [ \$(wc -l < '$(sums_of)') = 5 ]"
 
 # ---- case 4: > 4 GiB partition (6 GiB = 6291456 KiB), end to end ----
 DUMP_DIR=$tmp/b4
@@ -162,7 +163,7 @@ if [[ ${TEST_BIG:-1} != 0 ]]; then
 	SPDHOST_STEP=0xf800 MOCK_ZERO=bigpart run_dump_queue </dev/null >"$tmp/c4d.log" 2>&1; rc=$?
 	want=$(head -c 6442450944 /dev/zero | sha256sum | cut -c1-64)
 	check "6 GiB read (step 0xf800 via SPDHOST_STEP): rc=$rc size+sha256 ok" \
-		bash -c "[ $rc = 0 ] && grep -q '^$want  bigpart.img\$' '$DUMP_DIR/SHA256SUMS'"
+		bash -c "[ $rc = 0 ] && grep -q '^$want  bigpart.img\$' '$(sums_of)'"
 	check "6 GiB read used 64-bit frames past 4 GiB" \
 		bash -c "grep -q '^SEQ 11 len=12 00f8000000000000' '$tmp/mock.seq' && grep -c '^SEQ 11 len=12' '$tmp/mock.seq' | awk '{exit !(\$1 > 100000)}'"
 	rm -f "$DUMP_DIR/bigpart.img"
@@ -179,7 +180,7 @@ spd_all "$tmp/s5" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
 check "one-session all_lite (slot b): 1 spdhost run, rc=$rc" bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/c5.log') = 1 ] && grep -q ' parts .* dump all_lite ' '$tmp/c5.log'"
 check "one-session all_lite == spd_dump r all_lite (slot b)" same_as_spd "$DUMP_DIR" "$tmp/s5"
 check "one-session: table cache refreshed, slot b, SHA256SUMS ok" \
-	bash -c "grep -qx 'boot_b 4096' '$(meta_of partition_list.txt)' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 4 ] && sha256sum -c --quiet SHA256SUMS"
+	bash -c "grep -qx 'boot_b 4096' '$(meta_of partition_list.txt)' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < meta/SHA256SUMS) = 4 ] && sha256sum -c --quiet meta/SHA256SUMS"
 DUMP_DIR=$tmp/b6
 dump_live_session all </dev/null >"$tmp/c6.log" 2>&1; rc=$?
 spd_all "$tmp/s6" all MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
@@ -189,7 +190,7 @@ t=$(live_dump_target boot.img "$tmp/none")
 dump_live_session "$t" </dev/null >"$tmp/c7.log" 2>&1; rc=$?
 "$tmp/gen_expected" boot_b 0 4194304 > "$tmp/boot_b.exp"
 check "one-session single 'boot.img' (no cache) -> boot_b from live slot, rc=$rc" \
-	bash -c "[ $rc = 0 ] && [ '$t' = boot ] && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp' && grep -q ' boot_b.img\$' '$DUMP_DIR/SHA256SUMS' && [ ! -e '$DUMP_DIR/boot_a.img' ]"
+	bash -c "[ $rc = 0 ] && [ '$t' = boot ] && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp' && grep -q ' boot_b.img\$' '$(sums_of)' && [ ! -e '$DUMP_DIR/boot_a.img' ]"
 # cached table said slot a (boot_a) but the live device is slot b: live wins
 t=$(ACTIVE_SLOT=a; live_dump_target boot "$tmp/b1/meta/partition_bytes.txt")
 check "cached match boot_a is passed as 'boot' so the live slot decides ($t)" test "$t" = boot
@@ -200,7 +201,7 @@ check "one-session splloader: 262144 bytes, rc=$rc" bash -c "[ $rc = 0 ] && [ \$
 DUMP_DIR=$tmp/b9; mkdir -p "$DUMP_DIR"; echo stale > "$DUMP_DIR/boot_b.img"
 MOCK_FAIL_MID=boot_b dump_live_session all </dev/null >"$tmp/c9.log" 2>&1; rc=$?
 check "one-session keep-going: rc=$rc, boot_b failed, others verified" \
-	bash -c "[ $rc != 0 ] && grep -qx 'FAILED (1 of 6): boot_b' '$tmp/c9.log' && [ -f '$DUMP_DIR/boot_b.img.partial' ] && [ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && grep -q 'OLDER copy' '$tmp/c9.log' && cd '$DUMP_DIR' && [ \$(wc -l < SHA256SUMS) = 5 ] && sha256sum -c --quiet SHA256SUMS"
+	bash -c "[ $rc != 0 ] && grep -qx 'FAILED (1 of 6): boot_b' '$tmp/c9.log' && [ -f '$DUMP_DIR/boot_b.img.partial' ] && [ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && grep -q 'OLDER copy' '$tmp/c9.log' && cd '$DUMP_DIR' && [ \$(wc -l < meta/SHA256SUMS) = 5 ] && sha256sum -c --quiet meta/SHA256SUMS"
 DUMP_DIR=$tmp/b10
 dump_live_session nosuch </dev/null >"$tmp/c10.log" 2>&1; rc=$?
 check "one-session unknown name: nonzero rc ($rc), reported" bash -c "[ $rc != 0 ] && grep -q 'nosuch(not in live table)' '$tmp/c10.log'"
@@ -226,7 +227,7 @@ MOCK_MISC_OUT=$tmp/g1.misc guarded_misc_session reboot-fastboot reboot-fastboot 
 b=$(ls "$(dump_meta_dir)"/misc-before-*.img "$DUMP_DIR"/misc-before-*.img 2>/dev/null | head -1)
 "$tmp/gen_expected" misc 0 1048576 > "$tmp/misc0.exp"
 check "guarded reboot-fastboot: rc=$rc, backup 1 MiB == old misc, sha recorded, verified" \
-	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -qE ' (meta/)?${b##*/}\$' '$DUMP_DIR/SHA256SUMS' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
+	bash -c "[ $rc = 0 ] && cmp -s '$b' '$tmp/misc0.exp' && grep -qE ' (meta/)?${b##*/}\$' '$(sums_of)' && grep -q 'misc-verify: OK' '$tmp/g1.log' && [ \$(grep -c '^+ ' '$tmp/g1.log') = 1 ]"
 check "guarded: menu command line has --confirm-token=<BCB sha>, no --yes" bash -c "grep '^+ ' '$tmp/g1.log' | grep -q -- '--confirm-token=$(misc_bcb_sha256 reboot-fastboot)' && ! grep '^+ ' '$tmp/g1.log' | grep -q -- '--yes'"
 DUMP_DIR=$tmp/g2
 MISC_CONFIRM_TOKEN=$(misc_bcb_sha256 reboot-recovery)
@@ -237,6 +238,29 @@ DUMP_DIR=$tmp/g3; mkdir -p "$DUMP_DIR"
 MISC_CONFIRM_TOKEN=$(sha256sum "$b" | awk '{print $1}')
 MOCK_MISC_OUT=$tmp/g3.misc guarded_misc_session "restore misc" write-part misc "$b" reset </dev/null >"$tmp/g3.log" 2>&1; rc=$?
 check "guarded restore from backup: rc=$rc, misc == backup" bash -c "[ $rc = 0 ] && cmp -s '$tmp/g3.misc' '$b'"
+
+# ---- SHA256SUMS under meta/ (new) vs dump-root (legacy) ----
+# New dumps already asserted meta/SHA256SUMS above ("SHA256SUMS verifies under
+# meta/"). Flash/restore verify reads the same file via dump_meta_file.
+DUMP_DIR=$tmp/b1
+check "flash verify: dump_meta_file SHA256SUMS prefers meta/" \
+	bash -c "[ \"$(dump_meta_file SHA256SUMS read)\" = '$DUMP_DIR/meta/SHA256SUMS' ] &&
+		cd '$DUMP_DIR' && sha256sum -c --quiet meta/SHA256SUMS"
+# Older dump layout: SHA256SUMS next to the images still verifies, and the
+# first write migrates it into meta/.
+DUMP_DIR=$tmp/legacy_sums
+mkdir -p "$DUMP_DIR"
+printf 'legacy-img\n' > "$DUMP_DIR/boot.img"
+( cd "$DUMP_DIR" && sha256sum boot.img > SHA256SUMS )
+check "legacy: reader falls back to dump-root SHA256SUMS" \
+	bash -c "[ \"$(dump_meta_file SHA256SUMS read)\" = '$DUMP_DIR/SHA256SUMS' ]"
+check "legacy: root SHA256SUMS still verifies" \
+	bash -c "cd '$DUMP_DIR' && sha256sum -c --quiet SHA256SUMS"
+record_sha256 "$DUMP_DIR/boot.img" >/dev/null
+check "legacy: first write migrates SHA256SUMS into meta/" \
+	bash -c "[ -f '$DUMP_DIR/meta/SHA256SUMS' ] && [ ! -e '$DUMP_DIR/SHA256SUMS' ] &&
+		cd '$DUMP_DIR' && sha256sum -c --quiet meta/SHA256SUMS"
+
 
 # nv1: spd_dump reads the nv2 name from offset 512, file keeps the nv1 name.
 # Units stay >= 1024 so the KiB divisor does not change (128 would).

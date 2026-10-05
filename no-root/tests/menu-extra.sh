@@ -166,7 +166,7 @@ check "pack-slot: slot b record at 0x800 (_b, BCAB, version, nb_slot)" \
 check "pack-slot: the input is untouched (same sha256)" \
 	test "$(sha256sum "$misc_in" | awk '{print $1}')" = "$misc_sha"
 check "pack-slot: the output is recorded in SHA256SUMS" \
-	grep -q "misc-full-slotb.img" "$tmp/dump/SHA256SUMS"
+	grep -q "misc-full-slotb.img" "$tmp/dump/meta/SHA256SUMS"
 
 misc_in2=$tmp/dump/misc2.img
 head -c 1048576 /dev/zero >"$misc_in2"
@@ -213,8 +213,9 @@ head -c 100 /dev/zero >"$pd/vendor.img"   # input has the same name, other size 
 printf 'BBBBBBBBBB' >"$pd/dtbo.img"        # input has the same name and size -> left alone
 printf 'AAAAAAAAAA' >"$pi/dtbo.img"
 printf 'KEEP' >"$pi/vendor.img"
-: >"$pd/SHA256SUMS"; : >"$pd/notes.txt"; : >"$pd/partitions.xml"
-: >"$pd/misc-before-1.img"; : >"$pd/uboot_bak.img"; : >"$pd/l_fixnv1.img"
+mkdir -p "$pd/meta"
+: >"$pd/SHA256SUMS"; : >"$pd/meta/SHA256SUMS"; : >"$pd/notes.txt"; : >"$pd/partitions.xml"
+: >"$pd/misc-before-1.img"; : >"$pd/meta/misc-before-2.img"; : >"$pd/uboot_bak.img"; : >"$pd/l_fixnv1.img"
 pd_tr=$tmp/promote-1.pty
 rm -f "$tmp/ran/log"
 python3 "$drive" "$pd_tr" "type yes to copy" 'yes\r' -- \
@@ -227,10 +228,12 @@ check "promote: an existing name with the same size keeps its own bytes" \
 check "promote: an existing name with another size is not overwritten" \
 	test "$(cat "$pi/vendor.img" 2>/dev/null)" = KEEP
 check "promote: SHA256SUMS is not copied" test ! -e "$pi/SHA256SUMS"
+check "promote: meta/SHA256SUMS is not copied (no recurse into meta/)" test ! -e "$pi/SHA256SUMS" -a ! -e "$pi/meta/SHA256SUMS"
 check "promote: *.txt is not copied" test ! -e "$pi/notes.txt"
 check "promote: *.xml is not copied" test ! -e "$pi/partitions.xml"
 check "promote: *_bak is not copied" test ! -e "$pi/uboot_bak.img"
 check "promote: a misc backup image is not copied" test ! -e "$pi/misc-before-1.img"
+check "promote: meta/misc-before-* is not copied" test ! -e "$pi/misc-before-2.img"
 check "promote: says which file it skipped and why" \
 	bash -c '[[ $1 == *"different file of that name"* ]]' _ "$pd_out"
 check "promote: points at the flash menu afterwards" \

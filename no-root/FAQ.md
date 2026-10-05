@@ -58,7 +58,7 @@ Run `uname -m`. `aarch64` means arm64, and `armv7l` or `armv8l` means arm32.
 Pick your **chip first** (menu option 3, or the first-run wizard). Then use your brand's folder under `fdl/<chip>/` (for example `fdl/ums9230/infinix` or `fdl/sc9863a/...`). If your model has its own `alternatif/<model>` folder, use that. `universal` exists **only for ums9230** as a fallback for that chip — do not use a ums9230 loader on sc9863a or ums512.
 
 ### Where do dumps go?
-The menu prints the folder after each dump. Every dump comes with a `SHA256SUMS` file so you can check it.
+The menu prints the folder after each dump. Every dump comes with a `meta/SHA256SUMS` file so you can check it.
 
 
 ### A cable blip mid-dump or mid-flash aborted the transfer. Will it resume?
@@ -89,7 +89,7 @@ It does the same job and uses the same command logic, rewritten for non-root Ter
 
 
 ### Where do dump files go?
-Partition images (`NAME.img`) and `SHA256SUMS` stay in the dump folder. Side files — the parts table (`partition_list.txt`), `dump-manifest.txt`, `partition_*.xml`, `misc-slotinfo.img`, and `*-before-*.img` backups — go under `meta/` inside that folder. Older dumps that still have those files at the top of the dump folder keep working.
+Partition images (`NAME.img`) stay alone in the dump folder. Everything else — `SHA256SUMS`, the parts table (`partition_list.txt`), `dump-manifest.txt`, `partition_*.xml`, `misc-slotinfo.img`, and `*-before-*.img` backups — goes under `meta/` inside that folder. Older dumps that still have those files at the top of the dump folder keep working.
 
 ### Where do I report bugs?
 Open an [issue](https://github.com/Seuj09/Spd_dump_termux/issues) with your host phone, target model, FDL folder and the full output.
