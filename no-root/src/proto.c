@@ -1513,6 +1513,19 @@ uint64_t spd_check_partition(struct spd *io, const char *name, int need_size, in
 		if (io->verbose)
 			fprintf(stderr, "Storage is nand\n");
 	}
+	/* N2: this binary search starts at 2 MiB (i=21, end=20 or 10) and only
+	 * shrinks from there, so any answer under 2 MiB is not a real size -- it
+	 * is what the search returns for a sub-MiB row (often ~1 MiB / 0xffc00).
+	 * Trusting it made dump_one over-read (or record an over-long image as
+	 * ok). Treat it as "not sized". The A/B part_size_from_device path above
+	 * returns early with accurate small sizes and is unchanged. */
+	if (offset > 0 && offset < (2ull << 20)) {
+		fprintf(stderr, "partition_size_pc: %s, 0x%llx (under 2 MiB; binary search"
+			" cannot size this row; treating as not sized)\n",
+			name, (unsigned long long)offset);
+		read_end(io);
+		return 0;
+	}
 	fprintf(stderr, "partition_size_pc: %s, 0x%llx\n", name, (unsigned long long)offset);
 	read_end(io);
 	return offset;

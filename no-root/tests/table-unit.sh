@@ -125,5 +125,28 @@ fetch_parts_table </dev/null >"$tmp/k1.log" 2>&1
 check "KiB: header shift 10 verified 1, boot_a 4 MiB" \
 	bash -c "grep -qx '# spdhost-parts shift 10 verified 1' '$DUMP_DIR/partition_list.txt' && [ '$(bytes_of boot_a)' = 4194304 ]"
 
+
+# ---- N2: probe under 2 MiB is not sized (sub-MiB row on an unverified table) ----
+# A KiB table with a 512 KiB sml: the sub-MiB row drops the divisor, MOCK_NOPROBE
+# on the first large row keeps the unit unverified. check_partition used to return
+# ~1 MiB for sml; dump trusted it and over-read. Now a probe under 2 MiB is
+# "not sized" -> unverified at the table size (no trust of the bad probe).
+printf '%s\n' 'prodnv 5120' 'miscdata 1024' 'misc 1024' 'sml 512' 'uboot 1024' 'boot 4096' > "$tmp/pt_n2"
+DUMP_DIR=$tmp/n2
+export MOCK_PTABLE=$tmp/pt_n2 MOCK_NOPROBE=prodnv
+unset MOCK_SLOT MOCK_PTABLE_MIB MOCK_GPT
+fetch_parts_table </dev/null >"$tmp/n2f.log" 2>&1
+check "N2: header verified 0 (sub-MiB row + failed large-row probe)" \
+	grep -qE '^# spdhost-parts shift [0-9]+ verified 0$' "$DUMP_DIR/partition_list.txt"
+dump_live_session sml </dev/null >"$tmp/n2d.log" 2>&1; rc=$?
+check "N2: sml probe under 2 MiB is treated as not sized (no trust of ~1 MiB)" \
+	bash -c "grep -qE 'partition_size_pc: sml, 0x[0-9a-f]+ \(under 2 MiB' '$tmp/n2d.log' ||
+		grep -q 'table unit unverified and the device did not size' '$tmp/n2d.log'"
+check "N2: sml does not trust the ~1 MiB probe (no 'using the device' size; did-not-size path)" \
+	bash -c "! grep -qE 'dump: sml: table unit unverified; using the device.s' '$tmp/n2d.log' &&
+		grep -q 'dump: sml: table unit unverified and the device did not size' '$tmp/n2d.log' &&
+		! grep -qE '^start sml 1047552 ' '$DUMP_DIR/dump-manifest.txt'"
+unset MOCK_NOPROBE MOCK_PTABLE
+
 echo "table-unit: $pass passed, $fail failed"
 (( fail == 0 ))
