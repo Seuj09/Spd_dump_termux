@@ -233,14 +233,23 @@ check "manual [Enter]: the saved config is untouched (SOC '$saved')" test "$save
 saved=$(sed -n 's/^FDL1_ADDR=//p' "$tmp/ums.conf")
 check "manual [Enter]: the saved FDL1 address is untouched (got '$saved')" test "$saved" = 0x65000800
 
-# [4] is the explicit "another chip, no stub" answer: chip unset, stub 0.
+# B2-6.1: [4] with loaders under fdl/<chip>/ is refused (path names a chip).
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 4 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
-check "manual [4]: no chip, no exec stub" has "$out" "RESULT SOC= EXEC_ADDR=0"
+check "manual [4]+fdl/chip path: refused, nothing saved" \
+	bash -c '[[ $1 == *"Refusing:"* && $1 == *"Nothing saved"* ]]' _ "$out"
 saved=$(sed -n 's/^EXEC_ADDR=//p' "$tmp/ums.conf")
-check "manual [4]: EXEC_ADDR=0 is saved (got '$saved')" test "$saved" = 0
+check "manual [4]+fdl/chip path: saved EXEC_ADDR untouched (got '$saved')" test "$saved" = 0x65015f08
+# [4] with plain paths (not under fdl/<chip>/) still saves "no stub".
+mkdir -p "$tmp/plain"
+cp "$SC1" "$tmp/plain/fdl1.bin"; cp "$SC2" "$tmp/plain/fdl2.bin"
+out=$(printf '%s\n' "$tmp/plain/fdl1.bin" 0x5000 "$tmp/plain/fdl2.bin" 0x9efffe00 4 |
+	menu_run "$tmp/ums.conf" manual_probe 2>&1)
+check "manual [4] plain paths: no chip, no exec stub" has "$out" "RESULT SOC= EXEC_ADDR=0"
+saved=$(sed -n 's/^EXEC_ADDR=//p' "$tmp/ums.conf")
+check "manual [4] plain paths: EXEC_ADDR=0 is saved (got '$saved')" test "$saved" = 0
 menu_run "$tmp/ums.conf" need_loaders >/dev/null 2>&1
-check "manual [4]: reload is usable, not refused" test $? = 0
+check "manual [4] plain paths: reload is usable, not refused" test $? = 0
 
 # Choosing a chip explicitly still pins that chip's addresses.
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 2 |
@@ -260,16 +269,16 @@ check "manual [3]: an FDL1 address that is not the picked chip's is refused" \
 check "manual [3]: nothing saved for the refused mix" lacks "$out" "RESULT SOC=ums512"
 out=$(printf '%s\n' "$SC1" 0x5500 "$SC2" 0x9efffe00 3 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
-check "manual [3]: a path/chip disagreement still warns" has "$out" "the loaders are sc9863a's but you picked ums512"
-check "manual [3]: the picked chip's addresses are written" \
-	has "$out" "RESULT SOC=ums512 EXEC_ADDR=0x3ee8"
+check "manual [3]: a path/chip disagreement is refused (B2-6.1)" \
+	bash -c '[[ $1 == *"Refusing: the loaders are sc9863a"*"but you picked ums512"* && $1 == *"Nothing saved"* ]]' _ "$out"
+check "manual [3]: nothing saved for the path/chip mix" lacks "$out" "Saved "
 
 # G9: FDL2's address is checked too, not only FDL1's.
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9f000000 2 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
 check "manual [2] (G9): an FDL2 address that is not the chip's is refused" \
 	has "$out" "Refusing: FDL2 address 0x9f000000 does not go with that chip (its FDL2 loads at 0x9efffe00)"
-check "manual [2] (G9): nothing saved for it" lacks "$out" "RESULT SOC=sc9863a"
+check "manual [2] (G9): nothing saved for it" lacks "$out" "Saved "
 out=$(printf '%s\n' "$tmp/plain/fdl1.bin" 0x65000800 "$tmp/plain/fdl2.bin" 0x9f000000 4 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
 check "manual [4] (G9): an unusual FDL2 address is saved with a warning" \

@@ -724,7 +724,7 @@ setup_wizard() {
 			fi
 			;;
 		2) select_shipped_model "$soc" ;;
-		3) configure_loaders_manual ;;
+		3) configure_loaders_manual "$soc" ;;
 		0) echo "Skipped. Menu [3] sets the loaders later." ;;
 		'') echo "Nothing picked; nothing loaded. Menu [3] sets the loaders later." ;;
 		*) echo "Not a choice. Skipped; menu [3] sets the loaders later." ;;
@@ -766,7 +766,10 @@ ask_file() {
 }
 
 configure_loaders_manual() {
-	local choice ea nf1 na1 nf2 na2 ps1 ps2 cur who
+	# N8 / B2-6.6: optional $1 is a chip already picked by the wizard (ums9230 /
+	# sc9863a / ums512). When set, skip the chip question so the wizard's answer
+	# is not discarded / asked twice.
+	local preset=${1:-} choice ea nf1 na1 nf2 na2 ps1 ps2 cur who
 	echo "Loader files and load addresses for this chip."
 	echo "These are the same FDL1/FDL2 pair the rooted menu uses. A wrong address can brick the phone."
 	# Collect into locals and commit only once all four answers are in: an
@@ -776,24 +779,28 @@ configure_loaders_manual() {
 	na1=$(ask_addr "FDL1 address:") || return 1
 	nf2=$(ask_file "FDL2 file:") || return 1
 	na2=$(ask_addr "FDL2 address:") || return 1
-	# L6: the chip question is mandatory. It used to default (Enter) to
-	# "keep whatever stub is set", which with no chip saved meant the ums9230
-	# stub 0x65015f08 -- sent before FDL1 on any chip. Now every answer names
-	# a chip, or says outright that there is no stub.
-	echo "Which chip are these loaders for? This picks the exec stub."
-	echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
-	echo "[1] ums9230 (FDL1 0x65000800)   [2] sc9863a (FDL1 0x5000)   [3] ums512 (FDL1 0x5500)"
-	echo "[4] another chip: no exec stub (plain BSL EXEC)"
-	while true; do
-		if ! read -r -p "Choice (required): " choice; then
-			echo "Cancelled (no input); nothing saved." >&2
-			return 1
-		fi
-		case $choice in
-			1|2|3|4) break ;;
-			*) echo "Pick 1, 2, 3 or 4." >&2 ;;
-		esac
-	done
+	case $preset in
+		ums9230) choice=1 ;;
+		sc9863a) choice=2 ;;
+		ums512) choice=3 ;;
+		*)
+			# L6: the chip question is mandatory when the wizard did not pass one.
+			echo "Which chip are these loaders for? This picks the exec stub."
+			echo "A stub from the wrong chip is sent before FDL1 and can brick the phone."
+			echo "[1] ums9230 (FDL1 0x65000800)   [2] sc9863a (FDL1 0x5000)   [3] ums512 (FDL1 0x5500)"
+			echo "[4] another chip: no exec stub (plain BSL EXEC)"
+			while true; do
+				if ! read -r -p "Choice (required): " choice; then
+					echo "Cancelled (no input); nothing saved." >&2
+					return 1
+				fi
+				case $choice in
+					1|2|3|4) break ;;
+					*) echo "Pick 1, 2, 3 or 4." >&2 ;;
+				esac
+			done
+			;;
+	esac
 	case $choice in
 		1) soc_profile ums9230 ;;
 		2) soc_profile sc9863a ;;
@@ -829,21 +836,31 @@ configure_loaders_manual() {
 		4) SOC=""; EXEC_ADDR=0 ;;
 	esac
 	ea=$(exec_addr_value || true)
-	# Last chance to notice a mix, before it is written to the config and used.
-	# Both the path and the exec stub can name a chip; nothing here is refused
-	# (the user typed these values), so it is said out loud instead.
+	# B2-6.1: same chip checks as config_chip_check, but refuse and save nothing
+	# in THIS session (previously only warned; next launch refused).
 	ps1=$(path_soc "$nf1")
 	ps2=$(path_soc "$nf2")
 	if [[ -n $ps1 && -n $ps2 && $ps1 != "$ps2" ]]; then
-		echo "warning: $nf1 is ${ps1}'s and $nf2 is ${ps2}'s." >&2
+		echo "Refusing: $nf1 is ${ps1}'s and $nf2 is ${ps2}'s — not a pair." >&2
+		echo "Nothing saved." >&2
+		return 1
 	fi
 	ps1=${ps1:-$ps2}
 	who=$(exec_soc_name "$ea")
 	if [[ -n $ps1 && -n $SOC && $SOC != "$ps1" ]]; then
-		echo "warning: the loaders are ${ps1}'s but you picked $SOC." >&2
+		echo "Refusing: the loaders are ${ps1}'s but you picked $SOC." >&2
+		echo "Nothing saved." >&2
+		return 1
+	fi
+	if [[ $choice == 4 && -n $ps1 ]]; then
+		echo "Refusing: loaders under fdl/${ps1}/ but you picked 'another chip' (no stub)." >&2
+		echo "Nothing saved. Pick that chip, or use loaders that are not under fdl/<chip>/." >&2
+		return 1
 	fi
 	if [[ -n $ps1 && -n $who && $who != "$ps1" ]]; then
-		echo "warning: exec_addr ${ea} is ${who}'s stub but the loaders are ${ps1}'s." >&2
+		echo "Refusing: exec_addr ${ea} is ${who}'s stub but the loaders are ${ps1}'s." >&2
+		echo "Nothing saved." >&2
+		return 1
 	fi
 	CONFIG_CHIP_ERROR=""
 	save_config
@@ -1660,6 +1677,8 @@ record_sha256() {
 # Run one session reading every queued (name, bytes, out) with --keep-going,
 # then verify each file is exactly the expected size. Good files get a
 # SHA256SUMS line; short ones become OUT.partial. Returns nonzero on any failure.
+# B1-5: dead code — live dumps go through `parts … dump`. Kept only so an old
+# external caller that still fills DQ_* does not break; no menu path calls it.
 DQ_NAMES=()
 DQ_SIZES=()
 DQ_OUTS=()
@@ -1742,11 +1761,24 @@ verify_dump_manifest() {
 		file="$DUMP_DIR/$file"
 		sz=$(stat -c %s "$file" 2>/dev/null || echo -1)
 		if [[ -n ${unver[$name]:-} ]]; then
-			# G1: read at a size from a guessed table unit the device would
-			# not confirm. The file is kept, but it is not called a backup.
+			# G1/N4: read at a size from a guessed table unit. File is
+			# NAME.img.unverified (does not replace a verified NAME.img).
+			# Drop any stale SHA256SUMS line for NAME.img.
 			failed+=("$name(size unverified)")
+			local uv=${file}.unverified
+			[[ -f $uv ]] && file=$uv
+			sz=$(stat -c %s "$file" 2>/dev/null || echo -1)
 			echo "UNVERIFIED $name: $sz bytes at a guessed table unit; the device would not size it."
-			echo "     $file is kept but NOT recorded in SHA256SUMS; it may be truncated."
+			echo "     kept as ${file##*/}; NOT recorded in SHA256SUMS; may be truncated."
+			if [[ -f $DUMP_DIR/SHA256SUMS ]]; then
+				local sums=$DUMP_DIR/SHA256SUMS key=${name}.img tmp
+				tmp=$(mktemp "$sums.XXXXXX") || true
+				if [[ -n $tmp ]] && awk -v k="$key" '{ n=$0; sub(/^[0-9a-f]+  /,"",n); if (n != k) print }' "$sums" > "$tmp"; then
+					mv "$tmp" "$sums"
+				else
+					rm -f "$tmp"
+				fi
+			fi
 			continue
 		fi
 		if [[ -n ${okset[$name]:-} ]] && (( sz == bytes )); then
@@ -2728,7 +2760,7 @@ part_image_candidate() {
 	local base=$1 name
 	[[ $base == .* || -z $base ]] && return 1
 	case $base in
-		*.xml|*.exe|*.txt|*.partial|*.tmp|SHA256SUMS) return 1 ;;
+		*.xml|*.exe|*.txt|*.partial|*.tmp|*.unverified|SHA256SUMS) return 1 ;;
 		pgpt*|sprdpart*|fdl*|lk*|0x*|custom_exec*) return 1 ;;
 	esac
 	name=${base%.*}
@@ -3392,7 +3424,7 @@ unlock_make_spl_unlock() {
 		return 1
 	fi
 	echo "note: using the release's gen_spl-unlock (x86-64). It is given a copy,"
-	echo "      because it deletes the file it patches."
+	echo "      because it deletes the file it patches. This path is PC-only."
 	cp -f "$spl" "$work/splloader.bin"
 	if ! ( cd "$work" && "$bin" splloader.bin ); then
 		echo "gen_spl-unlock failed. splloader was not erased."
@@ -3401,6 +3433,17 @@ unlock_make_spl_unlock() {
 	if [[ ! -s $out ]]; then
 		echo "gen_spl-unlock did not write spl-unlock.bin. splloader was not erased."
 		return 1
+	fi
+	# N7/G5: if the tool left an identical copy, no pattern matched.
+	if cmp -s "$spl" "$out"; then
+		if [[ ${SPDHOST_UNLOCK_FORCE_UNPATCHED:-} == 1 ]]; then
+			echo "WARNING: SPDHOST_UNLOCK_FORCE_UNPATCHED=1: gen_spl-unlock left the SPL unchanged."
+		else
+			rm -f "$out"
+			echo "gen_spl-unlock left spl-unlock.bin identical to the stock SPL (no pattern matched)."
+			echo "Stopping here: splloader was not erased. (Experts: SPDHOST_UNLOCK_FORCE_UNPATCHED=1.)"
+			return 1
+		fi
 	fi
 	return 0
 }
@@ -3422,6 +3465,12 @@ unlock_bootloader_menu() {
 	fi
 	cboot=$(find_model_file fdl2-cboot.bin || true)
 	unlock=$(find_model_file spl-unlock.bin || true)
+	if [[ -n $unlock ]]; then
+		# N7: a pre-shipped spl-unlock.bin cannot be checked for applied patterns
+		# here (G5 only covers the built-in / gen_spl-unlock builders).
+		echo "note: using shipped $unlock — G5 cannot verify that a signature"
+		echo "pattern was applied. Prefer building from the dump when possible."
+	fi
 	if [[ -z $unlock ]]; then
 		if spdhost_has_image_tools; then
 			can_gen=1
@@ -3849,8 +3898,18 @@ frp_reset_menu() {
 	fi
 	need_loaders || return 1
 	mkdir -p "$DUMP_DIR"
-	out=$(dump_meta_dir)/frp-before-$(date +%Y%m%d-%H%M%S).img
-	echo "Backup: $out"
+	# N3: name the backup after the partition that will be erased (persist when
+	# both frp and persist exist, unless SPDHOST_FRP_PART overrides).
+	local frp_name=persist bytes
+	bytes=$(parts_bytes_path 2>/dev/null) || bytes=
+	if [[ -n ${SPDHOST_FRP_PART:-} ]]; then
+		frp_name=$SPDHOST_FRP_PART
+	elif [[ -s ${bytes:-} ]] && grep -qE '^frp(_[ab])?[[:space:]]' "$bytes" &&
+	     ! grep -qE '^persist(_[ab])?[[:space:]]' "$bytes"; then
+		frp_name=frp
+	fi
+	out=$(dump_meta_dir)/${frp_name}-before-$(date +%Y%m%d-%H%M%S).img
+	echo "Backup: $out (partition $frp_name)"
 	echo "spdhost asks for the word dangerous again before the read."
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
@@ -3993,6 +4052,14 @@ pack_slot_action() {
 		y|Y|yes) ;;
 		*) echo "Not written. The file stays at $out."; return 0 ;;
 	esac
+	# B2-5.1: same A/B guard as set-active. Writing a slot block into misc on a
+	# non-A/B phone only corrupts the vendor area at misc+0x800.
+	if ! load_parts_state || ! grep -qE '^uboot_a[[:space:]]' "$(parts_bytes_path)" ||
+	   ! grep -qE '^uboot_b[[:space:]]' "$(parts_bytes_path)"; then
+		echo "Refusing: this phone is not A/B (no uboot_a/uboot_b in the table)." >&2
+		echo "The file stays at $out. Use [10] -> [2] Set active slot on an A/B phone." >&2
+		return 1
+	fi
 	need_loaders || return 1
 	if [[ ! -t 0 ]]; then
 		echo "refusing to write misc without a TTY (no silent --yes)" >&2
@@ -4088,13 +4155,24 @@ pac_extract_action() {
 	esac
 	read -r -p "Output folder [$INPUT_DIR/extract]: " dir
 	dir=${dir:-$INPUT_DIR/extract}
-	mkdir -p "$dir" || { echo "Cannot create $dir." >&2; return 1; }
+	# B1-6: extract into a staging dir, then rename. A failure must not leave
+	# $dir as a mix of old+new images a later flash could write.
+	local stage
+	stage=$(mktemp -d "$(spd_tmpdir 2>/dev/null || echo /tmp)/spdhost-pac.XXXXXX") || {
+		echo "Cannot create a staging folder." >&2; return 1
+	}
 	# shellcheck disable=SC2086 -- the word split IS the entry list.
-	if "$bin" unpac -d "$dir" extract "$pac" $pick; then
+	if "$bin" unpac -d "$stage" extract "$pac" $pick; then
+		rm -rf "$dir"
+		if ! mv "$stage" "$dir"; then
+			echo "Extracted, but could not move $stage to $dir." >&2
+			return 1
+		fi
 		echo "Extracted into $dir"
 		echo "Flash one from menu [6], or move it into $INPUT_DIR."
 	else
-		echo "unpac extract failed; $dir may hold a partial set." >&2
+		rm -rf "$stage"
+		echo "unpac extract failed; $dir was left unchanged (no partial mix)." >&2
 		return 1
 	fi
 }
