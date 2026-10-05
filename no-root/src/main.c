@@ -1185,17 +1185,29 @@ static int same_file_size(const char *path, uint64_t expect)
 	return (uint64_t)n == expect ? 0 : -1;
 }
 
-/* G10: the partition that holds FRP. Phones whose table has a separate `frp`
- * row (or frp_a/frp_b) keep the FRP block there, and their persist holds other
- * things (DRM keys, calibration): erasing persist there removes those and
- * leaves FRP in place. So `frp` wins when the table has it; persist is the
- * answer only when it does not. */
+/* G10/N3: the partition that holds FRP. When the table has both `frp` and
+ * `persist`, prefer SPDHOST_FRP_PART (from ro.frp.pst when the user sets it),
+ * else prefer persist (Unisoc sample pst=persist). A table with only one of
+ * the two still uses that one. */
 static const char *frp_base(struct spd *io)
 {
 	char r[40];
-	uint64_t sz = 0;
-	if (io && io->nparts > 0 &&
-	    spd_lookup_part(io, "frp", spd_active_slot(io), r, sizeof(r), &sz) == 0 && sz)
+	uint64_t sz_frp = 0, sz_per = 0;
+	int have_frp = 0, have_per = 0;
+	const char *env;
+	if (!io || io->nparts <= 0)
+		return "persist";
+	have_frp = spd_lookup_part(io, "frp", spd_active_slot(io), r, sizeof(r), &sz_frp) == 0 && sz_frp;
+	have_per = spd_lookup_part(io, "persist", spd_active_slot(io), r, sizeof(r), &sz_per) == 0 && sz_per;
+	env = getenv("SPDHOST_FRP_PART");
+	if (env && env[0]) {
+		if (!strcmp(env, "frp") || !strcmp(env, "persist"))
+			return env;
+		fprintf(stderr, "frp-reset: ignoring SPDHOST_FRP_PART=%s (use frp or persist)\n", env);
+	}
+	if (have_frp && have_per)
+		return "persist"; /* N3: Unisoc sample has ro.frp.pst=persist */
+	if (have_frp)
 		return "frp";
 	return "persist";
 }
@@ -1228,6 +1240,8 @@ static int frp_reset(struct spd *io, const char *out)
 	 * has device-confirmed sizes already. */
 	if (!spd_ptab_sizes_verified(io)) {
 		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
+		if (probed && probed < (2ull << 20))
+			probed = 0; /* N2 */
 		if (!probed) {
 			fprintf(stderr, "frp-reset: table unit unverified and the device gave no size for %s;"
 				" nothing erased\n", resolved);

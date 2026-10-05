@@ -69,6 +69,8 @@ static int junk_file(const char *raw, const char *name)
 		return 1;
 	if (n >= 8 && !strcmp(raw + n - 8, ".partial"))
 		return 1;
+	if (n >= 11 && !strcmp(raw + n - 11, ".unverified"))
+		return 1;
 	if (n >= 4 && !strcmp(raw + n - 4, ".tmp"))
 		return 1;
 	/* strncmp, not memcmp: a short name must not be read past its terminator. */
@@ -871,6 +873,8 @@ static int verity_one(struct spd *io, const char *name, int slot, uint8_t val, i
 	 * has device-confirmed sizes already. */
 	if (!spd_ptab_sizes_verified(io)) {
 		uint64_t probed = spd_check_partition(io, resolved, 1, 0);
+		if (probed && probed < (2ull << 20))
+			probed = 0; /* N2 */
 		if (!probed) {
 			fprintf(stderr, "verity: table unit unverified and the device gave no size for %s;"
 				" not written\n", resolved);

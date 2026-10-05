@@ -97,7 +97,8 @@ check "unverified: dump boot sizes boot_a by the device: 64 MiB, ok (rc $rc)" \
 		grep -q \"using the device's 67108864 bytes (table says 33554432)\" '$tmp/u2d.log'"
 dump_live_session prodnv </dev/null >"$tmp/u2p.log" 2>&1; rc=$?
 check "unverified: a row the device will not size is UNVERIFIED, not ok, not in SHA256SUMS (rc $rc)" \
-	bash -c "[ $rc != 0 ] && grep -q 'UNVERIFIED prodnv' '$tmp/u2p.log' && [ -f '$DUMP_DIR/prodnv.img' ] &&
+	bash -c "[ $rc != 0 ] && grep -q 'UNVERIFIED prodnv' '$tmp/u2p.log' &&
+		{ [ -f '$DUMP_DIR/prodnv.img.unverified' ] || [ -f '$DUMP_DIR/prodnv.img' ]; } &&
 		! grep -q ' prodnv.img\$' '$DUMP_DIR/SHA256SUMS' && grep -qx 'unverified prodnv' '$(meta_of dump-manifest.txt)'"
 unset MOCK_NOPROBE MOCK_PTABLE_MIB
 
@@ -141,7 +142,7 @@ check "N2: header verified 0 (sub-MiB row + failed large-row probe)" \
 	grep -qE '^# spdhost-parts shift [0-9]+ verified 0$' "$(meta_of partition_list.txt)"
 dump_live_session sml </dev/null >"$tmp/n2d.log" 2>&1; rc=$?
 check "N2: sml probe under 2 MiB is treated as not sized (no trust of ~1 MiB)" \
-	bash -c "grep -qE 'partition_size_pc: sml, 0x[0-9a-f]+ \(under 2 MiB' '$tmp/n2d.log' ||
+	bash -c "grep -qE 'dump: sml: probe 0x[0-9a-f]+ under 2 MiB is not a reliable' '$tmp/n2d.log' ||
 		grep -q 'table unit unverified and the device did not size' '$tmp/n2d.log'"
 check "N2: sml does not trust the ~1 MiB probe (no 'using the device' size; did-not-size path)" \
 	bash -c "! grep -qE 'dump: sml: table unit unverified; using the device.s' '$tmp/n2d.log' &&

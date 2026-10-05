@@ -135,7 +135,9 @@ int spd_pack_slot_file(char which, const char *in_path, const char *out_path)
 		return -1;
 	}
 	fclose(fi);
-	if (spd_fill_slot_abc(abc, which)) {
+	/* B2-5.1: keep the other slot's tries/priority from the input's existing
+	 * block (same as set-active), instead of a fresh spd_fill_slot_abc. */
+	if (spd_slot_abc_switch(abc, buf + 0x800, which, 0) < 0) {
 		free(buf);
 		return -1;
 	}
@@ -409,6 +411,15 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 	 * flagged `unverified` in the manifest, so the menu does not call it ok. */
 	if (!spd_ptab_sizes_verified(io) && strncmp(name, "splloader", 9)) {
 		uint64_t probed = spd_check_partition(io, name, 1, slot);
+		/* N2: the binary search starts at 2 MiB and returns ~1 MiB for any
+		 * sub-MiB row. Do not trust an answer under 2 MiB as a dump size
+		 * (L1 correction still uses the raw probe). */
+		if (probed && probed < (2ull << 20)) {
+			fprintf(stderr, "dump: %s: probe 0x%llx under 2 MiB is not a reliable"
+				" size (binary search); treating as not sized\n",
+				name, (unsigned long long)probed);
+			probed = 0;
+		}
 		if (probed) {
 			if (probed != size)
 				fprintf(stderr, "dump: %s: table unit unverified; using the device's"
@@ -435,14 +446,23 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 		fflush(manifest);
 	}
 	unlink(part);
-	/* Read into NAME.img.tmp; only a complete read replaces NAME.img. A
-	 * failed one is left as NAME.img.partial (an older NAME.img stays). */
+	/* Read into NAME.img.tmp; only a complete verified read replaces NAME.img.
+	 * N4: an unverified read goes to NAME.img.unverified so it does not replace
+	 * an older verified NAME.img (and the menu drops any stale SHA256SUMS line).
+	 * A failed one is left as NAME.img.partial (an older NAME.img stays). */
 	if (spd_read_part(io, read_name, off, n, tmp) == 0) {
-		if (rename(tmp, out) == 0) {
+		const char *dest = out;
+		char uv[1100];
+		if (unverified) {
+			snprintf(uv, sizeof(uv), "%s.unverified", out);
+			dest = uv;
+		}
+		if (rename(tmp, dest) == 0) {
 			if (manifest) {
 				if (unverified)
 					fprintf(manifest, "unverified %s\n", name);
-				fprintf(manifest, "ok %s\n", name);
+				else
+					fprintf(manifest, "ok %s\n", name);
 				fflush(manifest);
 			}
 			return 0;
@@ -765,7 +785,20 @@ static uint64_t guard_len;
 uint64_t spd_misc_size(struct spd *io)
 {
 	int i = find_part(io, "misc");
-	return i >= 0 && io->ptab[i].size ? io->ptab[i].size : MISC_SLOT_BYTES;
+	uint64_t table = i >= 0 && io->ptab[i].size ? io->ptab[i].size : MISC_SLOT_BYTES;
+	/* N5: on an unverified table the row alone may be a 2 MiB guess that fails
+	 * the read. Probe (answers under 2 MiB are "not sized" per N2); fall back
+	 * to the safe 1 MiB slot size when the probe does not answer. */
+	if (io && !spd_ptab_sizes_verified(io) && i >= 0) {
+		uint64_t probed = spd_check_partition(io, "misc", 1, 0);
+		if (probed)
+			return probed;
+		fprintf(stderr, "misc: table unit unverified and the device did not size"
+			" it; using %u bytes (not the table's %llu)\n",
+			MISC_SLOT_BYTES, (unsigned long long)table);
+		return MISC_SLOT_BYTES;
+	}
+	return table;
 }
 
 /* misc-backup OUT: read the whole misc partition (size from the live table,
