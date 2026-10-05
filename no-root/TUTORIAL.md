@@ -28,21 +28,32 @@ Without these, the USB permission prompt and device handoff can fail or get kill
 
 Check your Termux architecture with `uname -m`.
 
-**64-bit** (`aarch64`):
+Use the **latest pre-release of the `experiment/brom-hello-diagnostics` branch**
+(or the tip SHA after a release is cut from it). Do **not** install the older
+`spdhost-exp-audit-f616c0f` zip: that build still has the G3/G4/H2 bugs this
+tutorial describes as fixed.
+
+**64-bit** (`aarch64`) — replace `TAG` with the current release tag (or tip SHA):
 
 ```sh
-curl -LO https://github.com/Seuj09/Spd_dump_termux/releases/download/spdhost-exp-audit-f616c0f/spdhost-arm64-static-f616c0f.zip
-unzip -o spdhost-arm64-static-f616c0f.zip -d ~ && cd ~/spdhost-arm64
+# After a release is published from this branch, TAG looks like spdhost-exp-audit-<sha>
+TAG=spdhost-exp-audit-PLACEHOLDER
+curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/spdhost-arm64-static-${TAG#spdhost-exp-audit-}.zip"
+unzip -o "spdhost-arm64-static-${TAG#spdhost-exp-audit-}.zip" -d ~ && cd ~/spdhost-arm64
 ```
 
 **32-bit** (`armv7l` or `armv8l`):
 
 ```sh
-curl -LO https://github.com/Seuj09/Spd_dump_termux/releases/download/spdhost-exp-audit-f616c0f/spdhost-arm32-static-f616c0f.zip
-unzip -o spdhost-arm32-static-f616c0f.zip -d ~ && cd ~/spdhost-arm32
+TAG=spdhost-exp-audit-PLACEHOLDER
+curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/spdhost-arm32-static-${TAG#spdhost-exp-audit-}.zip"
+unzip -o "spdhost-arm32-static-${TAG#spdhost-exp-audit-}.zip" -d ~ && cd ~/spdhost-arm32
 ```
 
-Newer builds are on the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases).
+Or open the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases),
+pick the newest pre-release whose notes mention `experiment/brom-hello-diagnostics`,
+and download the arm64/arm32 zip for that tag. Building from source (`make -C no-root`)
+on the tip of that branch is also fine.
 
 ## 3. Start the menu
 
