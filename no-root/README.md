@@ -544,6 +544,62 @@ zero size is skipped, and an output name containing `/`, `\` or `:` is
 refused rather than written. `spdhost unpac -d DIR extract FILE.pac '*'`
 extracts everything.
 
+### spdhost caps
+
+`spdhost caps` says what this build can do, for a caller (the menu, and later
+the app) that should not guess from usage text. It opens no USB, needs no
+device, reads and writes no files, and ignores the device options and
+`TERMUX_USB_FD`. Output goes to stdout, exit status 0:
+
+```
+caps_format=1
+build_sha=0123456789abcdef0123456789abcdef01234567
+protocol=1
+cap=confirm-token
+cap=dry-run
+cap=frp-part
+cap=image-tools
+cap=misc-bytes
+cap=pack-slot
+cap=parts-header
+cap=status-file
+cap=unpac
+cap=usb-fd
+end
+```
+
+- **Format 1:** `key=value` lines and a final `end`. Line 1 is always
+  `caps_format=1`; a reader checks it, ignores keys and caps it does not know,
+  and treats output that does not end with `end` (or a non-zero exit) as no
+  caps. `caps_format` changes only if this layout changes.
+- **`build_sha`:** the full commit the binary was built from (`make` and the
+  cross build stamp it), or `unknown` for a build outside git.
+- **`protocol`:** the caller-interface version (commands, their arguments and
+  exit codes, `SPDHOST_STATUS_FILE` keys). It goes up only when something
+  existing changes incompatibly; a new feature adds a cap instead.
+- **`cap=`:** one line per feature this build has, sorted. A name is never
+  reused for something else:
+
+| cap | meaning |
+|---|---|
+| `confirm-token` | `--confirm-token SHA256` authorises one misc write / set-active |
+| `dry-run` | `--dry-run`: no USB, one `DRY` line per packet on stdout |
+| `frp-part` | `frp-reset` refuses a table with both `frp` and `persist` unless `SPDHOST_FRP_PART` names one |
+| `image-tools` | `gen-spl-unlock`, `gen-spl-unlock-legacy`, `gen-fdl1-dl`, `chsize` |
+| `misc-bytes` | the status file gets `misc-bytes=N` after `misc-backup[-expect]` |
+| `pack-slot` | `pack-slot a\|b IN OUT` |
+| `parts-header` | `parts FILE` starts with `# spdhost-parts shift S verified V` |
+| `status-file` | `SPDHOST_STATUS_FILE` gets one `key=value` line per result |
+| `unpac` | `unpac {list\|check\|extract} FILE.pac` |
+| `usb-fd` | `--usb-fd N` / `TERMUX_USB_FD` adopt an open usbfs descriptor |
+
+The menu decides whether the built-in image tools (`[8]` unlock) and `unpac`
+(`[16]`) are there from `caps`, not from usage text. An spdhost older than
+`caps` therefore counts as having neither: `[8]` falls back to the release's
+`gen_spl-unlock`, `[16]` asks you to rebuild. The menu runs
+`spdhost --dry-run caps`, so even such an old binary opens no USB for the
+question.
+
 ### Options
 
 Options go before the commands, and never in front of the device path.

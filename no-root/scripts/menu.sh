@@ -2345,15 +2345,34 @@ find_gen_spl_unlock() {
 	find_release_tool "${1:-gen_spl-unlock}"
 }
 
-# True when the resolved spdhost understands the offline image tools. Probed by
-# running one with no arguments and looking for its usage line, so an older
-# spdhost build falls back to the release binary instead of failing mid-unlock.
-spdhost_has_image_tools() {
+# P0-2: what the resolved spdhost can do, from `spdhost caps` (README,
+# "spdhost caps"), not from its usage text. Prints the caps lines, or fails
+# when the build has no caps (an spdhost older than caps) or answers anything
+# but caps_format=1 ... end. --dry-run in front is belt and braces: a build
+# without caps then treats `caps` as an unknown dry-run command, so even an
+# old binary never opens USB for this.
+spdhost_caps() {
 	local bin out
 	bin=$(resolve_spdhost_bin 2>/dev/null) || return 1
 	[[ -n $bin ]] || return 1
-	out=$("$bin" gen-spl-unlock 2>&1 || true)
-	[[ $out == *"gen-spl-unlock IN OUT"* ]]
+	out=$("$bin" --dry-run caps 2>/dev/null) || return 1
+	[[ $out == caps_format=1$'\n'* && $out == *$'\n'end ]] || return 1
+	printf '%s\n' "$out"
+}
+
+# spdhost_has_cap NAME: true when `spdhost caps` lists cap=NAME. A build
+# without caps has none, so the caller takes its older-build path (release
+# tool fallback for the image tools, a clear refusal for unpac).
+spdhost_has_cap() {
+	local out
+	out=$(spdhost_caps) || return 1
+	[[ $'\n'$out$'\n' == *$'\n'"cap=$1"$'\n'* ]]
+}
+
+# True when the resolved spdhost has the offline image tools, so an older
+# spdhost build falls back to the release binary instead of failing mid-unlock.
+spdhost_has_image_tools() {
+	spdhost_has_cap image-tools
 }
 
 # Absolute path to the spdhost binary, mirroring scripts/spdhost-usb's own
@@ -4228,16 +4247,11 @@ pack_slot_action() {
 	return "$rc"
 }
 
-# True when the resolved spdhost has the built-in PAC reader. Probed the same
-# way as spdhost_has_image_tools: run it with no arguments and look for its
-# usage line, so an older spdhost degrades to a clear message instead of
-# failing in the middle of an extract.
+# True when the resolved spdhost has the built-in PAC reader (caps lists
+# unpac), so an older spdhost degrades to a clear message instead of failing
+# in the middle of an extract.
 spdhost_has_unpac() {
-	local bin out
-	bin=$(resolve_spdhost_bin 2>/dev/null) || return 1
-	[[ -n $bin ]] || return 1
-	out=$("$bin" unpac 2>&1 || true)
-	[[ $out == *"unpac [-d dir]"* ]]
+	spdhost_has_cap unpac
 }
 
 # Offline: list, verify, and extract a PAC firmware. The release ships
@@ -4248,7 +4262,7 @@ pac_extract_action() {
 	local bin pac mode dir e pick want out rc
 	bin=$(resolve_spdhost_bin) || { echo "spdhost binary not found (make)." >&2; return 1; }
 	if ! spdhost_has_unpac; then
-		echo "This spdhost has no built-in PAC reader (unpac)." >&2
+		echo "This spdhost has no built-in PAC reader (unpac), or is too old to say (no 'spdhost caps')." >&2
 		echo "Rebuild it (make), or use the release's extrac.sh on a PC." >&2
 		return 1
 	fi

@@ -17,6 +17,18 @@
 #include <time.h>
 #include <unistd.h>
 
+/* P0-2 `spdhost caps`. The build stamps the commit it was built from
+ * (Makefile and scripts/cross-arm32.sh pass -DSPDHOST_BUILD_SHA); a build
+ * outside git says "unknown". SPDHOST_PROTOCOL is the caller interface
+ * version (commands, their arguments and exit codes, SPDHOST_STATUS_FILE
+ * keys): it changes only when something existing changes incompatibly. A
+ * new feature adds a cap instead. */
+#ifndef SPDHOST_BUILD_SHA
+#define SPDHOST_BUILD_SHA "unknown"
+#endif
+#define SPDHOST_CAPS_FORMAT 1
+#define SPDHOST_PROTOCOL 1
+
 volatile sig_atomic_t spd_interrupted = 0;
 
 /* SIGINT/SIGTERM: set a flag and return. Everything unsafe to call from a
@@ -207,7 +219,9 @@ static void usage(void)
 		"  chsize IN OUT           offline: cut a DHTB image to its real size\n"
 		"  unpac [-d DIR] {list|extract|check} FILE.pac [names]\n"
 		"                          offline: read or extract a Spreadtrum .pac\n"
-		"  The six offline tools open no USB and ignore the device options.\n"
+		"  caps                    offline: build sha, protocol version and\n"
+		"                          capability flags, key=value lines (README)\n"
+		"  The seven offline commands open no USB and ignore the device options.\n"
 		"  Unlike the release tools they never overwrite their input file.\n"
 		"  read_flash ADDR OFF SIZE OUT  raw read by address, no partition\n"
 		"                               table involved (spd_dump read_flash).\n"
@@ -1431,6 +1445,51 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 	return NULL;
 }
 
+/* What this build can do, for a caller (menu.sh, the app) that must not
+ * guess from usage text. Only features that exist in this build; sorted;
+ * one name per line. A name is never reused for something else. */
+static const char *const spd_caps[] = {
+	"confirm-token", /* --confirm-token SHA256 on misc writes / set-active */
+	"dry-run",       /* --dry-run: no USB, DRY packet lines on stdout */
+	"frp-part",      /* frp-reset refuses frp+persist unless SPDHOST_FRP_PART */
+	"image-tools",   /* gen-spl-unlock[-legacy], gen-fdl1-dl, chsize */
+	"misc-bytes",    /* status file: misc-bytes=N after misc-backup[-expect] */
+	"pack-slot",     /* pack-slot a|b IN OUT */
+	"parts-header",  /* parts FILE starts "# spdhost-parts shift S verified V" */
+	"status-file",   /* SPDHOST_STATUS_FILE key=value result lines */
+	"unpac",         /* unpac {list|extract|check} FILE.pac */
+	"usb-fd",        /* --usb-fd N / TERMUX_USB_FD: wrap an open usbfs fd */
+};
+
+static int is_sha1_hex(const char *s)
+{
+	size_t k;
+	for (k = 0; s[k]; k++)
+		if (!((s[k] >= '0' && s[k] <= '9') || (s[k] >= 'a' && s[k] <= 'f')))
+			return 0;
+	return k == 40;
+}
+
+/* `spdhost caps`: stdout only, no USB, no device, no files. Format 1:
+ *   caps_format=1
+ *   build_sha=<40 lowercase hex | unknown>
+ *   protocol=<n>
+ *   cap=<name>        (zero or more, sorted)
+ *   end
+ * Readers check caps_format=1 on the first line, ignore keys they do not
+ * know, and treat output without the final `end` as no caps. */
+static int print_caps(void)
+{
+	size_t k;
+	printf("caps_format=%d\n", SPDHOST_CAPS_FORMAT);
+	printf("build_sha=%s\n", is_sha1_hex(SPDHOST_BUILD_SHA) ? SPDHOST_BUILD_SHA : "unknown");
+	printf("protocol=%d\n", SPDHOST_PROTOCOL);
+	for (k = 0; k < sizeof(spd_caps) / sizeof(spd_caps[0]); k++)
+		printf("cap=%s\n", spd_caps[k]);
+	printf("end\n");
+	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
 	static const struct option opts[] = {
@@ -1580,6 +1639,14 @@ int main(int argc, char **argv)
 			usage();
 			return c == 'h' ? 0 : 2;
 		}
+	}
+	/* Before the self-test and every device path: caps opens nothing. */
+	if (optind < argc && strcmp(argv[optind], "caps") == 0) {
+		if (optind + 1 < argc) {
+			fprintf(stderr, "caps takes no arguments\n");
+			return 2;
+		}
+		return print_caps();
 	}
 	if (selftest) {
 		/* FIPS 180-4 vectors for the --confirm-token hash. */

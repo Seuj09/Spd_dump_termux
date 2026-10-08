@@ -12,16 +12,24 @@ HDRS = src/usb.h src/usb_list.h src/proto.h src/dumpcmd.h src/writecmd.h \
        src/sha256.h src/dhtb.h src/pac.h
 BIN = spdhost
 ARCH := $(shell uname -m)
+# P0-2: `spdhost caps` reports the commit it was built from. The stamp file
+# is rewritten only when HEAD moves, so a new commit relinks the binary and
+# an unchanged tree does not. Outside git it says "unknown".
+BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+SHA_STAMP = .build-sha
 
-.PHONY: all clean cross-arm32 cross-arm64 cross
+.PHONY: all clean cross-arm32 cross-arm64 cross FORCE
 all: $(BIN)
 
-$(BIN): $(SRCS) $(HDRS)
+$(SHA_STAMP): FORCE
+	@[ "$$(cat $@ 2>/dev/null)" = "$(BUILD_SHA)" ] || echo "$(BUILD_SHA)" > $@
+
+$(BIN): $(SRCS) $(HDRS) $(SHA_STAMP)
 	@echo "spdhost: compiling for $(ARCH)"
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRCS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DSPDHOST_BUILD_SHA='"$(BUILD_SHA)"' -o $@ $(SRCS) $(LDLIBS)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(SHA_STAMP)
 
 # Static ARM builds of spdhost + spd_dump from a PC (no phone, no NDK).
 # See scripts/cross-arm32.sh. arm64 is the same script with ARCH=arm64.

@@ -238,10 +238,13 @@ check "U6: unlock with no model copy sends nothing and says where it looked" \
 
 # ---- G5 ---------------------------------------------------------------------------------
 # A fake image-tools spdhost whose patchers match nothing (LEGACY=1: the legacy
-# one patches a site). Answers its usage line so spdhost_has_image_tools is true.
+# one patches a site). Lists image-tools in `caps` so spdhost_has_image_tools
+# is true (P0-2: the menu asks caps, not the usage line).
 cat > fakespd <<'R'
 #!/bin/bash
+[[ $1 == --dry-run ]] && shift
 case $1 in
+  caps) printf 'caps_format=1\nbuild_sha=unknown\nprotocol=1\ncap=image-tools\nend\n'; exit 0 ;;
   gen-spl-unlock|gen-spl-unlock-legacy)
     if (( $# < 3 )); then echo "usage: spdhost $1 IN OUT" >&2; echo "gen-spl-unlock IN OUT" >&2; exit 1; fi
     cp "$2" "$3"
