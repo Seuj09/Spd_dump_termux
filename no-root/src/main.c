@@ -1748,8 +1748,11 @@ int main(int argc, char **argv)
 	}
 
 	envfd = getenv("TERMUX_USB_FD");
-	if ((!envfd || !envfd[0]) && (envfd = getenv("SPD_USB_FD")) && envfd[0])
-		; /* fall through: SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts */
+	/* SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts: it is read only
+	 * when TERMUX_USB_FD is unset or empty. (The old form did the assignment
+	 * inside an if with an empty body, which -Wempty-body flagged.) */
+	if (!envfd || !envfd[0])
+		envfd = getenv("SPD_USB_FD");
 	if (fd < 0 && envfd && envfd[0]) {
 		char *end = NULL;
 		long v;

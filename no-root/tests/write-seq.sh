@@ -1089,7 +1089,10 @@ check "Ctrl-C under --keep-going stops the run before the next command (rc $rc)"
 # uses (common.c 2126); and only then, if the device's size for the primary and
 # the NAME_bak row agree, it writes the image a second time under NAME_bak.
 printf '%s\n' 'misc 1024' 'boot 4096' 'boot_bak 4096' > ptbak
-head -c 4194304 /dev/urandom > bootfull.img
+# Random-looking but fixed (tests/det_bytes.c), so the frames are the same
+# on every run.
+gcc -O2 -std=c11 "$root/tests/det_bytes.c" -o det_bytes || exit 1
+./det_bytes 4194304 0xb007 > bootfull.img
 MOCK_PTABLE=$tmp/ptbak sd wbak skip_confirm 1 partition_list pbak.xml w boot bootfull.img reset; sdrc=$?
 MOCK_PTABLE=$tmp/ptbak sh wbak parts pbak.txt write-part boot bootfull.img; shrc=$?
 check "the NAME/NAME_bak pair: both copies written, rc $sdrc/$shrc" \
