@@ -58,7 +58,16 @@ Run `uname -m`. `aarch64` means arm64, and `armv7l` or `armv8l` means arm32.
 Pick your **chip first** (menu option 3, or the first-run wizard). Then use your brand's folder under `fdl/<chip>/` (for example `fdl/ums9230/infinix` or `fdl/sc9863a/...`). If your model has its own `alternatif/<model>` folder, use that. `universal` exists **only for ums9230** as a fallback for that chip — do not use a ums9230 loader on sc9863a or ums512.
 
 ### Where do dumps go?
-The menu prints the folder after each dump. Every dump comes with a `meta/SHA256SUMS` file so you can check it.
+The menu prints the folder after each dump (by default `/sdcard/Download`; `backup/` in the unzipped folder without storage permission). Partition images (`NAME.img`) stay alone at the top of that folder, and they are the only files the flash menus [6]/[7]/[9] offer. Everything else goes under `meta/` inside it: `SHA256SUMS`, the parts table (`partition_list.txt`, `partition_bytes.txt`), `dump-manifest.txt`, `partition_*.xml` / `partitions-*.xml`, `sprdpart.bin` / `pgpt.bin`, `misc-slotinfo.img`, Extra [14]'s `*-slota.img` / `*-slotb.img`, and the `*-before-*.img` backups (misc, persist, frp, vbmeta, splloader). Older dumps that still have those files at the top of the dump folder keep working.
+
+To check a dump, run this **from the dump folder** (the names in `SHA256SUMS` are relative to it, so running it inside `meta/` fails):
+
+```sh
+cd /sdcard/Download && sha256sum -c meta/SHA256SUMS
+```
+
+### Can Extra [16] (PAC extract) overwrite my dumps?
+No. It never deletes or replaces the output folder you type. A missing or empty folder receives the entries; any other folder (for example the dump folder itself) gets a new `pac-extract-<date>-<time>` subfolder, and nothing already in it is touched.
 
 
 ### A cable blip mid-dump or mid-flash aborted the transfer. Will it resume?
@@ -71,7 +80,7 @@ Any flasher can. spdhost asks for a typed confirmation before every write, refus
 If it still enters download mode, usually yes. Flash back your dumped partitions or stock images from the menu.
 
 ### My phone bootloops after I repartitioned.
-Repartitioning wipes `super`, so after a repartition you **must** flash a `super.img`. Skipping it leaves `super` empty or mismatched, so system, vendor and product can't mount and the phone bootloops. This isn't a tool bug: any repartition that touches `super` needs a matching `super.img` flash.
+Repartitioning wipes `super`, so after a repartition you **must** flash a `super.img` (menu [8] reminds you before and after; the old table is saved as `meta/partition_<unixtime>.xml`). Skipping it leaves `super` empty or mismatched, so system, vendor and product can't mount and the phone bootloops. This isn't a tool bug: any repartition that touches `super` needs a matching `super.img` flash.
 
 - **If you changed `super`'s size:** flash a `super.img` built for the new size. Rebuild it with `lpmake` or resize it. The stock `super.img` is sized for the stock `super` and won't boot in a differently sized one.
 - **If you didn't change `super`'s size:** flash the stock `super.img` again.
@@ -84,12 +93,12 @@ A/B is tested. Non-A/B is supported in the code but less tested.
 ### Reboot to recovery doesn't work on slot B.
 That's a known bug in the current beta, and a fix is coming. Use slot A for now.
 
+### Reset FRP asks "Which partition holds FRP?"
+Your partition table has both `frp` and `persist`, and which one holds FRP depends on the phone. On the target (while it still boots), `getprop ro.frp.pst` names it; answer `frp` or `persist`. There is no default: Enter cancels, nothing is sent. Outside the menu, set `SPDHOST_FRP_PART=frp` or `SPDHOST_FRP_PART=persist`; spdhost refuses a table with both rows without it. A backup of the erased partition is always taken first.
+
 ### Is it the same as spd_dump?
 It does the same job and uses the same command logic, rewritten for non-root Termux USB access with extra safety checks.
 
-
-### Where do dump files go?
-Partition images (`NAME.img`) stay alone in the dump folder. Everything else — `SHA256SUMS`, the parts table (`partition_list.txt`), `dump-manifest.txt`, `partition_*.xml`, `misc-slotinfo.img`, and `*-before-*.img` backups — goes under `meta/` inside that folder. Older dumps that still have those files at the top of the dump folder keep working.
 
 ### Where do I report bugs?
 Open an [issue](https://github.com/Seuj09/Spd_dump_termux/issues) with your host phone, target model, FDL folder and the full output.

@@ -197,9 +197,13 @@ mkdir -p "$pkg/input"
 cp "$root/input/"*.txt "$pkg/input/" 2>/dev/null || true
 mkdir -p "$pkg/backup"
 cp "$root/backup/"*.txt "$pkg/backup/" 2>/dev/null || true
-cp "$root/README.md" "$root/LICENSE" "$pkg/"
+cp "$root/README.md" "$root/LICENSE" "$root/FAQ.md" "$pkg/"
 chmod +x "$pkg/spdhost" "$pkg/spd_dump/spd_dump" "$pkg/scripts/"* "$pkg/spd_dump/scripts/"*
 short=$(printf '%s' "$sha" | cut -c1-7)
+# C5/C6 (audit6): README links FAQ.md and TUTORIAL.md, so both ship. The
+# shipped TUTORIAL's TAG=/ZIP= lines name THIS build's release (its short
+# sha), which a committed file cannot do for its own commit.
+sed -E "/^(TAG|ZIP)=/ s/-[0-9a-f]{7}(\.zip)?\$/-$short\1/" "$root/TUTORIAL.md" >"$pkg/TUTORIAL.md"
 zipname=$zip_prefix-$short.zip
 ( cd "$pkg" && python3 - "$OUT/$zipname" "$pkg_root" <<'PY'
 import os, stat, sys, zipfile

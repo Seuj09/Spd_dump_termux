@@ -5,7 +5,8 @@ per run, no GUI. It talks to a phone in BootROM or FDL over libusb bulk
 transfers. On a phone (Termux, no root) the `spdhost-usb` wrapper takes the
 descriptor from `termux-usb`; on a PC it opens the device node itself.
 
-New here? Start with the [setup tutorial](TUTORIAL.md) and the [FAQ](FAQ.md).
+New here? Start with the [setup tutorial](TUTORIAL.md) and the [FAQ](FAQ.md)
+(both are also inside the release zips, next to this README).
 
 Prebuilt static binaries, libusb included, are on the
 [spdhost-source](https://github.com/Seuj09/Spd_dump_termux/releases/tag/spdhost-source)
@@ -262,8 +263,9 @@ Partition table and reads:
   `# spdhost-parts shift S verified V` (`bytes = units << S`; `verified 0`
   means the device did not confirm the guess, and `dump` then sizes each
   partition by asking the device). The menu reads that line rather than
-  guessing, and writes `partition_bytes.txt` in the dump folder
-  (`/sdcard/Download` by default, `backup/` when storage permission is missing).
+  guessing, and writes `partition_bytes.txt` in the dump folder's `meta/`
+  (`/sdcard/Download/meta` by default, `backup/meta` when storage permission
+  is missing).
   On a phone whose `user_partition` holds a standard GPT, the rows come from
   that table instead. They print in MiB when every row is a whole MiB, else
   in KiB (or finer), so a row under 1 MiB never prints as 0.
@@ -277,10 +279,10 @@ Partition table and reads:
   spd_dump also writes `partition_<unixtime>.xml` wherever it runs on **every**
   session that reads the table, so the file to edit is always there. spdhost
   writes that same file, into `--part-xml DIR` (env `SPDHOST_PART_XML_DIR`)
-  instead of the working directory; the menu points it at the dump folder, so
-  each table read leaves `partition_<unixtime>.xml` there (by default
-  `/sdcard/Download`, or `backup/` without storage permission) and
-  option 4 (list partitions) says so. One name per run: a session that reads the
+  instead of the working directory; the menu points it at the dump folder's
+  `meta/`, so each table read leaves `partition_<unixtime>.xml` there (by
+  default `/sdcard/Download/meta`, or `backup/meta` without storage
+  permission) and option 4 (list partitions) says so. One name per run: a session that reads the
   table twice rewrites its own copy. `--part-xml ""` turns it off.
 
   The table is read the way spd_dump reads it, and **once per session**.
@@ -330,7 +332,7 @@ Partition table and reads:
   `all_lite` take names and sizes from the table, add `splloader` (256 KiB),
   and skip blackbox/cache/userdata; `all_lite` also skips the inactive slot.
   Writes `DIR/NAME.img` (or `NAME.img.partial` on failure) and
-  `DIR/dump-manifest.txt`.
+  `DIR/meta/dump-manifest.txt` (`DIR` keeps only the images).
 - `dump preset_modem DIR` — every `l_*` and `nr_*` row, plus `misc` when the
   device is A/B.
 - `dump preset_resign DIR` — `vbmeta`, `splloader`, `uboot`, `sml`,
@@ -402,12 +404,15 @@ Writes:
   `<Partition id="name" size="N"/>` rows, `N` in MiB or `0xffffffff` for the
   last row ("take the rest"). Asks for `yes`; the menu never passes `--yes`
   to it. Get the starting XML with `partition-list` above (or the
-  `partition_<unixtime>.xml` every table read leaves in the dump folder) rather
+  `partition_<unixtime>.xml` every table read leaves in the dump folder's `meta/`) rather
   than writing one by hand. The rest of the session resolves names and sizes against the
   new table, as spd_dump does, so `repartition grow.xml write-part boot
   boot.img` in one session writes against the enlarged boot. A later `parts`
   re-reads the table from the device, which need not match until the phone
-  restarts. Up to 862 rows — the 16-bit frame length.
+  restarts. Up to 862 rows — the 16-bit frame length. **Afterwards, flash a
+  `super.img` built for the new layout before booting Android** (menu `[8]`
+  says so before the confirm and after the write; see the FAQ). The menu's
+  pre-repartition copy of the old table is `meta/partition_<unixtime>.xml`.
 
 The loader tells us what it is stored on — `Da_Info.dwStorageType`, read from
 the FDL2 exec reply and from the flash-info exchange that follows it, and
@@ -481,10 +486,13 @@ Dangerous:
   phone carrying a `w_force` row. `w-force` is still there for an image that
   really is larger than its table row.
 - `frp-reset OUT` — read all of the FRP partition to OUT, check the size,
-  then erase it. That is `frp` (or `frp_a`/`frp_b`) when the table has one —
-  `persist` is then left alone — else `persist` (or `persist_a`/`persist_b`
-  for the active slot). A failed or short
-  read does not erase. Over 512MB is refused. Needs `parts`.
+  then erase it. A table with only `frp` (or `frp_a`/`frp_b`) uses that,
+  and one with only `persist` (or `persist_a`/`persist_b` for the active
+  slot) uses that. A table with **both** is refused, before the confirm and
+  before any read, unless `SPDHOST_FRP_PART=frp` or `=persist` says which:
+  set it to what `getprop ro.frp.pst` names on the phone. Menu Extra `[5]`
+  asks (no default) and passes the answer. A failed or short read does not
+  erase. Over 512MB is refused. Needs `parts`.
 - `danger-erase NAME` — erase only `persist`, `persist_a`, `persist_b`,
   `splloader` or `splloader_bak`. A persist name that is not in the live
   table is not erased; `splloader` is still sent when the table has no such
@@ -553,7 +561,7 @@ Options go before the commands, and never in front of the device path.
 --confirm-token SHA256   authorize one misc write whose bytes hash to it
 --part-xml DIR    leave partition_<unixtime>.xml in DIR on every table read
                   (env SPDHOST_PART_XML_DIR; "" = off). The menu sets it to the
-                  dump folder, as spd_dump leaves that file behind itself
+                  dump folder's meta/, as spd_dump leaves that file behind itself
 --verbose
 --dry-run         no USB: fake replies, print each packet for sequence tests
 --self-test       framing check, no device
@@ -569,7 +577,16 @@ sent in 528-byte chunks; `--step` is for partition reads and writes only.
 `--keep-going` lists the failures at the end and exits 1; USB timeouts and a
 device reset still stop the run. The menu's `all`/`all_lite` use it, check
 each file's size, rename short ones to `NAME.img.partial`, and add the good
-ones to `SHA256SUMS` in the dump folder.
+ones to `meta/SHA256SUMS` in the dump folder. The names in it are relative to
+the dump folder itself, so check a dump from there:
+
+```sh
+cd /sdcard/Download && sha256sum -c meta/SHA256SUMS
+```
+
+(`cd meta && sha256sum -c SHA256SUMS` does not work: the lines say
+`boot_a.img`, not `../boot_a.img`.) An older dump with `SHA256SUMS` at the
+top of the folder is checked with `sha256sum -c SHA256SUMS` there.
 
 If more than one USB device is plugged in, `spdhost-usb` stops and lists
 them; copy a path from `termux-usb -l` and put it first, before the `--`:
@@ -614,7 +631,7 @@ uses `--confirm-token` instead, as described above.
 The reboot submenu under `[2]` also has `[5]` wipe userdata (writes
 `misc/misc-wipe.bin` then `reset`; recovery honors `--wipe_data` and erases
 userdata on the next boot) and `[6]` restore misc from one of the
-`misc-before-*.img` copies in the dump folder. The wipe item does **not** erase
+`misc-before-*.img` copies in the dump folder's `meta/`. The wipe item does **not** erase
 `persist` or `userdata` itself — the separate FRP command does that, and it
 is labeled dangerous. Use only on a sacrificial device.
 
@@ -674,16 +691,29 @@ with both names. Stale addresses are repaired from the chip, and an empty
 way around the check.
 
 The dump folder is what `[1]` writes into and `[7]` restores from; the flash
-folder is what `[6]` reads. `SHA256SUMS`, `dump-manifest.txt` and
-`partition_list.txt` land in the dump folder too. `[9]` copies images from the
-dump folder into the flash folder when the two are different folders.
+folder is what `[6]` reads. `[9]` copies images from the dump folder into the
+flash folder when the two are different folders.
+
+The top of the dump folder holds **only** the partition images a flash can
+write (`NAME.img`). Everything else goes into `meta/` inside it:
+`SHA256SUMS`, `dump-manifest.txt`, `partition_list.txt`,
+`partition_bytes.txt`, `partition_*.xml` / `partitions-*.xml`,
+`sprdpart.bin`, `pgpt.bin`, `misc-slotinfo.img`, `[14]`'s
+`*-slota.img` / `*-slotb.img`, and every `*-before-*.img` backup (misc,
+persist, frp, vbmeta, splloader). The flash pickers `[6]`/`[7]`/`[9]` list
+only the top-level images. A dump made by an older build, with those files
+at the top, still loads: readers look in `meta/` first, then fall back to the
+top of the folder. To check a dump, from the dump folder:
+`sha256sum -c meta/SHA256SUMS`.
 
 **By default they are the same folder, and it is the phone's own Download
 folder.** On Termux, after `termux-setup-storage` has been run and allowed:
 
 ```
-/sdcard/Download    dumps land here (menu [1]); flashes read here (menu [6]);
-                    partition_<unixtime>.xml lands here on every table read
+/sdcard/Download        dumps land here (menu [1]); flashes read here (menu [6])
+/sdcard/Download/meta   SHA256SUMS, dump-manifest.txt, partition_list.txt,
+                        partition_<unixtime>.xml (every table read), and the
+                        *-before-*.img backups
 ```
 
 A dump is therefore immediately visible to a file manager or a browser
@@ -714,7 +744,7 @@ already there at the same size is left alone, and one of a different size is
 reported and skipped rather than replaced, because the flash folder also holds
 the images you actually meant to flash.
 
-Dump `[1]` fetches the live table into `partition_list.txt` in the dump folder,
+Dump `[1]` fetches the live table into `meta/partition_list.txt` in the dump folder,
 prints it like the rooted menu's LIST PARTISI, then resolves what you type to
 the closest name (`boot.img` or `boot` → `boot_a` when that slot exists) and
 uses that row's size. Flash `[6]` reads the flash folder — `Download/`, or
@@ -749,12 +779,18 @@ Extra:
 ```
 
 `[13]` refuses `persist`, `splloader` and `all` outright. `[14]` runs
-`pack-slot` with no phone attached and records the output in `SHA256SUMS`.
+`pack-slot` with no phone attached, writes `meta/<name>-slot<a|b>.img` and
+records it in `meta/SHA256SUMS`.
 `[16]` lists a `.pac`, verifies its CRCs and extracts it, all through the
 built-in `unpac` — the release only ships `extrac.sh` plus an x86-64
-`pacextractor`, which cannot run on the phone. It writes into
-`INPUT_DIR/extract` by default so it cannot overwrite a file you put in the
-flash folder. `unpac check` exits 0 even on a CRC mismatch, the same as the
+`pacextractor`, which cannot run on the phone. The default output is
+`INPUT_DIR/extract`. **It never deletes or replaces the folder you type:** a
+folder that does not exist yet, or an empty one, receives the entries; any
+other folder (the flash/dump folder itself, `~`, a folder with an earlier
+extract) gets a new `pac-extract-<date>-<time>` subfolder and nothing already
+in it is touched. A path that is a file is refused. The extract is staged in
+a hidden folder beside the target and renamed into place, so a failed
+extract leaves nothing behind. `unpac check` exits 0 even on a CRC mismatch, the same as the
 vendor tool, so `[16]` reports the mismatch itself instead of trusting the
 status.
 

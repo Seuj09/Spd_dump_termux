@@ -26,38 +26,34 @@ Without these, the USB permission prompt and device handoff can fail or get kill
 
 ## 2. Download and unzip spdhost
 
-Check your Termux architecture with `uname -m`.
+Check your Termux architecture with `uname -m`: `aarch64` is 64-bit, `armv7l` or
+`armv8l` is 32-bit.
 
-Use the **latest `spdhost-exp-audit4-*` pre-release** on the
-`experiment/brom-hello-diagnostics` branch (not an older `spdhost-exp-audit-f616c0f`
-or `spdhost-exp-multidev-*` zip — those still have bugs this tutorial treats as fixed).
-
-On the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases), open the newest
-`spdhost-exp-audit4-*` pre-release and copy its **tag** plus the **arm64 or arm32
-zip asset name** (the zip ends in the short git SHA of that build).
+The commands below fetch the **spdhost-exp-audit6** pre-release of the
+`experiment/brom-hello-diagnostics` branch (not an older `spdhost-exp-audit-f616c0f`,
+`spdhost-exp-audit4-*` or `spdhost-exp-multidev-*` zip — those still have bugs this
+tutorial treats as fixed). Paste them as they are.
 
 **64-bit** (`aarch64`):
 
 ```sh
-TAG=spdhost-exp-audit4-<sha>            # e.g. spdhost-exp-audit4-8a57e33
-ZIP=spdhost-arm64-static-<sha>.zip
-curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
+TAG=spdhost-exp-audit6-0000000
+ZIP=spdhost-arm64-static-0000000.zip
+curl -fLO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
 unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm64
 ```
 
 **32-bit** (`armv7l` or `armv8l`):
 
 ```sh
-TAG=spdhost-exp-audit4-<sha>
-ZIP=spdhost-arm32-static-<sha>.zip
-curl -LO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
+TAG=spdhost-exp-audit6-0000000
+ZIP=spdhost-arm32-static-0000000.zip
+curl -fLO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
 unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm32
 ```
 
-Or open the [releases page](https://github.com/Seuj09/Spd_dump_termux/releases),
-pick the newest pre-release whose notes mention `experiment/brom-hello-diagnostics`,
-and download the arm64/arm32 zip for that tag. Building from source (`make -C no-root`)
-on the tip of that branch is also fine.
+The zip also holds this tutorial, the [FAQ](FAQ.md) and the README. Building from
+source (`make -C no-root`) on the tip of that branch is also fine.
 
 ## 3. Start the menu
 
@@ -67,15 +63,25 @@ bash scripts/menu.sh
 
 ## 4. Connect the target
 
-1. Pick a menu option and press Enter.
-2. Hold the target's download-mode keys and plug it in through OTG. On most Unisoc phones that is volume down, but some models use volume up, both volume keys, or a boot key; use whatever your model needs to reach download mode.
-3. Tap **Allow** on the USB prompt as fast as you can.
-4. If the first try times out, unplug, wait about 5 seconds, and retry. Later runs usually skip the prompt.
+The order matters (it is the same as in the [FAQ](FAQ.md)):
+
+1. Pick a menu option and press Enter. The target stays **off and unplugged**.
+2. If the target still boots, hold power for about 8 seconds so it is fully off.
+3. Wait until the menu says **Plug the target in NOW**.
+4. Only then hold the target's download-mode keys and plug the cable in through OTG. On many Unisoc phones (Infinix, for example) that is **power + volume down**; other models use volume up, both volume keys, or a boot key, so use whatever your model needs.
+5. Tap **Allow** on the USB permission dialog as soon as it appears. It appears on **every** plug-in.
+6. If it times out, unplug, wait at least 5 seconds, and run the same option again from step 1.
+
+If the target is bricked and won't turn on: unplug, restart the menu, hold the download-mode keys for 6-8 seconds, then plug in at the prompt.
 
 ## 5. Always dump first
 
 Back up boot, misc and any partition you plan to touch before you write anything.
-Images land alone in the dump folder; the parts table, XML, manifest, slotinfo and `SHA256SUMS` go under `meta/` inside it.
+Images land alone in the dump folder; the parts table, XML, manifest, slotinfo, backups and `SHA256SUMS` go under `meta/` inside it. To check a dump, from the dump folder:
+
+```sh
+cd /sdcard/Download && sha256sum -c meta/SHA256SUMS
+```
 
 ## One-line dump without the menu (Infinix ums9230)
 
