@@ -98,6 +98,18 @@ check "restore [b]: the command is write-parts-b" ran_has "write-parts-b $tmp/du
 check "restore [b]: parts runs first in the same session" ran_has "parts $tmp/dump/meta/partition_list.txt write-parts-b"
 check "restore [b]: never passes --yes" ran_lacks --yes
 check "restore [b]: the pty says which slot was forced" pty_has "$tr" "forced slot b"
+# C2 (audit6): a restore only reads the images, so a dump folder bigger than
+# the free space (a sparse 2 TiB super.img here) must not refuse it.
+c2=$tmp/c2dump; mkdir -p "$c2/meta"
+cp "$tmp/dump/meta/partition_list.txt" "$c2/meta/"
+: >"$c2/boot_a.img"; truncate -s 2T "$c2/super.img"
+rm -f "$tmp/ran/log"
+python3 "$drive" "$tmp/c2.pty" "type yes to restore this backup" 'yes\r' \
+	"Restore to slot" '\r' "Press Enter to continue" '\r' -- \
+	"SPDHOST_DUMP_DIR=$c2 $tmp/fn.sh restore_backup_menu" </dev/null
+check "C2 restore: a dump bigger than the free space still restores" ran_has "write-parts $c2"
+check "C2 restore: ...with no free-space refusal" \
+	bash -c '! grep -qaE "REFUSED|need about" "$1"' _ "$tmp/c2.pty"
 
 tr=$(menu restore_backup_menu \
 	"type yes to restore this backup" 'yes\r' \

@@ -3118,7 +3118,10 @@ restore_backup_menu() {
 	echo "Using $cmd (${slot:+forced slot ${slot,,}; }the other slot's images are skipped)."
 	echo "spdhost asks once more on the terminal before it sends anything."
 	require_parts_verified "folder restore" || return 1
-	require_free_space "$DUMP_DIR" "$(sum_file_bytes "$DUMP_DIR")" 64 "folder restore" || return 1
+	# C2 (audit6): no free-space check here. A restore only READS the images
+	# (write-parts streams them to the phone and stages nothing big), and
+	# sizing it by the whole dump folder refused the recovery path on any
+	# phone with less free space than its own dump.
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		parts "$(parts_cache_path)" "$cmd" "$DUMP_DIR" "$BOOT_AFTER"
