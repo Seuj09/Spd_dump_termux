@@ -37,8 +37,8 @@ tutorial treats as fixed). Paste them as they are.
 **64-bit** (`aarch64`):
 
 ```sh
-TAG=spdhost-exp-audit6-0000000
-ZIP=spdhost-arm64-static-0000000.zip
+TAG=spdhost-exp-audit6-79d7cd0
+ZIP=spdhost-arm64-static-79d7cd0.zip
 curl -fLO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
 unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm64
 ```
@@ -46,8 +46,8 @@ unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm64
 **32-bit** (`armv7l` or `armv8l`):
 
 ```sh
-TAG=spdhost-exp-audit6-0000000
-ZIP=spdhost-arm32-static-0000000.zip
+TAG=spdhost-exp-audit6-79d7cd0
+ZIP=spdhost-arm32-static-79d7cd0.zip
 curl -fLO "https://github.com/Seuj09/Spd_dump_termux/releases/download/${TAG}/${ZIP}"
 unzip -o "$ZIP" -d ~ && cd ~/spdhost-arm32
 ```
