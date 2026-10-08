@@ -1407,6 +1407,15 @@ static int part_probe(struct spd *io, const char *name)
 
 uint64_t spd_check_partition(struct spd *io, const char *name, int need_size, int ab)
 {
+	return spd_check_partition_ex(io, name, need_size, ab, NULL);
+}
+
+/* C8: same as spd_check_partition; *exact (when given) is set to 1 when the
+ * answer is the loader's own `<name>_size` reply (A/B only), 0 when it came
+ * from the binary search, whose floor is ~1 MiB. */
+uint64_t spd_check_partition_ex(struct spd *io, const char *name, int need_size, int ab,
+	int *exact)
+{
 	uint64_t offset = 0;
 	char name_tmp[40];
 	int i, end = 20, incrementing = 1;
@@ -1430,10 +1439,15 @@ uint64_t spd_check_partition(struct spd *io, const char *name, int need_size, in
 		name = name_tmp;
 	}
 
+	if (exact)
+		*exact = 0;
 	if (ab > 0) {
 		offset = part_size_from_device(io, name);
-		if (offset)
+		if (offset) {
+			if (exact && need_size)
+				*exact = 1;
 			return need_size ? offset : 1;
+		}
 	}
 	ret = part_probe(io, name);
 	if (!ret)

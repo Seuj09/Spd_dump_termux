@@ -239,6 +239,8 @@ int spd_read_part_mem(struct spd *io, const char *name, uint64_t offset, uint64_
  * loader refuses 0xffffffff outright). Unlike spd_check_part() this consults no
  * table, so it is what a 0xffffffff row in an XML list has to be sized with. */
 uint64_t spd_check_partition(struct spd *io, const char *name, int need_size, int ab);
+uint64_t spd_check_partition_ex(struct spd *io, const char *name, int need_size, int ab,
+	int *exact);
 /* Raw flash / memory access (spd_dump read_flash, read_mem, erase_flash).
  * No partition table is consulted: ADDR is the address the loader is told to
  * read from or erase. All fields are 32-bit on the wire and a larger value is

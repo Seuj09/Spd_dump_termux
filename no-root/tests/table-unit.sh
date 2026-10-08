@@ -150,5 +150,30 @@ check "N2: sml does not trust the ~1 MiB probe (no 'using the device' size; did-
 		! grep -qE '^start sml 1047552 ' '$(meta_of dump-manifest.txt)'"
 unset MOCK_NOPROBE MOCK_PTABLE
 
+# ---- C8 (audit6): the 2 MiB floor is the binary search's only ----
+# An A/B table on an unverified unit (sub-MiB vbmeta rows + a refused probe).
+# With MOCK_SIZEQ the loader answers vbmeta_a_size exactly (512 KiB): that is
+# used as the dump size and the image is verified. Without it, the binary
+# search answers ~1 MiB and the N2 floor still refuses that answer.
+printf '%s\n' 'prodnv 5120' 'misc 1024' 'uboot_a 1024' 'uboot_b 1024' 'vbmeta_a 512' 'vbmeta_b 512' 'boot_a 4096' 'boot_b 4096' > "$tmp/pt_c8"
+DUMP_DIR=$tmp/c8
+export MOCK_PTABLE=$tmp/pt_c8 MOCK_NOPROBE=prodnv MOCK_SLOT=a MOCK_SIZEQ=1
+fetch_parts_table </dev/null >"$tmp/c8f.log" 2>&1
+check "C8: A/B table header verified 0" \
+	grep -qE '^# spdhost-parts shift [0-9]+ verified 0$' "$(meta_of partition_list.txt)"
+dump_live_session vbmeta </dev/null >"$tmp/c8d.log" 2>&1; rc=$?
+check "C8: an exact vbmeta_a_size answer under 2 MiB is used (no floor message)" \
+	bash -c "! grep -q 'under 2 MiB is not a reliable' '$tmp/c8d.log' && ! grep -q 'did not size' '$tmp/c8d.log'"
+check "C8: ...the image is the exact 512 KiB and verified ok (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s '$DUMP_DIR/vbmeta_a.img') = 524288 ] && [ ! -e '$DUMP_DIR/vbmeta_a.img.unverified' ] && grep -q ' vbmeta_a.img\$' '$(dump_meta_file SHA256SUMS read)'"
+DUMP_DIR=$tmp/c8b
+unset MOCK_SIZEQ
+fetch_parts_table </dev/null >"$tmp/c8bf.log" 2>&1
+dump_live_session vbmeta </dev/null >"$tmp/c8bd.log" 2>&1; rc=$?
+check "C8: without the exact answer the binary-search floor still applies" \
+	bash -c "grep -qE 'dump: vbmeta_a: probe 0x[0-9a-f]+ under 2 MiB is not a reliable' '$tmp/c8bd.log' &&
+		grep -q 'dump: vbmeta_a: table unit unverified and the device did not size' '$tmp/c8bd.log'"
+unset MOCK_NOPROBE MOCK_PTABLE MOCK_SLOT
+
 echo "table-unit: $pass passed, $fail failed"
 (( fail == 0 ))

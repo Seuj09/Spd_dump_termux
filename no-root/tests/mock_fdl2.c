@@ -57,6 +57,7 @@ static int reply_len, reply_pos;
 static FILE *logf;
 static char cur_part[40];
 static uint64_t cur_size;
+static uint64_t sizeq; /* MOCK_SIZEQ: the pending `<name>_size` answer */
 static int connects;
 static int midst_count;
 static uint8_t *miscmem; static uint64_t misclen;
@@ -234,8 +235,17 @@ static void log_out(const uint8_t *buf, int len)
 	case 0x10: { /* READ_START name[36]wchar + size lo (+hi) */
 		char nm[40]; uint64_t sz; for (i = 0; i < 36; i++) { nm[i] = raw[4 + 2 * i]; if (!nm[i]) break; } nm[36] = 0;
 		sz = le32(raw + 4 + 72); if (plen >= 80) sz |= (uint64_t)le32(raw + 4 + 76) << 32;
-		strcpy(cur_part, nm); cur_size = part_size(nm); midst_count = 0;
+		strcpy(cur_part, nm); cur_size = part_size(nm); midst_count = 0; sizeq = 0;
 		if (streq_env("MOCK_FAIL_START", nm)) { make_reply(0x82, NULL, 0, crc); return; }
+		/* MOCK_SIZEQ=1 (C8): answer the loader's `<name>_size` query with the
+		 * row's exact byte count, the way A/B FDL2s do (proto.c
+		 * part_size_from_device). Off by default: the plain mock NAKs it. */
+		{ size_t l = strlen(nm);
+		  if (getenv("MOCK_SIZEQ") && l > 5 && !strcmp(nm + l - 5, "_size")) {
+			char base[40]; memcpy(base, nm, l - 5); base[l - 5] = 0;
+			sizeq = part_size(base);
+			make_reply(sizeq ? 0x80 : 0x82, NULL, 0, crc); return;
+		  } }
 		/* MOCK_NOPROBE=NAME (G1): NAME reads, but refuses check_partition's
 		 * 8-byte READ_START, so the device will not size it. */
 		if (sz == 8 && streq_env("MOCK_NOPROBE", nm)) { make_reply(0x82, NULL, 0, crc); return; }
@@ -244,6 +254,9 @@ static void log_out(const uint8_t *buf, int len)
 		return; }
 	case 0x11: { uint32_t want = le32(raw + 4); uint64_t off = le32(raw + 8); uint32_t k;
 		if (plen >= 12) off |= (uint64_t)le32(raw + 12) << 32;
+		if (sizeq) { int tl = snprintf((char *)data, 128, "size:%s: 0x%llx", cur_part,
+				(unsigned long long)sizeq);
+			make_reply(0x93, data, tl, crc); return; }
 		if (off >= cur_size) { make_reply(0x82, NULL, 0, crc); return; }
 		if (++midst_count == 2 && streq_env("MOCK_FAIL_MID", cur_part)) { make_reply(0x82, NULL, 0, crc); return; }
 		if (off + want > cur_size) want = (uint32_t)(cur_size - off);

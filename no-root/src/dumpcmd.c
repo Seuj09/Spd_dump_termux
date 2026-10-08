@@ -410,11 +410,14 @@ static int dump_one(struct spd *io, const char *name, uint64_t size, const char 
 	 * row. A row the device will not size is read at the table's size and
 	 * flagged `unverified` in the manifest, so the menu does not call it ok. */
 	if (!spd_ptab_sizes_verified(io) && strncmp(name, "splloader", 9)) {
-		uint64_t probed = spd_check_partition(io, name, 1, slot);
+		int exact = 0;
+		uint64_t probed = spd_check_partition_ex(io, name, 1, slot, &exact);
 		/* N2: the binary search starts at 2 MiB and returns ~1 MiB for any
 		 * sub-MiB row. Do not trust an answer under 2 MiB as a dump size
-		 * (L1 correction still uses the raw probe). */
-		if (probed && probed < (2ull << 20)) {
+		 * (L1 correction still uses the raw probe). C8: that floor is the
+		 * binary search's only; an exact `<name>_size` answer (A/B) is the
+		 * loader's own byte count and is used as is, however small. */
+		if (probed && !exact && probed < (2ull << 20)) {
 			fprintf(stderr, "dump: %s: probe 0x%llx under 2 MiB is not a reliable"
 				" size (binary search); treating as not sized\n",
 				name, (unsigned long long)probed);
