@@ -1432,8 +1432,14 @@ sum_file_bytes() {
 }
 
 # Planned dump size from the byte table for TARGET (all / all_lite / name).
+# C4 (audit6): all_lite mirrors dumpcmd.c skip_bulk() exactly: it skips the
+# blackbox*/cache*/userdata* rows (like all) and the INACTIVE slot's _a/_b
+# rows, and it DOES read super/system/vendor/product/metadata. The old
+# estimate skipped those bulk rows instead and planned 131 MiB for an 8 GiB
+# dump. With no known slot, each _a/_b pair counts once, at the larger size.
 planned_dump_bytes() {
-	local target=$1 bytes total=0 name size
+	local target=$1 bytes total=0 name size base
+	local -A pair=()
 	bytes=$(parts_bytes_path)
 	[[ -s $bytes ]] || { printf '0\n'; return 0; }
 	case $target in
@@ -1448,13 +1454,31 @@ planned_dump_bytes() {
 		all_lite)
 			while read -r name size _; do
 				[[ $name == \#* || ! $size =~ ^[0-9]+$ ]] && continue
-				case $name in userdata*|cache*|blackbox*|super|system*|vendor*|product*|metadata) continue ;; esac
+				case $name in userdata*|cache*|blackbox*) continue ;; esac
+				case ${ACTIVE_SLOT:-} in
+					a) [[ $name == *_b ]] && continue ;;
+					b) [[ $name == *_a ]] && continue ;;
+					*)
+						if [[ $name == *_[ab] ]]; then
+							base=${name%_[ab]}
+							(( size > ${pair[$base]:-0} )) && pair[$base]=$size
+							continue
+						fi
+						;;
+				esac
 				total=$((total + size))
 			done < "$bytes"
+			for base in "${!pair[@]}"; do
+				total=$((total + pair[$base]))
+			done
 			total=$((total + 262144))
 			;;
 		*)
-			size=$(awk -v n="$target" '$1 == n || $1 == n"_a" || $1 == n"_b" { print $2; exit }' "$bytes")
+			# A slotless name dumps the active slot's row (dumpcmd resolves it).
+			size=$(awk -v n="$target" -v s="${ACTIVE_SLOT:-a}" '
+				$1 == n || $1 == n"_"s { print $2; found = 1; exit }
+				!alt && ($1 == n"_a" || $1 == n"_b") { alt = $2 }
+				END { if (!found && alt != "") print alt }' "$bytes")
 			[[ $size =~ ^[0-9]+$ ]] && total=$size || total=0
 			;;
 	esac
@@ -1854,11 +1878,16 @@ dump_live_session() {
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	dump_meta_dir >/dev/null
-	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)" "$DUMP_DIR/misc-slotinfo.img"
-	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
-	# B1-2: free-space preflight from the cached byte table when present.
+	# B1-2/C4: free-space preflight from the cached byte table when present.
+	# Planned BEFORE the slotinfo below is removed: all_lite and slotless
+	# names depend on the active slot, which load_parts_state reads from it.
+	need=
 	if load_parts_state 2>/dev/null; then
 		need=$(planned_dump_bytes "$target")
+	fi
+	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt" "$(slot_misc_path)" "$DUMP_DIR/misc-slotinfo.img"
+	echo "One session: refresh the partition table, then dump '$target' (keeps going on errors)."
+	if [[ -n $need ]]; then
 		require_free_space "$DUMP_DIR" "$need" 64 "dump $target" || return 1
 	fi
 	ready || return 1
@@ -1908,6 +1937,15 @@ dump_many_session() {
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	echo "One session: refresh the table, then dump $*."
+	# C4 (audit6): the multi-name line (and imei) gets the same free-space
+	# preflight as a single dump: the sum of each name's row.
+	if load_parts_state 2>/dev/null; then
+		local need=0
+		for name in "$@"; do
+			need=$((need + $(planned_dump_bytes "$name")))
+		done
+		require_free_space "$DUMP_DIR" "$need" 64 "dump $*" || return 1
+	fi
 	ready || return 1
 	rm -f "$(dump_manifest_path write)" "$DUMP_DIR/dump-manifest.txt"
 	for name in "$@"; do
@@ -3010,6 +3048,13 @@ promote_dump_action() {
 		echo "menu [6] already has every one of these images."
 		return 0
 	fi
+	# C4 (audit6): every copy lands in full beside its destination before it
+	# is published, so the flash folder needs room for all of them.
+	local need=0
+	for base in "${copied[@]}"; do
+		need=$((need + $(stat -L -c %s "$DUMP_DIR/$base" 2>/dev/null || echo 0)))
+	done
+	require_free_space "$INPUT_DIR" "$need" 64 "copy into the flash folder" || return 1
 	if ! confirm_action "type yes to copy these into the flash folder: "; then
 		return 1
 	fi

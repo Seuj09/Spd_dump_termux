@@ -106,6 +106,10 @@ spd_all "$tmp/s2" all_lite MOCK_PTABLE="$tmp/pt" MOCK_SLOT=b
 check "slot b all_lite rc=0, keeps _b, drops _a" \
 	bash -c "[ $rc = 0 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ] && [ ! -e '$DUMP_DIR/uboot_a.img' ]"
 check "slot b all_lite == spd_dump r all_lite" same_as_spd "$DUMP_DIR" "$tmp/s2"
+# C4 (audit6): the all_lite estimate is what the C dump actually reads.
+c4_sum=0; for f in "$DUMP_DIR"/*.img; do c4_sum=$((c4_sum + $(stat -c %s "$f"))); done
+check "C4: planned all_lite (slot b) == bytes the dump wrote ($c4_sum)" \
+	test "$(planned_dump_bytes all_lite)" = "$c4_sum"
 DUMP_DIR=$tmp/b2all; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
 load_parts_state
 dump_matched_parts all "$(parts_bytes_path)" </dev/null >"$tmp/c2a.log" 2>&1; rc=$?
@@ -205,6 +209,35 @@ check "one-session keep-going: rc=$rc, boot_b failed, others verified" \
 DUMP_DIR=$tmp/b10
 dump_live_session nosuch </dev/null >"$tmp/c10.log" 2>&1; rc=$?
 check "one-session unknown name: nonzero rc ($rc), reported" bash -c "[ $rc != 0 ] && grep -q 'nosuch(not in live table)' '$tmp/c10.log'"
+# C4 (audit6): all_lite planning mirrors skip_bulk (super/system/vendor/
+# metadata ARE read; only the inactive slot is skipped), it is planned before
+# the slotinfo is removed, and the multi-name line and [9] copy get a
+# preflight too. require_free_space is stubbed to print what it was asked.
+DUMP_DIR=$tmp/b13; mkdir -p "$DUMP_DIR/meta"
+cp "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
+{ cat "$tmp/b2/meta/partition_list.txt"; printf '%s\n' 'super 8192' 'metadata 1024' 'system_a 5120' 'system_b 3072' 'vendor_b 1024'; } >"$DUMP_DIR/meta/partition_list.txt"
+c4_lite=$(( (1024 + 1024 + 4096 + 8192 + 1024 + 3072 + 1024) * 1024 + 262144 ))
+out=$( require_free_space() { echo "NEED=$2 LABEL=$4"; return 1; }
+	dump_live_session all_lite </dev/null 2>&1 )
+check "C4: all_lite plan counts super/metadata/system_b/vendor_b, skips slot a ($c4_lite)" \
+	bash -c '[[ $1 == *"NEED=$2 LABEL=dump all_lite"* ]]' _ "$out" "$c4_lite"
+check "C4: the refused all_lite never started a session" bash -c '[[ $1 != *"+ "* ]]' _ "$out"
+out=$( ACTIVE_SLOT=; load_parts_state() { ACTIVE_SLOT=; parts_bytes_path >/dev/null; return 0; }
+	planned_dump_bytes all_lite )
+c4_noslot=$(( (1024 + 1024 + 4096 + 8192 + 1024 + 5120 + 1024) * 1024 + 262144 ))
+check "C4: with no known slot each _a/_b pair counts once, at the larger size" \
+	test "$out" = "$c4_noslot"
+cp "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
+out=$( require_free_space() { echo "NEED=$2 LABEL=$4"; return 1; }
+	dump_many_session boot super </dev/null 2>&1 )
+check "C4: the multi-name dump is preflighted (boot_b + super)" \
+	bash -c '[[ $1 == *"NEED=$(( (4096 + 8192) * 1024 )) LABEL=dump boot super"* && $1 != *"+ "* ]]' _ "$out"
+INPUT_DIR=$tmp/in13; mkdir -p "$INPUT_DIR"
+head -c 5000 /dev/zero >"$DUMP_DIR/boot_b.img"; head -c 7000 /dev/zero >"$DUMP_DIR/super.img"
+out=$( require_free_space() { echo "NEED=$2 LABEL=$4"; return 1; }
+	promote_dump_action </dev/null 2>&1 )
+check "C4: [9] copy is preflighted with the images' sizes (12000)" \
+	bash -c '[[ $1 == *"NEED=12000 LABEL=copy into the flash folder"* ]] && [ ! -e "$2/boot_b.img" ]' _ "$out" "$INPUT_DIR"
 # dump_partition end to end (answers on stdin): cached table + 'y' refresh -> one session
 DUMP_DIR=$tmp/b11; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b1/meta/partition_list.txt" "$DUMP_DIR/meta/"
 cls() { :; }; pause() { :; }; ready() { :; }
