@@ -124,6 +124,9 @@ MOCK_RESET_PIPE=1 sh pipe --confirm-token="$REC" parts pt.txt reboot-recovery; r
 check "B2-7.1: PIPE on reset ack -> failure, not left-bus (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -qE 'stall; device still on the bus|usb-error|FAILED: USB error' sh_pipe.log &&
 		! grep -q 'device left the bus on reset \(expected\)' sh_pipe.log"
+check "C9: a PIPE on the reset ack is a usb-error in the status file, never left-bus" \
+	bash -c "grep -q 'reset: FAILED: USB error waiting for the ack (stall; device still on the bus)' sh_pipe.log &&
+		grep -qx 'reset=usb-error' sh_pipe.st && ! grep -qx 'reset=left-bus' sh_pipe.st"
 MOCK_RESET_SILENT=1 sh silent --confirm-token="$REC" parts pt.txt reboot-recovery; rc=$?
 check "H1: a reset TIMEOUT is still a failure, misc-verify still reported ok (rc $rc)" \
 	bash -c "[ $rc != 0 ] && grep -q 'timeout waiting for the ack' sh_silent.log && grep -qx 'misc-verify=ok' sh_silent.st && grep -qx 'reset=timeout' sh_silent.st"

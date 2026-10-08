@@ -291,6 +291,7 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 	int err, cfg = 0;
 	u->handle = h;
 	u->gone = 0;
+	u->stalled = 0;
 	/* A device that arrives unconfigured cannot be claimed; this is what
 	 * fixes it. On by default since a6cb72d. SPDHOST_NO_SET_CONFIG=1 skips it
 	 * for a host that dislikes the re-enumeration. */
@@ -485,17 +486,18 @@ int spd_usb_bulk_send(struct spd_usb *u, const uint8_t *buf, int len)
 		(unsigned char *)buf, len, &sent, u->timeout_ms);
 	if (err < 0) {
 		fprintf(stderr, "usb send: %s\n", libusb_error_name(err));
-		/* B2-7.1: only a real disconnect counts as "left the bus". PIPE is a
-		 * stall (device still enumerated); treating it as gone made reset/
-		 * power-off look successful while the phone sat in FDL2. IO can be a
-		 * disconnect mid-transfer on some hosts -- keep marking gone for IO
-		 * and NO_DEVICE so reopen_if_gone still works after EXEC. */
-		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO) {
+		/* NO_DEVICE/PIPE/IO after EXEC usually means the device left the bus.
+		 * Mark gone so reopen_if_gone can reacquire; return -1 for all three.
+		 * C9 (audit6): B2-7.1 stopped marking PIPE gone for EVERY caller,
+		 * which turned the hello/exec/final-chunk reacquire into a hard
+		 * failure. The old handling is back; `stalled` records that it was
+		 * a PIPE, and only end_session reads it (a stall there is not a
+		 * reset leaving the bus). */
+		if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
 			u->gone = 1;
+			u->stalled = err == LIBUSB_ERROR_PIPE;
 			return -1;
 		}
-		if (err == LIBUSB_ERROR_PIPE)
-			return -1;
 		/* TIMEOUT (and other non-disconnect errors): -2, gone unset.
 		 * BootROM hello may soft-retry TIMEOUT; other callers treat <0 as fail. */
 		return -2;
@@ -528,15 +530,13 @@ int spd_usb_bulk_recv(struct spd_usb *u, uint8_t *buf, int cap, int timeout_ms)
 		}
 		return 0;
 	}
-	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO) {
+	if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_IO || err == LIBUSB_ERROR_PIPE) {
+		/* C9: same as before B2-7.1 (gone for all three, so the hello/exec
+		 * paths can reacquire); `stalled` lets end_session tell a PIPE apart. */
 		u->gone = 1;
-		fprintf(stderr, "usb recv: %s (device left the bus)\n", libusb_error_name(err));
-		return -1;
-	}
-	if (err == LIBUSB_ERROR_PIPE) {
-		/* Stall: endpoint halted, device still on the bus. Not a disconnect. */
-		fprintf(stderr, "usb recv: %s (stall; device still on the bus)\n",
-			libusb_error_name(err));
+		u->stalled = err == LIBUSB_ERROR_PIPE;
+		fprintf(stderr, "usb recv: %s (%s)\n", libusb_error_name(err),
+			u->stalled ? "stall" : "device left the bus");
 		return -1;
 	}
 	if (err < 0) {
@@ -1032,6 +1032,7 @@ int spd_usb_reacquire(struct spd_usb *u)
 		u->handle = NULL;
 	}
 	u->gone = 0;
+	u->stalled = 0;
 	/* Give the host stack a moment to drop the old node. */
 	usleep(300000);
 	if (u->fd_mode)

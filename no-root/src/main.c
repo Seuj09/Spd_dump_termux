@@ -882,6 +882,15 @@ static int end_session(struct spd *io, unsigned type)
 	}
 	n = spd_recv(io, io->usb.timeout_ms);
 	if (n < 0) {
+		/* B2-7.1/C9: a PIPE stall marks gone too (the hello/exec paths
+		 * reacquire on it), but the device is still enumerated, so here it
+		 * is NOT the reset leaving the bus. */
+		if (io->usb.gone && io->usb.stalled) {
+			fprintf(stderr, "%s: FAILED: USB error waiting for the ack"
+				" (stall; device still on the bus)\n", what);
+			status_note(what, "usb-error");
+			return -1;
+		}
 		if (io->usb.gone) {
 			fprintf(stderr, "%s: device left the bus on %s (expected)\n", what,
 				type == 0x17 ? "power-off" : "reset");

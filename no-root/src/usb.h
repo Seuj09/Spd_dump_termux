@@ -19,7 +19,8 @@ struct spd_usb {
 	int out_mps;
 	int in_mps;
 	int timeout_ms;
-	int gone;          /* last transfer saw a disconnect */
+	int gone;          /* last transfer saw a disconnect (NO_DEVICE/IO/PIPE) */
+	int stalled;       /* ...and it was a PIPE stall (C9: end_session only) */
 	int fd_mode;       /* opened from an existing descriptor, not by scanning */
 	int reacquire;     /* try to grab the device again after a reset */
 	int reac_left;

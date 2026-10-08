@@ -91,6 +91,23 @@ check "clear_halts is called from exactly one place, in proto.c" test "${n:-0}" 
 check "and not from the FDL1/FDL2 code in main.c" \
 	test "$(grep -c 'spd_usb_clear_halts' "$root/src/main.c" || true)" = 0
 
+echo "== C9: libusb error classification (PIPE back to the pre-B2-7.1 handling) =="
+# PIPE marks gone again (so the hello / exec / final-chunk paths reacquire as
+# they did before B2-7.1) and sets `stalled`, which only end_session reads.
+log=$tmp/err.pipe.log; run "$log" MOCK_BULK_ERR=PIPE
+has "PIPE on send: -1, gone, stalled" "$log" '^err send rc=-1 gone=1 stalled=1$'
+has "PIPE on recv: -1, gone, stalled" "$log" '^err recv rc=-1 gone=1 stalled=1$'
+log=$tmp/err.nodev.log; run "$log" MOCK_BULK_ERR=NO_DEVICE
+has "NO_DEVICE on send: -1, gone, not stalled" "$log" '^err send rc=-1 gone=1 stalled=0$'
+has "NO_DEVICE on recv: -1, gone, not stalled" "$log" '^err recv rc=-1 gone=1 stalled=0$'
+log=$tmp/err.io.log; run "$log" MOCK_BULK_ERR=IO
+has "IO on recv: -1, gone, not stalled" "$log" '^err recv rc=-1 gone=1 stalled=0$'
+log=$tmp/err.to.log; run "$log" MOCK_BULK_ERR=TIMEOUT
+has "TIMEOUT on send: -2, not gone" "$log" '^err send rc=-2 gone=0 stalled=0$'
+has "TIMEOUT on recv: 0, not gone" "$log" '^err recv rc=0 gone=0 stalled=0$'
+check "only end_session reads stalled (main.c), proto.c never does" \
+	bash -c '[ "$(grep -c "usb.stalled" "$1/src/main.c")" -ge 1 ] && ! grep -q stalled "$1/src/proto.c"' _ "$root"
+
 echo
 echo "usb-extra: $pass passed, $fail failed"
 (( fail == 0 ))

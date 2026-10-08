@@ -189,10 +189,30 @@ int libusb_control_transfer(libusb_device_handle *h, uint8_t rt, uint8_t r, uint
 	rec("control rt=0x%02x r=%u wv=0x%x wi=%u len=%u", rt, r, v, i, len);
 	return len;
 }
+/* C9: MOCK_BULK_ERR=PIPE|NO_DEVICE|IO|TIMEOUT makes every transfer after
+ * `inject` is set fail with that libusb error, so the driver can read how
+ * src/usb.c classifies it (gone / stalled / return value). */
+static int inject;
+static int inject_err(void)
+{
+	const char *e = getenv("MOCK_BULK_ERR");
+	if (!inject || !e)
+		return 0;
+	if (!strcmp(e, "PIPE")) return LIBUSB_ERROR_PIPE;
+	if (!strcmp(e, "NO_DEVICE")) return LIBUSB_ERROR_NO_DEVICE;
+	if (!strcmp(e, "IO")) return LIBUSB_ERROR_IO;
+	if (!strcmp(e, "TIMEOUT")) return LIBUSB_ERROR_TIMEOUT;
+	return 0;
+}
 int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned char *d, int len,
 	int *got, unsigned int t)
 {
+	int e = inject_err();
 	(void)h; (void)d; (void)t;
+	if (e) {
+		*got = 0;
+		return e;
+	}
 	/* Nonzero mps makes len 0 a ZLP, not a no-op, so it must be logged. */
 	rec("bulk ep=0x%02x len=%d", ep, len);
 	*got = len;
@@ -223,5 +243,14 @@ int main(void)
 	memset(buf, 0x7e, sizeof(buf));
 	spd_usb_bulk_send(&u, buf, 512);  /* fills the packet: ZLP rule fires here */
 	spd_usb_bulk_send(&u, buf, 100);  /* partial packet: it must not */
+	if (getenv("MOCK_BULK_ERR")) {
+		int rc;
+		inject = 1;
+		rc = spd_usb_bulk_send(&u, buf, 100);
+		rec("err send rc=%d gone=%d stalled=%d", rc, u.gone, u.stalled);
+		u.gone = u.stalled = 0;
+		rc = spd_usb_bulk_recv(&u, buf, sizeof(buf), 100);
+		rec("err recv rc=%d gone=%d stalled=%d", rc, u.gone, u.stalled);
+	}
 	return 0;
 }
