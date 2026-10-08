@@ -124,5 +124,20 @@ check "R2: with a backup folder the session runs repartition (no --yes)" \
 	bash -c '[[ $1 == *"SESSION "*"repartition $2"* && $1 != *"--yes"* ]]' _ "$out" "$tmp/r2.xml"
 
 echo
+echo "== C11: meta/ is where the pre-repartition backup goes; super.img reminder =="
+c11=$tmp/c11dump; mkdir -p "$c11"
+out=$(env -u SPDHOST_PART_XML_DIR SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true SPDHOST_DUMP_DIR=$c11 \
+	bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+	need_loaders() { :; }; confirm_action() { echo "ASKED $1"; return 0; }; ready() { :; }
+	run_session() { echo "SESSION $*"; }
+	repartition_menu <<<"$2"; echo "rc=$?"' _ "$root" "$tmp/r2.xml")
+check "C11: the pre-repartition backup is named in DUMP_DIR/meta, as run_session exports" \
+	bash -c '[[ $1 == *"current table to $2/meta/partition_<time>.xml"* ]]' _ "$out" "$c11"
+check "C11: the confirm is preceded by the matching-super.img warning" \
+	bash -c '[[ $1 == *"flash a super.img that matches the NEW layout"*"ASKED"* ]]' _ "$out"
+check "C11: a successful repartition reminds to flash super.img and points at meta/" \
+	bash -c '[[ $1 == *"Reminder: flash a super.img built for this new layout"* && $1 == *"pre-repartition table is in $2/meta"* && $1 == *"rc=0"* ]]' _ "$out" "$c11"
+
+echo
 echo "menu-repartition: $pass passed, $fail failed"
 (( fail == 0 ))

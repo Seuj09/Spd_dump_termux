@@ -3235,7 +3235,7 @@ repartition_menu() {
 	echo "If you do not have one, spdhost can write the phone's current table as a"
 	echo "starting point; edit that copy rather than writing one by hand."
 	echo "Any path works, e.g. $DUMP_DIR/meta/repart.xml or $DUMP_DIR/meta/partition_<unixtime>.xml"
-	echo "(spdhost leaves that second one in the dump folder on every table read)."
+	echo "(spdhost leaves that second one in the dump folder's meta/ on every table read)."
 	read -r -p "Partition XML path, or 'new' to dump the current table first: " xml
 	if [[ -z ${xml:-} ]]; then
 		echo "Cancelled."
@@ -3276,13 +3276,19 @@ repartition_menu() {
 	repartition_xml_preview "$xml" || return 1
 	# R2: spdhost refuses to send unless this same session saved the current
 	# table as partition_<time>.xml first, and that copy goes to
-	# SPDHOST_PART_XML_DIR (the dump folder). Stop here if it cannot.
-	local bkdir=${SPDHOST_PART_XML_DIR-$DUMP_DIR}
+	# SPDHOST_PART_XML_DIR. C11: run_session defaults that to DUMP_DIR/meta,
+	# so check and name the same folder here. Stop if it cannot be written.
+	local bkdir=${SPDHOST_PART_XML_DIR-$(dump_meta_dir)}
 	if [[ -z $bkdir ]] || ! mkdir -p "$bkdir" 2>/dev/null || [[ ! -w $bkdir ]]; then
 		echo "No writable folder for the pre-repartition backup of the current table"
 		echo "(SPDHOST_PART_XML_DIR / dump folder: '${bkdir}'). Refused; nothing sent."
 		return 1
 	fi
+	# C11: a new map moves super (and every row after a changed one). The old
+	# super.img contents no longer match, so the phone does not boot until a
+	# super.img built for THIS layout is flashed.
+	echo "After a repartition, flash a super.img that matches the NEW layout (menu [6])"
+	echo "before you reboot to Android: rows that moved no longer hold their old data."
 	if ! confirm_action "type yes to repartition from this XML: "; then
 		return 1
 	fi
@@ -3293,6 +3299,13 @@ repartition_menu() {
 	ready || return 1
 	run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
 		repartition "$xml" "$BOOT_AFTER"
+	local rc=$?
+	if (( rc == 0 )); then
+		echo
+		echo "Reminder: flash a super.img built for this new layout (menu [6]) before"
+		echo "booting Android. The pre-repartition table is in $bkdir."
+	fi
+	return "$rc"
 }
 
 # The --confirm-token for `set-active`: spdhost hashes the PATCH, not the misc
