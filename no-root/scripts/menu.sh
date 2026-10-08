@@ -1419,18 +1419,6 @@ require_free_space() {
 	return 0
 }
 
-# Sum byte sizes of regular files in DIR (for flash staging preflight).
-sum_file_bytes() {
-	local dir=$1 f n=0
-	shopt -s nullglob
-	for f in "$dir"/*; do
-		[[ -f $f ]] || continue
-		n=$((n + $(stat -c %s "$f" 2>/dev/null || echo 0)))
-	done
-	shopt -u nullglob
-	printf '%s\n' "$n"
-}
-
 # Planned dump size from the byte table for TARGET (all / all_lite / name).
 # C4 (audit6): all_lite mirrors dumpcmd.c skip_bulk() exactly: it skips the
 # blackbox*/cache*/userdata* rows (like all) and the INACTIVE slot's _a/_b
@@ -2939,8 +2927,18 @@ flash_input_menu() {
 		echo "Could not create a staging folder in $tdir." >&2
 		return 1
 	}
+	# C13 (audit6): a symlink stage needs no space, so there is no check for
+	# it (the old one summed the links' own 29-byte sizes, after the copy).
+	# Only a file that cannot be linked is copied, and that copy is checked
+	# first against the REAL size of its source (stat -L).
+	local need
 	for (( i = 0; i < ${#stage_src[@]}; i++ )); do
 		if ! ln -s "${stage_src[i]}" "$stage/${stage_dst[i]}" 2>/dev/null; then
+			need=$(stat -L -c %s "${stage_src[i]}" 2>/dev/null || echo 0)
+			if ! require_free_space "$tdir" "$need" 64 "flash staging copy of ${stage_dst[i]}"; then
+				rm -rf "$stage"
+				return 1
+			fi
 			cp "${stage_src[i]}" "$stage/${stage_dst[i]}" || {
 				echo "Could not stage ${stage_dst[i]}" >&2
 				rm -rf "$stage"
@@ -2967,10 +2965,6 @@ flash_input_menu() {
 	fi
 	echo "spdhost asks once more on the terminal before it sends anything."
 	if ! require_parts_verified "flash"; then
-		rm -rf "$stage"
-		return 1
-	fi
-	if ! require_free_space "$(spd_tmpdir 2>/dev/null || echo /tmp)" "$(sum_file_bytes "$stage")" 64 "flash staging"; then
 		rm -rf "$stage"
 		return 1
 	fi

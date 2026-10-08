@@ -51,5 +51,33 @@ out=$(SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER=/bin/true bash -c 'source "$1/scrip
 check "B1-2: require_free_space allows a tiny need" \
 	bash -c '[[ $1 == *rc=0* && $1 != *REFUSED* ]]' _ "$out"
 
+# C13 (audit6): the flash stage is symlinks, which need no space, so there is
+# no staging check at all; only a file that cannot be linked is copied, and
+# that copy is checked first against the source's REAL size (stat -L).
+printf '%s\n' '# spdhost-parts shift 10 verified 1' 'boot_a 4096' 'misc 1024' > backup/meta/partition_list.txt
+truncate -s 3G input/boot.img
+run_flash_c13() { # L EXTRA-SNIPPET
+	local L=$1
+	: > "rec_$L"
+	env REC="$tmp/rec_$L" SPDHOST_MENU_LIB=1 SPDHOST_MENU_RUNNER="$tmp/run" \
+		SPDHOST_MENU_CONFIG="$tmp/none.conf" DUMP_DIR="$tmp/backup" INPUT_DIR="$tmp/input" \
+		bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1
+		FDL1=$2/fdl/ums9230/t/fdl1.bin FDL1_ADDR=0x65000800
+		FDL2=$2/fdl/ums9230/t/fdl2.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 DEVICE=t
+		confirm_action() { return 0; }; pause() { return 0; }; ready() { echo READY; return 0; }; cls() { :; }
+		need_loaders() { return 0; }; exec_addr_value() { return 1; }
+		require_free_space() { echo "RFS need=$2 label=$4"; return 1; }
+		cp() { echo "CP $*"; command cp "$@"; }
+		eval "$3"
+		flash_input_menu; echo "rc=$?"' _ "$root" "$tmp" "${2:-}" > "out_$L" 2>&1
+}
+run_flash_c13 c13link
+check "C13: a symlink stage is not size-checked and the flash runs" \
+	bash -c "! grep -q RFS out_c13link && ! grep -q '^CP ' out_c13link && grep -q READY out_c13link && grep -q 'write-files' rec_c13link"
+run_flash_c13 c13cp 'ln() { return 1; }'
+check "C13: a copied stage is checked BEFORE the copy, with the real size (3 GiB)" \
+	bash -c "grep -q 'RFS need=3221225472 label=flash staging copy of boot.img' out_c13cp && ! grep -q '^CP ' out_c13cp && ! grep -q READY out_c13cp && [ ! -s rec_c13cp ] && grep -q 'rc=1' out_c13cp"
+rm -f input/boot.img; printf boot > input/boot.img
+
 echo "menu-flash-gate: $pass passed, $fail failed"
 (( fail == 0 ))
