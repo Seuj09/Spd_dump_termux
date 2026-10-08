@@ -6,7 +6,10 @@ name: build
 # body is the commit that produced it and the build date.
 #
 # Runs on a push to either of the two live branches when something under
-# no-root/ changed, and on demand from the Actions tab.
+# no-root/ (or android/, or the CI itself) changed, on a pull request into
+# either of them, and on demand from the Actions tab. A pull request runs the
+# same test, build and APK jobs but publishes nothing: every release and
+# Telegram step is guarded by the event name.
 on:
   push:
     branches:
@@ -14,7 +17,18 @@ on:
       - experiment/brom-hello-diagnostics
     paths:
       - 'no-root/**'
+      - 'android/**'
       - '.github/workflows/build.yml'
+      - '.github/scripts/**'
+  pull_request:
+    branches:
+      - main
+      - experiment/brom-hello-diagnostics
+    paths:
+      - 'no-root/**'
+      - 'android/**'
+      - '.github/workflows/build.yml'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -103,6 +117,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      # The pre-release tag the publish step made (empty on a pull request),
+      # so the APK job attaches to the same release.
+      tag: ${{ steps.publish.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -149,6 +167,9 @@ jobs:
           if-no-files-found: error
 
       - name: Publish the release
+        id: publish
+        # Never from a pull request: a PR build is checked, not released.
+        if: github.event_name != 'pull_request'
         working-directory: no-root
         env:
           GH_TOKEN: ${{ github.token }}
@@ -335,3 +356,221 @@ jobs:
               --prerelease
           fi
           echo "published $tag"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+  # The APK (spdhost-apk-phased-plan.md §3, §7). The app is a thin Android
+  # front-end that execs the same static zig/musl spdhost the zips ship, from
+  # nativeLibraryDir as libspdhost.so, and hands it the USB fd over a path
+  # socket (option S). So the "native core for the APK ABIs" IS the `make
+  # cross` output of the build job, copied, not rebuilt: arm32 ->
+  # armeabi-v7a, arm64 -> arm64-v8a. The plan says no NDK (S needs no JNI), so
+  # none is installed. minSdk 24 needs nothing different from the binary.
+  #
+  # Until the plan's P1-1 slice adds android/ (Gradle KTS app), this job
+  # stages and checks the native core and uploads it; the Gradle steps are
+  # skipped with a notice and turn on by themselves once android/ exists.
+  #
+  # It needs build, and nothing needs it except the notify job, so it can
+  # neither block nor fail test/build or their release; its own failure shows
+  # as a red APK job.
+  apk:
+    name: APK (native core + debug APK)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JAVA_VERSION: '17'
+      JAVA_DISTRIBUTION: temurin
+      # cmdline-tools 19.0 (android-actions/setup-android's default build id)
+      ANDROID_CMDLINE_TOOLS: '15859902'
+      # targetSdk 35 per the plan; minSdk 24 lives in the app's Gradle file.
+      ANDROID_PACKAGES: 'platform-tools platforms;android-35 build-tools;35.0.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Telegram helper self-test (no network, no secrets)
+        run: bash .github/scripts/test-tg-notify.sh
+
+      - name: Get the build job's zips
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist
+
+      - name: Stage the native core for the APK ABIs
+        id: core
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static file unzip >/dev/null
+          sha=$(git rev-parse HEAD)
+          rm -rf unz jniLibs && mkdir -p unz
+          unzip -q dist/arm32/spdhost-arm32-static-*.zip -d unz
+          unzip -q dist/arm64/spdhost-arm64-static-*.zip -d unz
+          # ABI dir, zip tree, qemu, and what `file` must say.
+          while read -r abi tree qemu want; do
+            mkdir -p "jniLibs/$abi"
+            cp "unz/$tree/spdhost" "jniLibs/$abi/libspdhost.so"
+            desc=$(file -b "jniLibs/$abi/libspdhost.so")
+            echo "$abi: $desc"
+            case $desc in *"$want"*statically\ linked*) ;; *)
+              echo "::error::$abi: libspdhost.so is not a static $want executable"; exit 1 ;; esac
+            # The core must say which commit built it, and it must be this one:
+            # the APK and the zips come from one SHA (plan A3).
+            caps=$($qemu "jniLibs/$abi/libspdhost.so" caps </dev/null)
+            got=$(printf '%s\n' "$caps" | sed -n 's/^build_sha=//p')
+            printf '%s\n' "$caps" | grep -qx end || { echo "::error::$abi: caps output has no end line"; exit 1; }
+            [ "$got" = "$sha" ] || { echo "::error::$abi: caps build_sha=$got, expected $sha"; exit 1; }
+            echo "$abi: caps build_sha=$got"
+          done <<'ABIS'
+          armeabi-v7a spdhost-arm32 qemu-arm-static ARM,
+          arm64-v8a spdhost-arm64 qemu-aarch64-static aarch64
+          ABIS
+          (cd jniLibs && sha256sum */libspdhost.so | tee SHA256SUMS)
+          echo "short=$(printf '%s' "$sha" | cut -c1-7)" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the APK native core
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-native-core-${{ github.sha }}
+          path: jniLibs
+          if-no-files-found: error
+
+      - name: Is there an Android app project yet?
+        id: app
+        run: |
+          if [ -x android/gradlew ] && { [ -f android/settings.gradle.kts ] || [ -f android/settings.gradle ]; }; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+            echo "android/ app project found; building the debug APK"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "::notice title=APK::No android/ Gradle project on this commit yet (it lands with plan slice P1-1). The native core for armeabi-v7a and arm64-v8a was built, checked and uploaded; the JDK/SDK setup, Gradle unit tests, assembleDebug, the APK artifact, the release upload and the Telegram post are skipped and turn on by themselves once android/gradlew and android/settings.gradle(.kts) exist."
+          fi
+
+      - name: Set up JDK
+        if: steps.app.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: Set up the Android SDK
+        if: steps.app.outputs.present == 'true'
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: ${{ env.ANDROID_CMDLINE_TOOLS }}
+          packages: ${{ env.ANDROID_PACKAGES }}
+          log-accepted-android-sdk-licenses: false
+
+      - name: Set up Gradle (wrapper-pinned, cached)
+        if: steps.app.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests + debug APK
+        id: gradle
+        if: steps.app.outputs.present == 'true'
+        working-directory: android
+        run: |
+          set -euo pipefail
+          # jniLibs are filled by CI, never committed (plan §2).
+          rm -rf app/src/main/jniLibs
+          mkdir -p app/src/main
+          cp -r ../jniLibs app/src/main/jniLibs
+          rm -f app/src/main/jniLibs/SHA256SUMS
+          ./gradlew --no-daemon testDebugUnitTest assembleDebug
+          apk=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+          [ -n "$apk" ] || { echo "::error::assembleDebug produced no APK"; exit 1; }
+          out="$GITHUB_WORKSPACE/spdhost-${{ steps.core.outputs.short }}-debug.apk"
+          cp "$apk" "$out"
+          (cd "$GITHUB_WORKSPACE" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+          echo "apk=$out" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the debug APK
+        if: steps.app.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spdhost-apk-debug-${{ steps.core.outputs.short }}
+          path: |
+            spdhost-*-debug.apk
+            spdhost-*-debug.apk.sha256
+          if-no-files-found: error
+
+      - name: Attach the APK to the pre-release
+        # Only where the build job published (never on a pull request); the
+        # release is the build job's --prerelease one, so never Latest.
+        if: steps.app.outputs.present == 'true' && github.event_name != 'pull_request' && needs.build.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" spdhost-*-debug.apk spdhost-*-debug.apk.sha256 --clobber
+          echo "attached to $TAG"
+
+      - name: Post the APK to Telegram
+        # Release path only. A Telegram problem must not fail the release, so
+        # the step may fail on its own (non-ok reply) without failing the job.
+        if: github.event_name != 'pull_request' && needs.build.outputs.tag != ''
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TAG: ${{ needs.build.outputs.tag }}
+          APK: ${{ steps.gradle.outputs.apk }}
+        run: |
+          # No set -x here: the token must never reach the log.
+          set -euo pipefail
+          bash .github/scripts/tg-notify.sh release \
+            --tag "$TAG" --sha "$(git rev-parse HEAD)" \
+            --subject "$(git log -1 --format=%s HEAD)" \
+            --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            --file "${APK:-}" --prerelease
+
+  # PASS/FAIL to Telegram after every push build and release build. Never on a
+  # pull request (fork PRs get no secrets anyway; the event and head-repo
+  # guards make that explicit). It needs every other job but nothing needs
+  # it, so it cannot change their gating; it runs with always(), so a red run
+  # stays red (its own success cannot turn a failed job green) and a failed
+  # send only adds a red notify job. Cancelled counts as FAIL and is named.
+  notify:
+    name: Telegram build result
+    needs: [test, build, apk]
+    if: >-
+      always() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.event.pull_request == null &&
+      github.repository == 'Seuj09/Spd_dump_termux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+
+      - name: Send PASS/FAIL
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          R_TEST: ${{ needs.test.result }}
+          R_BUILD: ${{ needs.build.result }}
+          R_APK: ${{ needs.apk.result }}
+        run: |
+          # No set -x here: the token must never reach the log.
+          set -euo pipefail
+          failed=''
+          add() { failed="${failed:+$failed, }$1 ($2)"; }
+          # success and skipped are not failures (a job skipped because an
+          # earlier one failed is covered by that one); failure and
+          # cancelled are.
+          for pair in "no-root test suite:$R_TEST" "arm32 + arm64 static build:$R_BUILD" "APK:$R_APK"; do
+            r=${pair##*:}
+            case $r in success|skipped) ;; *) add "${pair%:*}" "$r" ;; esac
+          done
+          result=pass; [ -z "$failed" ] || result=fail
+          # The checkout is this run's commit; its subject line only.
+          subj=$(git log -1 --format=%s HEAD)
+          bash .github/scripts/tg-notify.sh status --result "$result" \
+            --branch "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" --subject "$subj" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --failed "$failed"
