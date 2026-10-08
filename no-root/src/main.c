@@ -806,6 +806,17 @@ static void status_note(const char *key, const char *val)
 	fclose(f);
 }
 
+/* C10: the size misc-backup actually read (on an unverified table that is the
+ * device's probe, not the table row), for the menu's backup-size check. */
+static void status_misc_bytes(void)
+{
+	size_t n = 0;
+	char v[32];
+	spd_misc_guard_image(&n);
+	snprintf(v, sizeof(v), "%zu", n);
+	status_note("misc-bytes", v);
+}
+
 /* misc is written whole, always (H3). A 2048-byte BCB used to go out as one
  * 2048-byte MIDST, the way spd_dump's reboot-* does it; but a loader that
  * programs misc in 4 KiB (or larger) units fills the rest of the unit itself,
@@ -2058,6 +2069,7 @@ int main(int argc, char **argv)
 			need_fdl2(io, "misc-backup");
 			if (spd_misc_backup(io, argv[i + 1]))
 				return 1; /* never --keep-going past a failed backup */
+			status_misc_bytes();
 			i += 2;
 		} else if (strcmp(cmd, "misc-backup-expect") == 0) {
 			/* misc-backup, then refuse to go on unless the misc just read
@@ -2079,6 +2091,7 @@ int main(int argc, char **argv)
 			}
 			if (spd_misc_backup(io, argv[i + 1]))
 				return 1;
+			status_misc_bytes();
 			b = load_small_file(argv[i + 1], &n, (size_t)spd_misc_size(io));
 			if (!b)
 				return 1;

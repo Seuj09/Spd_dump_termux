@@ -2573,6 +2573,7 @@ MISC_EXPECT_SHA=""
 guarded_misc_session() {
 	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN expect=$MISC_EXPECT_SHA
 	local -a backup_cmd
+	local mbytes
 	shift
 	# MISC_EXPECT_SHA (one-shot, like the token): the sha256 misc had when the
 	# caller read it in an EARLIER session. The backup then becomes
@@ -2620,6 +2621,9 @@ guarded_misc_session() {
 		parts "$raw" "${backup_cmd[@]}" "$@"
 	rc=$?
 	verify=$( [[ -n $st ]] && awk -F= '$1 == "misc-verify" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	# C10: the byte count spdhost's misc-backup actually read (a probe on an
+	# unverified table, not the cached row). Older spdhost: the table row.
+	mbytes=$( [[ -n $st ]] && awk -F= '$1 == "misc-bytes" { v = $2 } END { print v }' "$st" 2>/dev/null)
 	endres=$( [[ -n $st ]] && awk -F= '$1 == "reset" || $1 == "power-off" { v = $2 } END { print v }' "$st" 2>/dev/null)
 	[[ -n $st ]] && rm -f "$st"
 	case $verify in
@@ -2636,8 +2640,12 @@ guarded_misc_session() {
 		*) [[ $verify == ok ]] && echo "$ending: not run" ;;
 	esac
 	load_parts_state >/dev/null 2>&1
-	want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
-	[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
+	if [[ $mbytes =~ ^[0-9]+$ ]] && (( mbytes > 0 )); then
+		want=$mbytes
+	else
+		want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
+		[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
+	fi
 	sz=$(stat -c %s "$backup" 2>/dev/null || echo -1)
 	if (( sz == want )); then
 		record_sha256 "$backup"
@@ -2646,6 +2654,11 @@ guarded_misc_session() {
 		echo "  (or menu [2] -> [6] restore misc from a backup)"
 	elif (( rc == 0 )); then
 		echo "backup size $sz differs from the table ($want bytes). spdhost exited 0, so the write did happen. Backup kept: $backup" >&2
+	elif [[ -n $verify ]]; then
+		# C10: the misc write was reached (verified, failed or partial), so
+		# this file may be the only copy of the old misc. Never delete it.
+		echo "misc backup is $sz bytes (expected $want); the misc write WAS attempted (verify: $verify). Backup kept: $backup" >&2
+		rc=1
 	else
 		echo "misc backup missing or wrong size ($sz of $want bytes): the write was NOT done." >&2
 		rm -f "$backup"

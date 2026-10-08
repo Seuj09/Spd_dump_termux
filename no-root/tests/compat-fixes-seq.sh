@@ -155,6 +155,40 @@ out=$(export M=2 MOCK_RESET_GONE=1; source ./menu_env.sh; MISC_CONFIRM_TOKEN=$RE
 check "H1 menu: lost ack -> 'device left the bus on reset (expected)', session OK" \
 	bash -c '[[ $1 == *"misc verify: OK"* && $1 == *"device left the bus on reset (expected)"* && $1 == *"misc written, read back and verified"* ]]' _ "$out"
 
+# ---- C10 (audit6): the misc backup size comes from spdhost; a backup is never
+# deleted once the misc write was reached ----
+sh c10s --yes parts pt.txt misc-backup c10s.img; rc=$?
+check "C10: spdhost reports misc-bytes=<bytes read> in the status file (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -qx \"misc-bytes=\$(stat -c %s c10s.img)\" sh_c10s.st"
+# A fake spdhost: misc-backup reads 1 MiB (an N5 probe), the misc write
+# verifies, the reset ack is lost (exit 1). The cached row says 2 MiB.
+cat > c10run <<'R'
+#!/usr/bin/env bash
+b=; while (($#)); do case $1 in misc-backup|misc-backup-expect) b=$2 ;; esac; shift; done
+head -c 1048576 /dev/zero >"$b"
+st=$SPDHOST_STATUS_FILE
+[[ -n ${C10_NOBYTES:-} ]] || echo misc-bytes=1048576 >>"$st"
+echo misc-verify=ok >>"$st"; echo reset=timeout >>"$st"
+exit 1
+R
+chmod +x c10run
+c10() { # DIR [ENV...]
+	local d=$1; shift
+	mkdir -p "$d/meta"
+	printf '%s\n' '# spdhost-parts shift 10 verified 0' 'misc 2048' >"$d/meta/partition_list.txt"
+	( export "$@"; source ./menu_env.sh; DUMP_DIR=$d; RUNNER=("$tmp/c10run")
+	  MISC_CONFIRM_TOKEN=$REC guarded_misc_session reboot-recovery reboot-recovery 2>&1 )
+}
+out=$(c10 "$tmp/c10a" C10_X=1)
+check "C10 menu: the backup is checked against spdhost's misc-bytes, kept and summed" \
+	bash -c '[[ $1 != *"write was NOT done"* ]] && ls "$2"/meta/misc-before-*.img >/dev/null 2>&1 &&
+		grep -q "misc-before-.*\.img" "$2/meta/SHA256SUMS"' _ "$out" "$tmp/c10a"
+check "C10 menu: ...and the verified write is still reported as written" \
+	bash -c '[[ $1 == *"misc WAS written and verified"* ]]' _ "$out"
+out=$(c10 "$tmp/c10b" C10_NOBYTES=1)
+check "C10 menu: older spdhost (no misc-bytes), size differs, misc verified -> backup KEPT" \
+	bash -c '[[ $1 == *"Backup kept"* && $1 != *"write was NOT done"* ]] && ls "$2"/meta/misc-before-*.img >/dev/null 2>&1' _ "$out" "$tmp/c10b"
+
 # ---- H2 + M1: set-active b --bcb recovery, ONE session ------------------------------
 # misc says slot a is active and good; slot b once booted fine and has 2 tries.
 python3 abc.py build orig.misc a 15,5,1 14,2,1 live_a.misc
