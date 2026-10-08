@@ -4174,23 +4174,64 @@ pac_extract_action() {
 	esac
 	read -r -p "Output folder [$INPUT_DIR/extract]: " dir
 	dir=${dir:-$INPUT_DIR/extract}
-	# B1-6: extract into a staging dir, then rename. A failure must not leave
-	# $dir as a mix of old+new images a later flash could write.
-	local stage
-	stage=$(mktemp -d "$(spd_tmpdir 2>/dev/null || echo /tmp)/spdhost-pac.XXXXXX") || {
-		echo "Cannot create a staging folder." >&2; return 1
+	# C1 (audit6): never delete or replace a folder the user named. The old
+	# B1-6 code ran `rm -rf "$dir"` before the rename, so typing the flash
+	# folder (or ~, or .) wiped every dump in it. Now:
+	#   - $dir missing         -> extract into $dir (created at the end)
+	#   - $dir an empty folder -> extract into $dir (rmdir, which only ever
+	#                             removes an EMPTY folder, then rename)
+	#   - anything else that is a folder (files in it, a symlink to a
+	#     folder, a path with ..) -> extract into a NEW subfolder of it
+	#   - a file / dangling link -> refuse
+	# The staging folder is a sibling of the target, so the final rename is
+	# on the same filesystem (no 2x space for a multi-GB pac) and a failed
+	# extract never leaves a mix of old and new images.
+	local target parent stage stamp listing n=0
+	while [[ $dir == */ && $dir != / ]]; do dir=${dir%/}; done
+	if [[ -L $dir || -e $dir ]]; then
+		if [[ ! -d $dir ]]; then
+			echo "$dir exists and is not a folder; nothing extracted." >&2
+			return 1
+		fi
+		# An unreadable folder counts as non-empty (ls fails).
+		if [[ ! -L $dir ]] && listing=$(ls -A -- "$dir" 2>/dev/null) && [[ -z $listing ]]; then
+			target=$dir
+		else
+			stamp=$(date +%Y%m%d-%H%M%S)
+			target=$dir/pac-extract-$stamp
+			while [[ -e $target || -L $target ]]; do
+				n=$((n + 1)); target=$dir/pac-extract-$stamp-$n
+			done
+		fi
+	else
+		target=$dir
+	fi
+	parent=$(dirname -- "$target")
+	[[ -d $parent ]] || mkdir -p -- "$parent" || {
+		echo "Cannot create $parent." >&2; return 1
+	}
+	stage=$(mktemp -d "$parent/.spdhost-pac.XXXXXX") || {
+		echo "Cannot create a staging folder in $parent." >&2; return 1
 	}
 	# shellcheck disable=SC2086 -- the word split IS the entry list.
 	if "$bin" unpac -d "$stage" extract "$pac" $pick; then
-		rm -rf "$dir"
-		if ! mv "$stage" "$dir"; then
-			echo "Extracted, but could not move $stage to $dir." >&2
+		# Only an EMPTY target folder is ever removed, and only with rmdir.
+		if [[ -d $target && ! -L $target ]]; then
+			rmdir -- "$target" 2>/dev/null || {
+				echo "$target is no longer empty; the entries are in $stage." >&2
+				return 1
+			}
+		fi
+		if [[ -e $target || -L $target ]] || ! mv -- "$stage" "$target"; then
+			echo "Extracted, but could not rename $stage to $target." >&2
 			return 1
 		fi
-		echo "Extracted into $dir"
+		[[ $target == "$dir" ]] || echo "$dir already has files; nothing in it was touched."
+		echo "Extracted into $target"
 		echo "Flash one from menu [6], or move it into $INPUT_DIR."
 	else
-		rm -rf "$stage"
+		# $stage is the mktemp folder made above, never a user path.
+		rm -rf -- "$stage"
 		echo "unpac extract failed; $dir was left unchanged (no partial mix)." >&2
 		return 1
 	fi

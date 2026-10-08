@@ -308,6 +308,92 @@ check "pac extract one: writes the named entry" test -s "$tmp/pac_only/system.im
 check "pac extract one: writes nothing else" \
 	bash -c '[ "$(ls "$1" | tr "\n" " ")" = "system.img " ]' _ "$tmp/pac_only"
 
+# C1 (audit6): the output folder is whatever the user types, so it must
+# never be deleted. The old B1-6 code ran rm -rf on it, and typing the flash
+# folder wiped every dump in it. Each case below seeds files and checks they
+# all survive, byte for byte.
+pac_out() { # pac_out FOLDER-ANSWER [PAC] -> transcript path
+	local t=$tmp/pacout-$RANDOM.pty
+	python3 "$drive" "$t" "PAC file" "${2:-$tmp/input/payloads.pac}\r" \
+		"Choice" '2\r' "Output folder" "$1\r" -- "$tmp/fn.sh pac_extract_action" </dev/null
+	printf '%s\n' "$t"
+}
+seed_tree() { # a shared flash/dump folder: images, meta/, the pac, a link, a dotfile
+	mkdir -p "$1/meta"
+	echo precious >"$1/boot_a.img"; echo sums >"$1/meta/SHA256SUMS"
+	echo hidden >"$1/.keep"; cp "$tmp/input/payloads.pac" "$1/"
+	ln -s boot_a.img "$1/boot_link.img"
+}
+tree_intact() { # tree_intact DIR: every seeded file still there, same bytes
+	[[ $(cat "$1/boot_a.img") == precious && $(cat "$1/meta/SHA256SUMS") == sums &&
+		$(cat "$1/.keep") == hidden && -L $1/boot_link.img &&
+		$(readlink "$1/boot_link.img") == boot_a.img ]] &&
+		cmp -s "$1/payloads.pac" "$tmp/input/payloads.pac"
+}
+one_sub() { # exactly one new pac-extract-* subfolder holding system.img
+	local d=("$1"/pac-extract-*)
+	[[ ${#d[@]} == 1 && -s ${d[0]}/system.img ]]
+}
+no_stage() { ! compgen -G "$1/.spdhost-pac.*" >/dev/null; }
+
+# The shared layout: output = the flash/dump folder itself.
+sh1=$tmp/shared1; seed_tree "$sh1"
+tr=$(pac_out "$sh1")
+check "C1 pac: typing the dump folder keeps every file in it" tree_intact "$sh1"
+check "C1 pac: ...and extracts into a new subfolder of it" one_sub "$sh1"
+check "C1 pac: ...and says nothing was touched" pty_has "$tr" "nothing in it was touched"
+check "C1 pac: ...and leaves no staging folder behind" no_stage "$sh1"
+check "C1 pac: ...and never writes an image into the dump root" test ! -e "$sh1/system.img"
+# A trailing slash and a ..-style path that resolves to the same folder.
+sh2=$tmp/shared2; seed_tree "$sh2"
+tr=$(pac_out "$sh2/meta/../")
+check "C1 pac: a ..-style path to the dump folder keeps every file" tree_intact "$sh2"
+check "C1 pac: ...and meta/ is not touched either" \
+	bash -c '[ "$(ls -A "$1/meta")" = SHA256SUMS ]' _ "$sh2"
+# A symlink to a non-empty folder: the link and the folder both survive.
+sh3=$tmp/shared3; seed_tree "$sh3"; ln -s "$sh3" "$tmp/link3"
+tr=$(pac_out "$tmp/link3")
+check "C1 pac: a symlink to the dump folder keeps the link" test -L "$tmp/link3"
+check "C1 pac: ...and every file behind it" tree_intact "$sh3"
+check "C1 pac: ...and extracts into a new subfolder" one_sub "$sh3"
+# A symlink to an EMPTY folder is still never replaced.
+mkdir -p "$tmp/empty4"; ln -s "$tmp/empty4" "$tmp/link4"
+tr=$(pac_out "$tmp/link4")
+check "C1 pac: a symlink to an empty folder is not replaced" \
+	bash -c '[ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]' _ "$tmp/link4" "$tmp/empty4"
+check "C1 pac: ...the entries land in a subfolder behind it" one_sub "$tmp/empty4"
+# An existing EMPTY real folder is used as is.
+mkdir -p "$tmp/empty5"
+tr=$(pac_out "$tmp/empty5")
+check "C1 pac: an empty folder receives the entries directly" test -s "$tmp/empty5/system.img"
+check "C1 pac: ...with no stage left in its parent" no_stage "$tmp"
+# Extracting twice into the default folder keeps the first extract.
+mkdir -p "$tmp/input/extract"; echo mine >"$tmp/input/extract/notes.txt"
+tr=$(pac_out "")
+check "C1 pac: a second extract into <input>/extract keeps the first" \
+	bash -c '[ "$(cat "$1/notes.txt")" = mine ]' _ "$tmp/input/extract"
+check "C1 pac: ...and puts the new one in a subfolder" one_sub "$tmp/input/extract"
+# Home-style answers: ~ is never expanded by read, so test the real path.
+home6=$tmp/home6; mkdir -p "$home6/bin"; echo x >"$home6/bin/spdhost"
+tr=$(pac_out "$home6")
+check "C1 pac: a home-like folder keeps its contents" test "$(cat "$home6/bin/spdhost")" = x
+# A path that is a regular file is refused and left alone.
+echo file >"$tmp/plainfile"
+tr=$(pac_out "$tmp/plainfile")
+check "C1 pac: a file path is refused" pty_has "$tr" "is not a folder"
+check "C1 pac: ...and the file is untouched" test "$(cat "$tmp/plainfile")" = file
+# A failed extract (unsafe entry name) leaves the folder exactly as it was.
+sh7=$tmp/shared7; seed_tree "$sh7"; cp "$tmp/pacfx/bad.pac" "$sh7/"
+before=$(cd "$sh7" && find . | sort)
+tr=$(pac_out "$sh7" "$sh7/bad.pac")
+check "C1 pac: a failed extract keeps every file" tree_intact "$sh7"
+check "C1 pac: ...adds nothing (no subfolder, no stage)" \
+	bash -c '[ "$(cd "$1" && find . | sort)" = "$2" ]' _ "$sh7" "$before"
+# Static: inside pac_extract_action the only rm -rf is on the mktemp stage.
+pac_body=$(sed -n '/^pac_extract_action()/,/^}/p' "$root/scripts/menu.sh" | grep -v '^[[:space:]]*#')
+check "C1 pac: the only rm -rf in the extract is on its own stage" \
+	bash -c '[ "$(printf "%s\n" "$1" | grep -c "rm -rf")" = 1 ] && printf "%s\n" "$1" | grep -q "rm -rf -- \"\$stage\""' _ "$pac_body"
+
 # A folder with no .pac and no answer must not fall through to an extract.
 mkdir -p "$tmp/no-pac"
 tr=$tmp/no-pac.pty
