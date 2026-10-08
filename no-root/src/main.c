@@ -237,9 +237,11 @@ static void usage(void)
 		"                          sha256 first. Needs an UNLOCKED bootloader to boot.\n"
 		"                          Needs parts. Over 64MB is refused. --yes is not enough.\n"
 		"  frp-reset OUT           DANGEROUS. Read all of the FRP partition to OUT,\n"
-		"                          check the file size, then erase it: `frp` when the\n"
-		"                          table has that row, else persist. A failed or\n"
-		"                          short read does not erase. Needs parts.\n"
+		"                          check the file size, then erase it: whichever of\n"
+		"                          frp / persist the table has. With both, set\n"
+		"                          SPDHOST_FRP_PART=frp|persist (getprop ro.frp.pst)\n"
+		"                          or it refuses. A failed or short read does not\n"
+		"                          erase. Needs parts.\n"
 		"                          Over 512MB is refused.\n"
 		"  danger-erase NAME       DANGEROUS. Only persist, persist_a, persist_b,\n"
 		"                          splloader, splloader_bak. erase-part still refuses\n"
@@ -1185,31 +1187,43 @@ static int same_file_size(const char *path, uint64_t expect)
 	return (uint64_t)n == expect ? 0 : -1;
 }
 
-/* G10/N3: the partition that holds FRP. When the table has both `frp` and
- * `persist`, prefer SPDHOST_FRP_PART (from ro.frp.pst when the user sets it),
- * else prefer persist (Unisoc sample pst=persist). A table with only one of
- * the two still uses that one. */
+/* G10/N3/C7: the partition that holds FRP. SPDHOST_FRP_PART (frp or persist,
+ * from `getprop ro.frp.pst`) always wins. A table with only one of the two
+ * uses that one. A table with BOTH and no SPDHOST_FRP_PART gives NULL: which
+ * one holds FRP is phone-specific (persist also holds DRM keys/calibration on
+ * phones whose FRP lives in frp), so the caller refuses and asks instead of
+ * guessing. */
 static const char *frp_base(struct spd *io)
 {
 	char r[40];
 	uint64_t sz_frp = 0, sz_per = 0;
 	int have_frp = 0, have_per = 0;
 	const char *env;
+	env = getenv("SPDHOST_FRP_PART");
+	if (env && env[0]) {
+		if (!strcmp(env, "frp"))
+			return "frp";
+		if (!strcmp(env, "persist"))
+			return "persist";
+	}
 	if (!io || io->nparts <= 0)
 		return "persist";
 	have_frp = spd_lookup_part(io, "frp", spd_active_slot(io), r, sizeof(r), &sz_frp) == 0 && sz_frp;
 	have_per = spd_lookup_part(io, "persist", spd_active_slot(io), r, sizeof(r), &sz_per) == 0 && sz_per;
-	env = getenv("SPDHOST_FRP_PART");
-	if (env && env[0]) {
-		if (!strcmp(env, "frp") || !strcmp(env, "persist"))
-			return env;
-		fprintf(stderr, "frp-reset: ignoring SPDHOST_FRP_PART=%s (use frp or persist)\n", env);
-	}
 	if (have_frp && have_per)
-		return "persist"; /* N3: Unisoc sample has ro.frp.pst=persist */
+		return NULL;
 	if (have_frp)
 		return "frp";
 	return "persist";
+}
+
+static void frp_base_refused(void)
+{
+	const char *env = getenv("SPDHOST_FRP_PART");
+	if (env && env[0])
+		fprintf(stderr, "frp-reset: ignoring SPDHOST_FRP_PART=%s (use frp or persist)\n", env);
+	fprintf(stderr, "frp-reset: this table has both frp and persist; set SPDHOST_FRP_PART"
+		" to the one `getprop ro.frp.pst` names (frp or persist). Nothing read or erased.\n");
 }
 
 /* Backup the FRP partition (frp, else persist), then erase it. A short or
@@ -1227,14 +1241,25 @@ static int frp_reset(struct spd *io, const char *out)
 	}
 	slot = spd_active_slot(io);
 	base = frp_base(io);
+	if (!base) {
+		frp_base_refused();
+		return -1;
+	}
 	lk = spd_lookup_part(io, base, slot, resolved, sizeof(resolved), &sz);
 	if (lk != 0 || sz == 0) {
 		fprintf(stderr, "frp-reset: %s is not in the live table; nothing sent\n", base);
 		return -1;
 	}
-	if (!strcmp(base, "frp"))
+	if (!strcmp(base, "frp")) {
 		fprintf(stderr, "frp-reset: this table has a separate %s partition, which is where FRP"
 			" lives; that is the one backed up and erased. persist is left alone.\n", resolved);
+	} else {
+		char fr[40];
+		uint64_t fsz = 0;
+		if (spd_lookup_part(io, "frp", slot, fr, sizeof(fr), &fsz) == 0 && fsz)
+			fprintf(stderr, "frp-reset: SPDHOST_FRP_PART=persist: backing up and erasing %s;"
+				" the %s row is left alone.\n", resolved, fr);
+	}
 	/* R1: a guessed table unit may have scaled this row; size it by the
 	 * device instead, or do not touch it. G1: a table the probe corrected
 	 * has device-confirmed sizes already. */
@@ -2403,10 +2428,16 @@ int main(int argc, char **argv)
 			}
 		} else if (strcmp(cmd, "frp-reset") == 0) {
 			char frpwhat[96];
+			const char *fb;
 			need(argc, i, 1, "frp-reset");
 			need_fdl2(io, "frp-reset");
-			snprintf(frpwhat, sizeof(frpwhat), "reset FRP (backup %s, then erase it)",
-				frp_base(io));
+			fb = frp_base(io);
+			if (!fb) {
+				/* C7: refuse before the confirm; nothing is read or erased. */
+				frp_base_refused();
+				return 1;
+			}
+			snprintf(frpwhat, sizeof(frpwhat), "reset FRP (backup %s, then erase it)", fb);
 			confirm_dangerous(frpwhat);
 			if (frp_reset(io, argv[i + 1]))
 				return 1;

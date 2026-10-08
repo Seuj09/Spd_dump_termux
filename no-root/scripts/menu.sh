@@ -3975,9 +3975,10 @@ frp_reset_menu() {
 	local out
 	echo "DANGEROUS: Reset FRP."
 	echo "Reads the whole FRP partition into a backup file, checks that file's size, then"
-	echo "erases that partition, then reset. When the table has both frp and persist,"
-	echo "spdhost prefers persist (Unisoc sample ro.frp.pst=persist); set SPDHOST_FRP_PART=frp"
-	echo "to force the separate frp row. A table with only one of the two uses that one."
+	echo "erases that partition, then reset. A table with only one of frp / persist uses"
+	echo "that one. When it has BOTH, you are asked which one (no default): answer what"
+	echo "'getprop ro.frp.pst' names on the phone (SPDHOST_FRP_PART=frp|persist skips the"
+	echo "question). spdhost refuses a table with both when neither is given."
 	echo "spdhost names the one it picked before it asks you to confirm."
 	echo "A failed or short read does not erase. Factory reset still does not erase persist."
 	echo "erase-part persist stays refused."
@@ -3987,16 +3988,45 @@ frp_reset_menu() {
 	fi
 	need_loaders || return 1
 	mkdir -p "$DUMP_DIR"
-	# N3: name the backup after the partition that will be erased (persist when
-	# both frp and persist exist, unless SPDHOST_FRP_PART overrides).
-	local frp_name=persist bytes
+	# N3/C7: name the backup after the partition that will be erased. With
+	# both frp and persist in the table and no SPDHOST_FRP_PART, ask (no
+	# default) and hand the answer to spdhost, which refuses that case too.
+	local frp_name=persist bytes has_frp=0 has_per=0 pick=
 	bytes=$(parts_bytes_path 2>/dev/null) || bytes=
-	if [[ -n ${SPDHOST_FRP_PART:-} ]]; then
-		frp_name=$SPDHOST_FRP_PART
-	elif [[ -s ${bytes:-} ]] && grep -qE '^frp(_[ab])?[[:space:]]' "$bytes" &&
-	     ! grep -qE '^persist(_[ab])?[[:space:]]' "$bytes"; then
-		frp_name=frp
+	if [[ -s ${bytes:-} ]]; then
+		grep -qE '^frp(_[ab])?[[:space:]]' "$bytes" && has_frp=1
+		grep -qE '^persist(_[ab])?[[:space:]]' "$bytes" && has_per=1
 	fi
+	case ${SPDHOST_FRP_PART:-} in
+		frp|persist) frp_name=$SPDHOST_FRP_PART ;;
+		*)
+			if [[ -n ${SPDHOST_FRP_PART:-} ]]; then
+				echo "SPDHOST_FRP_PART=$SPDHOST_FRP_PART is not frp or persist; ignoring it."
+			fi
+			if (( has_frp && has_per )); then
+				echo "This table has BOTH frp and persist. Which one holds FRP is phone-specific;"
+				echo "erasing the wrong one loses persist's keys/calibration (a backup is kept) and"
+				echo "does not reset FRP. On the phone, 'getprop ro.frp.pst' names it."
+				read -r -p "Which partition holds FRP? [frp/persist, anything else cancels]: " pick
+				while [[ ${pick:-} == *[$' \t\r\n'] ]]; do pick=${pick%?}; done
+				case ${pick,,} in
+					frp|persist) frp_name=${pick,,} ;;
+					*) echo "Cancelled; nothing sent."; return 1 ;;
+				esac
+			elif (( has_frp )); then
+				frp_name=frp
+			fi
+			;;
+	esac
+	# Only an explicit choice (env or the answer above) is handed on; a
+	# single-row table is spdhost's own call against the LIVE table.
+	if [[ -n $pick || ${SPDHOST_FRP_PART:-} == frp || ${SPDHOST_FRP_PART:-} == persist ]]; then
+		local -x SPDHOST_FRP_PART=$frp_name
+	else
+		local -x SPDHOST_FRP_PART=
+	fi
+	(( has_frp )) && [[ $frp_name == persist ]] &&
+		echo "Note: persist is chosen although this table also has an frp row."
 	out=$(dump_meta_dir)/${frp_name}-before-$(date +%Y%m%d-%H%M%S).img
 	echo "Backup: $out (partition $frp_name)"
 	echo "spdhost asks for the word dangerous again before the read."

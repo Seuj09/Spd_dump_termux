@@ -68,25 +68,40 @@ MOCK_NOPROBE=uboot MOCK_PTABLE=$tmp/pt9vp sh r1p2 --dangerous parts pt.txt frp-r
 check "R1: frp-reset on a guessed unit refuses when the device's persist size is under 2 MiB (rc $rc)" \
 	bash -c "[ $rc != 0 ] && [ ! -e r1persist.img ] && grep -q \"table unit unverified and the device gave no size for persist\" sh_r1p2.log"
 
-# ---- G10/N3: prefer persist when both exist; SPDHOST_FRP_PART=frp forces frp ----
+# ---- G10/N3/C7: both frp and persist and no SPDHOST_FRP_PART -> refuse; env picks ----
 printf '%s\n' 'misc 1024' 'persist 2048' 'frp 512' 'boot 4096' > ptfrp
 MOCK_PTABLE=$tmp/ptfrp sh g10 --dangerous parts pt.txt frp-reset g10frp.img; rc=$?
-# Default (no env): persist. ERASE_FLASH UTF-16LE persist = 70 00 65 00 72 00 73 00...
-check "G10: with both frp and persist, frp-reset defaults to persist (2 MiB) (rc $rc)" \
-	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp.img) = 2097152 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10.seq"
-check "G10: the confirm names persist by default" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup persist, then erase it)' sh_g10.log
+# C7 (audit6): no default. ERASE_FLASH (SEQ 0a) and READ must not happen.
+check "C7: with both frp and persist and no SPDHOST_FRP_PART, frp-reset refuses (rc $rc)" \
+	bash -c "[ $rc != 0 ] && [ ! -e g10frp.img ] && ! grep -qE '^SEQ 0a ' sh_g10.seq &&
+		grep -q 'this table has both frp and persist; set SPDHOST_FRP_PART' sh_g10.log"
+check "C7: the refusal comes before the dangerous confirm" \
+	bash -c "! grep -q 'DANGEROUS confirmed' sh_g10.log"
+SPDHOST_FRP_PART=bogus MOCK_PTABLE=$tmp/ptfrp sh g10bad --dangerous parts pt.txt frp-reset g10bad.img; rc=$?
+check "C7: an invalid SPDHOST_FRP_PART is ignored and still refused (rc $rc)" \
+	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0a ' sh_g10bad.seq && grep -q 'ignoring SPDHOST_FRP_PART=bogus' sh_g10bad.log"
+SPDHOST_FRP_PART=persist MOCK_PTABLE=$tmp/ptfrp sh g10per --dangerous parts pt.txt frp-reset g10per.img; rc=$?
+# ERASE_FLASH UTF-16LE persist = 70 00 65 00 72 00 73 00...
+check "C7: SPDHOST_FRP_PART=persist backs up persist (2 MiB) and erases persist only (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10per.img) = 2097152 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10per.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10per.seq"
+check "C7: ...and says the frp row is left alone" grep -q 'SPDHOST_FRP_PART=persist: backing up and erasing persist; the frp row is left alone' sh_g10per.log
+check "C7: ...and the confirm names persist" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup persist, then erase it)' sh_g10per.log
 SPDHOST_FRP_PART=frp MOCK_PTABLE=$tmp/ptfrp sh g10frp --dangerous parts pt.txt frp-reset g10frp2.img; rc=$?
 check "G10: with SPDHOST_FRP_PART=frp, backs up frp (512 KiB) and erases frp, not persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10frp2.img) = 524288 ] && grep -q 'separate frp partition' sh_g10frp.log &&
 		grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10frp.seq && ! grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10frp.seq"
 check "G10: SPDHOST_FRP_PART=frp confirm names frp" grep -q 'DANGEROUS confirmed via --dangerous: reset FRP (backup frp, then erase it)' sh_g10frp.log
-MOCK_PTABLE=$tmp/ptfrp sh g10gate --yes parts pt.txt frp-reset g10no.img; rc=$?
+SPDHOST_FRP_PART=frp MOCK_PTABLE=$tmp/ptfrp sh g10gate --yes parts pt.txt frp-reset g10no.img; rc=$?
 check "G10: --yes still does not authorize it, nothing erased (rc $rc)" \
 	bash -c "[ $rc != 0 ] && ! grep -qE '^SEQ 0a ' sh_g10gate.seq && [ ! -e g10no.img ]"
 printf '%s\n' 'misc 1024' 'persist 1024' 'boot 4096' > ptnofrp
 MOCK_PTABLE=$tmp/ptnofrp sh g10p --dangerous parts pt.txt frp-reset g10p.img; rc=$?
 check "G10: without an frp row it is still persist (rc $rc)" \
 	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10p.img) = 1048576 ] && grep -qE '^SEQ 0a len=[0-9]+ 7000650072007300' sh_g10p.seq"
+printf '%s\n' 'misc 1024' 'frp 512' 'boot 4096' > ptonlyfrp
+MOCK_PTABLE=$tmp/ptonlyfrp sh g10f --dangerous parts pt.txt frp-reset g10f.img; rc=$?
+check "C7: a table with only frp uses frp with no env (rc $rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(stat -c %s g10f.img) = 524288 ] && grep -qE '^SEQ 0a len=[0-9]+ 66007200700000' sh_g10f.seq"
 
 # ---- G11: on a table with super, a skipped system.img says it lives in super.img ----
 mkdir -p g11 && printf 'S' > g11/system.img && printf 'V' > g11/vendor_a.img && printf 'B' > g11/boot.img

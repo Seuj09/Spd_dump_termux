@@ -158,6 +158,45 @@ check "erase-part: the typed word runs parts + erase-part + reset" \
 	ran_has "parts $tmp/dump/meta/partition_list.txt erase-part cache reset"
 check "erase-part: never passes --yes (spdhost asks itself)" ran_lacks --yes
 
+# C7 (audit6): a cached table with BOTH frp and persist asks which one (no
+# default), hands the answer to spdhost as SPDHOST_FRP_PART, and cancels on
+# anything else. A table with one of them asks nothing and passes nothing.
+cat >"$tmp/frprunner" <<R
+#!/usr/bin/env bash
+printf 'FRP=%s %s\n' "\${SPDHOST_FRP_PART-unset}" "\$*" >>"$tmp/ran/log"
+exit 0
+R
+chmod +x "$tmp/frprunner"
+c7=$tmp/c7dump; mkdir -p "$c7/meta"
+printf '%s\n' '# spdhost-parts shift 10 verified 1' 'misc 1024' 'frp 512' 'persist 2048' >"$c7/meta/partition_list.txt"
+printf '%s\n' 'misc 1048576' 'frp 524288' 'persist 2097152' >"$c7/meta/partition_bytes.txt"
+c7run() { # TRANSCRIPT ENVPREFIX EXPECT/SEND...
+	local t=$1 e=$2; shift 2; rm -f "$tmp/ran/log"
+	python3 "$drive" "$t" "$@" -- \
+		"$e SPDHOST_MENU_RUNNER=$tmp/frprunner SPDHOST_DUMP_DIR=$c7 $tmp/fn.sh frp_reset_menu" </dev/null
+}
+c7run "$tmp/c7a.pty" "" "type dangerous to reset FRP" 'dangerous\r' \
+	"Which partition holds FRP" 'frp\r' "Press Enter to continue" '\r'
+check "C7 menu: both rows -> asks, and 'frp' reaches spdhost as SPDHOST_FRP_PART=frp" \
+	bash -c 'grep -q "^FRP=frp .*frp-reset .*/meta/frp-before-" "$1"' _ "$tmp/ran/log"
+c7run "$tmp/c7b.pty" "" "type dangerous to reset FRP" 'dangerous\r' \
+	"Which partition holds FRP" '\r'
+check "C7 menu: Enter (no default) cancels, no session" \
+	bash -c '[ ! -s "$1" ] && grep -q "Cancelled; nothing sent." "$2"' _ "$tmp/ran/log" "$tmp/c7b.pty"
+c7run "$tmp/c7c.pty" "" "type dangerous to reset FRP" 'dangerous\r' \
+	"Which partition holds FRP" 'persist\r' "Press Enter to continue" '\r'
+check "C7 menu: 'persist' is passed on, with a note about the frp row" \
+	bash -c 'grep -q "^FRP=persist .*persist-before-" "$1" && grep -q "although this table also has an frp row" "$2"' _ "$tmp/ran/log" "$tmp/c7c.pty"
+c7run "$tmp/c7d.pty" "SPDHOST_FRP_PART=frp" "type dangerous to reset FRP" 'dangerous\r' \
+	"Press Enter to continue" '\r'
+check "C7 menu: SPDHOST_FRP_PART=frp skips the question" \
+	bash -c 'grep -q "^FRP=frp " "$1" && ! grep -q "Which partition holds FRP" "$2"' _ "$tmp/ran/log" "$tmp/c7d.pty"
+printf '%s\n' 'misc 1048576' 'persist 2097152' >"$c7/meta/partition_bytes.txt"
+c7run "$tmp/c7e.pty" "" "type dangerous to reset FRP" 'dangerous\r' \
+	"Press Enter to continue" '\r'
+check "C7 menu: a persist-only table asks nothing and leaves the choice to spdhost" \
+	bash -c 'grep -q "^FRP= .*persist-before-" "$1" && ! grep -q "Which partition holds FRP" "$2"' _ "$tmp/ran/log" "$tmp/c7e.pty"
+
 # ------------------------------------------ pack-slot (offline, for real)
 # A full-size misc image: the slot block is at 0x800, so a 2048-byte file is
 # not enough for spdhost to patch. 1 MiB matches the mock table's misc.
