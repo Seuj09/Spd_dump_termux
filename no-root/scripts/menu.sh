@@ -2855,6 +2855,8 @@ part_image_candidate() {
 	[[ $base == "$name" ]] && name=$base
 	case $name in
 		*_bak|misc-slotinfo|misc-before-*|persist-before-*|frp-before-*|vbmeta-before-*) return 1 ;;
+		# C12: [14]'s pack-slot output (misc-slota.img); not a partition name.
+		*-slot[ab]) return 1 ;;
 	esac
 	return 0
 }
@@ -3144,7 +3146,7 @@ restore_backup_menu() {
 	fi
 	echo "Restore these images from $DUMP_DIR, then $BOOT_AFTER:"
 	printf '  %s\n' "${names[@]}"
-	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, misc-before-*.img, persist-before-*.img, frp-before-*.img, vbmeta-before-*.img, *_bak.img."
+	echo "Skipped: *.txt, SHA256SUMS, misc-slotinfo.img, *-slota/b.img, misc-before-*.img, persist-before-*.img, frp-before-*.img, vbmeta-before-*.img, *_bak.img."
 	if [[ $INPUT_DIR == "$DUMP_DIR" ]]; then
 		echo "This is the same folder menu [6] flashes from, so images you put there to flash are listed here too."
 	fi
@@ -3245,7 +3247,8 @@ repartition_menu() {
 		# The XML repartition reads is the XML partition-list writes, so the
 		# phone can always supply its own starting point. Timestamped, so a
 		# copy the user has edited is never overwritten by the next dump.
-		out=$DUMP_DIR/partitions-$(date +%Y%m%d-%H%M%S).xml
+		# C12: side files go to meta/, so the dump root stays image-only.
+		out=$(dump_meta_dir)/partitions-$(date +%Y%m%d-%H%M%S).xml
 		echo "Reading the table off the phone and writing $out."
 		ready || return 1
 		run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
@@ -4171,7 +4174,12 @@ pack_slot_action() {
 		a|b) ;;
 		*) echo "Choose a or b." >&2; return 1 ;;
 	esac
-	out=${in%.img}-slot$which.img
+	# C12: the patched image is a side file, not a partition image, so it goes
+	# to DUMP_DIR/meta/ (the dump root stays flashable images only).
+	local mdir base
+	mdir=$(dump_meta_dir) || { echo "Cannot create $DUMP_DIR/meta." >&2; return 1; }
+	base=$(basename -- "$in")
+	out=$mdir/${base%.img}-slot$which.img
 	if ! "$bin" pack-slot "$which" "$in" "$out"; then
 		echo "pack-slot failed; nothing usable was written." >&2
 		rm -f "$out"

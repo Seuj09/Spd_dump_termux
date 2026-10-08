@@ -82,6 +82,12 @@ static int junk_file(const char *raw, const char *name)
 		!strncmp(name, "frp-before-", 11) ||
 		!strncmp(name, "vbmeta-before-", 14))
 		return 1;
+	/* C12: pack-slot's output (misc-slota / misc-slotb): never a partition. */
+	{
+		size_t l = strlen(name);
+		if (l > 6 && (!strcmp(name + l - 6, "-slota") || !strcmp(name + l - 6, "-slotb")))
+			return 1;
+	}
 	return 0;
 }
 

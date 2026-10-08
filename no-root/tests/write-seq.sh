@@ -406,6 +406,16 @@ sh skip parts pt.txt write-parts skipdir; rc=$?
 check "unknown name skipped, boot_a still written (rc $rc)" \
 	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_skip.seq && grep -q 'skip nosuchpart' sh_skip.log"
 
+# C12 (audit6): [14]'s pack-slot output (misc-slota/b.img) is never a
+# partition image: write-parts / write-files drop it silently like the other
+# side files, instead of reporting it as an unknown partition.
+mkdir -p c12dir
+printf 'A' > c12dir/boot_a.img
+printf 'S' > c12dir/misc-slota.img; printf 'S' > c12dir/misc-full-slotb.img
+sh c12 parts pt.txt write-parts c12dir; rc=$?
+check "C12: misc-slot[ab] images are skipped as side files, boot_a still written (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q '62006f006f0074005f006100' sh_c12.seq && ! grep -q 'slot[ab]' sh_c12.log"
+
 # A broken fixnv1 is skipped during a restore. A single write-part still sends nothing.
 mkdir -p nvbad
 printf 'A' > nvbad/boot_a.img

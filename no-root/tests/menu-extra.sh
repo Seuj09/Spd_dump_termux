@@ -206,8 +206,11 @@ misc_sha=$(sha256sum "$misc_in" | awk '{print $1}')
 tr=$(menu pack_slot_action \
 	"misc image" "$misc_in\r" \
 	"Slot to make active" 'b\r')
-out=${misc_in%.img}-slotb.img
+out=$tmp/dump/meta/misc-full-slotb.img
 check "pack-slot: writes <name>-slotb.img" test -f "$out"
+# C12 (audit6): it is a side file, so it goes to meta/, never the dump root.
+check "C12 pack-slot: the slot image is in meta/, not the dump root" \
+	test ! -e "${misc_in%.img}-slotb.img"
 check "pack-slot: the image keeps its size" \
 	test "$(stat -c %s "$out" 2>/dev/null)" = 1048576
 check "pack-slot: slot b record at 0x800 (_b, BCAB, version, nb_slot)" \
@@ -222,7 +225,8 @@ check "pack-slot: the output is recorded in SHA256SUMS" \
 misc_in2=$tmp/dump/misc2.img
 head -c 1048576 /dev/zero >"$misc_in2"
 tr=$(menu pack_slot_action "misc image" "$misc_in2\r" "Slot to make active" 'x\r')
-check "pack-slot: a bad slot letter writes nothing" test ! -e "${misc_in2%.img}-slotx.img"
+check "pack-slot: a bad slot letter writes nothing" \
+	bash -c '[ ! -e "$1" ] && [ ! -e "$2" ]' _ "${misc_in2%.img}-slotx.img" "$tmp/dump/meta/misc2-slotx.img"
 
 # L1: [6]/[7] take the file name as the partition name, so misc-slotX.img was
 # skipped there and the slot never changed. pack-slot now offers to write the
@@ -236,7 +240,7 @@ tr=$(menu pack_slot_action "misc image" "$misc_in3\r" "Slot to make active" 'a\r
 check "pack-slot L1: Enter at 'write now' starts no session" test ! -s "$tmp/ran/log"
 check "pack-slot L1: no longer tells the user to flash it from [6]/[7]" \
 	bash -c "! grep -q 'Flash it from menu \[6\]' '$tr' && grep -q 'cannot flash this file' '$tr'"
-out3=${misc_in3%.img}-slota.img
+out3=$tmp/dump/meta/misc3-slota.img
 out3_sha=$(sha256sum "$out3" | awk '{print $1}')
 tr=$(menu pack_slot_action "misc image" "$misc_in3\r" "Slot to make active" 'a\r' \
 	"to misc on the phone now" 'y\r' "type yes to write the slot a image" 'no\r')
@@ -251,6 +255,15 @@ check "pack-slot L1: the token is the sha256 of the slot image" \
 check "pack-slot L1: misc is checked against the source dump before the write" \
 	ran_has "misc-backup-expect $tmp/dump/meta/misc-before-[0-9-]*.img $in3_sha write-part misc"
 check "pack-slot L1: never passes --yes" ran_lacks --yes
+
+# C12: an older [14] left misc-slot[ab].img in the dump root; the menu's
+# image filter (pickers [6]/[7], copy [9]) must not offer it as a partition.
+c12f() { bash -c 'source "$1/scripts/menu.sh" >/dev/null 2>&1; part_image_candidate "$2"' _ "$root" "$1"; }
+c12n() { ! c12f "$1"; }
+check "C12 filter: misc-slota.img is not a partition image" c12n misc-slota.img
+check "C12 filter: misc-full-slotb.img is not a partition image" c12n misc-full-slotb.img
+check "C12 filter: misc.img still is" c12f misc.img
+check "C12 filter: boot_a.img still is" c12f boot_a.img
 
 # promote_dump_action -- menu [9]. Filesystem only, no phone. The point is
 # what it refuses to do: input/ also holds the images a user meant to flash,
