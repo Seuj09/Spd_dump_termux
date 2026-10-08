@@ -25,6 +25,9 @@ struct spd_usb {
 	int reacquire;     /* try to grab the device again after a reset */
 	int reac_left;
 	int claimed_iface; /* bulk iface claimed; -1 if none (Termux release) */
+	int wrapped_fd;    /* fd handed to libusb_wrap_sys_device; -1 if none.
+	                    * libusb never closes it (not even in libusb_close), so
+	                    * spdhost does, after libusb_close: see drop_handle(). */
 	unsigned vid;
 	unsigned pid;
 	char self_path[512];

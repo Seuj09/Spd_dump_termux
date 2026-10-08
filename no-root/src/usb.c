@@ -77,6 +77,25 @@ static void atexit_release(void)
 		release_claimed(g_live_usb);
 }
 
+/* Drop the libusb handle, then the descriptor it was wrapped around.
+ * libusb_wrap_sys_device() does not take ownership of the fd and
+ * libusb_close() leaves it open (libusb docs), so a wrapped fd is ours to
+ * close. Order matters: libusb_close() first, so the fd is never closed
+ * under a live handle, then close() once and forget it (-1), so it is never
+ * closed twice. The scan path (libusb_open*) has wrapped_fd -1: libusb owns
+ * that fd and closes it in libusb_close(). */
+static void drop_handle(struct spd_usb *u)
+{
+	if (u->handle) {
+		libusb_close(u->handle);
+		u->handle = NULL;
+	}
+	if (u->wrapped_fd >= 0) {
+		close(u->wrapped_fd);
+		u->wrapped_fd = -1;
+	}
+}
+
 static long long mono_ms(void)
 {
 	struct timespec ts;
@@ -304,10 +323,10 @@ static int adopt(struct spd_usb *u, libusb_device_handle *h, int strict_pid)
 		}
 	}
 	if (accept_vendor(u, strict_pid) || claim_bulk(u)) {
-		/* claim failed: nothing to release. accept_vendor fail: no claim yet. */
+		/* claim failed: nothing to release. accept_vendor fail: no claim yet.
+		 * u->handle is h; a wrapped fd under it is closed after it. */
 		u->claimed_iface = -1;
-		libusb_close(h);
-		u->handle = NULL;
+		drop_handle(u);
 		return -1;
 	}
 	return 0;
@@ -402,6 +421,7 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 	u->pid = pid;
 	u->reac_left = 4;
 	u->claimed_iface = -1;
+	u->wrapped_fd = -1;
 	u->fd_mode = fd >= 0;
 	u->last_bus[0] = 0;
 	{
@@ -424,6 +444,11 @@ int spd_usb_open(struct spd_usb *u, int fd, unsigned vid, unsigned pid, int time
 				fd, libusb_error_name(err));
 			exit(1);
 		}
+		/* spd_usb_close() closes this fd too (after libusb_close). That is
+		 * safe: under Termux the fd is this process's copy (termux-api keeps
+		 * its own UsbDeviceConnection open), and an app that passes its
+		 * UsbManager fd keeps its own connection the same way. */
+		u->wrapped_fd = fd;
 	} else {
 		h = libusb_open_device_with_vid_pid(u->ctx, (uint16_t)vid, (uint16_t)pid);
 		if (!h) {
@@ -458,8 +483,7 @@ void spd_usb_close(struct spd_usb *u)
 	release_claimed(u);
 	if (g_live_usb == u)
 		g_live_usb = NULL;
-	if (u->handle)
-		libusb_close(u->handle);
+	drop_handle(u);
 	if (u->ctx)
 		libusb_exit(u->ctx);
 	u->handle = NULL;
@@ -919,7 +943,10 @@ static int grab_termux(struct spd_usb *u)
 				got = -1;
 				continue;
 			}
-			/* wrap_sys_device owns got. adopt() closes it on failure. */
+			/* libusb does not own got: u->wrapped_fd does from here, and
+			 * drop_handle() closes it after libusb_close(), in adopt() on
+			 * failure or at the next reacquire / spd_usb_close(). */
+			u->wrapped_fd = got;
 			got = -1;
 			/* After a loader reset the product id can change. Vendor stays 1782. */
 			if (adopt(u, h, 0)) {
@@ -1028,8 +1055,8 @@ int spd_usb_reacquire(struct spd_usb *u)
 	u->reac_left--;
 	if (u->handle) {
 		release_claimed(u);
-		libusb_close(u->handle);
-		u->handle = NULL;
+		/* Old handle, then its wrapped fd (Termux), before grabbing anew. */
+		drop_handle(u);
 	}
 	u->gone = 0;
 	u->stalled = 0;
