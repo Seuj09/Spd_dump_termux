@@ -26,7 +26,9 @@ sh() { local L=$1 o=(); shift; while [[ ${1:-} == --* ]]; do o+=("$1"); shift; d
 		"${EX[@]}" "${LOAD[@]}" "$@" 7</dev/null </dev/null >sh_$L.log 2>&1; }
 # A typical non-A/B table (KiB rows, divisor 10), MOCK_SLOT empty: not A/B.
 printf '%s\n' 'prodnv 5120' 'miscdata 1024' 'misc 1024' 'uboot 1024' 'uboot_bak 1024' 'boot 36864' 'userdata 4194304' > ptn
-head -c 300000 /dev/urandom > cboot.bin
+# Random-looking but fixed: the same frames, escapes and ZLPs on every run.
+$CC -O2 -std=c11 "$root/tests/det_bytes.c" -o det_bytes || exit 1
+./det_bytes 300000 0x5eed > cboot.bin
 export MOCK_PTABLE=$tmp/ptn MOCK_SLOT=
 
 # --yes only here, where the subject is which frames a confirmed write sends.
@@ -45,6 +47,17 @@ check "write-part-plain keeps the typed confirm: no answer, nothing written (rc 
 	bash -c "[ $rc != 0 ] && [ \$(grep -cE '^SEQ 01 len=(76|80|88) ' sh_noconf.seq) = 0 ] && grep -qx 'write-uboot=started' sh_noconf.st && ! grep -q 'write-uboot=ok' sh_noconf.st"
 check "write-part-plain still refuses misc (backup path only)" \
 	bash -c "sh() { :; }; cd '$tmp' && MOCK_LOG=m.seq timeout 30 ./sh --usb-fd 7 --yes ${EX[*]} ${LOAD[*]} parts pt.txt write-part-plain misc cboot.bin 7</dev/null </dev/null >m.log 2>&1; [ \$? != 0 ]"
+# A data frame that ends on a 512-byte packet boundary is followed by a ZLP
+# (usb.c spd_usb_bulk_send). The mock used to read that zero-length transfer as
+# a CHECK_BAUD and answer 0x81 over the frame's ACK, so a random cboot.bin whose
+# escapes made one frame 64000 bytes failed the write (~7% of runs). This image
+# makes the first frame exactly that: 504 0x7e bytes escape to 1008, so
+# 1+4+63488+504+2+1 = 64000 = 125*512.
+{ head -c 504 /dev/zero | LC_ALL=C tr '\0' '\176'; head -c $((63488 - 504)) /dev/zero; } > zlp.bin
+sh zlp --yes parts pt.txt write-part-plain uboot zlp.bin; rc=$?
+check "a data frame that fills its last 512-byte packet gets its ZLP and the write still succeeds (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -B1 -x ZLP sh_zlp.seq | grep -q '^SEQ 02 len=63488 ' &&
+		! grep -q 'CHECK_BAUD n=0' sh_zlp.seq && grep -qx 'write-uboot=ok' sh_zlp.st"
 # Two writes in one session are reported apart: the second one fails (too big).
 head -c 2000000 /dev/zero > big.bin
 head -c 262144 /dev/zero > spl.bin

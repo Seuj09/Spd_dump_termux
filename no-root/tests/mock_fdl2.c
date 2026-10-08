@@ -423,7 +423,21 @@ int libusb_control_transfer(libusb_device_handle *h, uint8_t rt, uint8_t r, uint
 int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned char *d, int len, int *got, unsigned int t)
 {
 	(void)h; (void)t;
-	if (!(ep & 0x80)) { log_out(d, len); *got = len; return 0; }
+	if (!(ep & 0x80)) {
+		/* A zero-length OUT transfer is the ZLP spd_usb_bulk_send adds after
+		 * a frame that fills its last 512-byte packet. It is not a frame:
+		 * log it and leave the pending reply alone. Fed to log_out it used
+		 * to pass the all-0x7e test (no bytes, none of them not 0x7e), so
+		 * the mock answered CHECK_BAUD with 0x81 over the frame's 0x80 ACK.
+		 * Random write data hits that when a data frame's escapes bring it
+		 * to a multiple of 512 bytes, which made write-plain-seq flaky. */
+		if (len == 0) {
+			if (!logf) { const char *p = getenv("MOCK_LOG"); logf = fopen(p ? p : "mock.seq", "w"); }
+			fprintf(logf, "ZLP\n"); fflush(logf);
+			*got = 0; return 0;
+		}
+		log_out(d, len); *got = len; return 0;
+	}
 	if (bus_gone) { *got = 0; return LIBUSB_ERROR_NO_DEVICE; }
 	if (reply_pos >= reply_len) {
 		*got = 0;
