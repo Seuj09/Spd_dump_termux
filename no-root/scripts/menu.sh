@@ -765,7 +765,29 @@ ask_file() {
 	done
 }
 
+# C3 (audit6): every refusal below used to `return 1` AFTER the globals were
+# assigned, so the screen said "Nothing saved" while the same run kept the
+# refused chip-mixed pair (FDL1 of one chip, FDL2 of another) and the next
+# dump sent it. Snapshot everything the body can touch and put it back on
+# any non-zero return, the same way select_shipped_model does.
 configure_loaders_manual() {
+	local _v rc
+	local -A _snap=()
+	for _v in FDL1 FDL1_ADDR FDL2 FDL2_ADDR SOC EXEC_ADDR SOC_FDL1_ADDR \
+		SOC_FDL2_ADDR EXEC_ADDR_DEFAULT EXEC_ADDR_ALT CONFIG_CHIP_ERROR; do
+		_snap[$_v]=${!_v-}
+	done
+	configure_loaders_manual_body "$@"
+	rc=$?
+	if (( rc != 0 )); then
+		for _v in "${!_snap[@]}"; do
+			printf -v "$_v" '%s' "${_snap[$_v]}"
+		done
+	fi
+	return "$rc"
+}
+
+configure_loaders_manual_body() {
 	# N8 / B2-6.6: optional $1 is a chip already picked by the wizard (ums9230 /
 	# sc9863a / ums512). When set, skip the chip question so the wizard's answer
 	# is not discarded / asked twice.

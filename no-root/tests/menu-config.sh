@@ -273,6 +273,55 @@ check "manual [3]: a path/chip disagreement is refused (B2-6.1)" \
 	bash -c '[[ $1 == *"Refusing: the loaders are sc9863a"*"but you picked ums512"* && $1 == *"Nothing saved"* ]]' _ "$out"
 check "manual [3]: nothing saved for the path/chip mix" lacks "$out" "Saved "
 
+# C3 (audit6): a refusal must also leave THIS run's globals alone. The old
+# code assigned FDL1/FDL2/SOC/EXEC_ADDR before refusing, so "Nothing saved"
+# was true of the file while the next session in the same menu run sent the
+# refused chip-mixed pair. Check the globals and the next session's argv.
+cat >"$tmp/c3.conf" <<EOF
+FDL1=$tmp/fdl/ums9230/infinix/fdl1-dl.bin
+FDL1_ADDR=0x65000800
+FDL2=$tmp/fdl/ums9230/infinix/fdl2-dl.bin
+FDL2_ADDR=0x9efffe00
+EXEC_ADDR=0x65015f08
+SOC=ums9230
+EOF
+cat >"$tmp/argvrunner" <<R
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$tmp/c3.argv"
+exit 0
+R
+chmod +x "$tmp/argvrunner"
+c3_probe() {
+	configure_loaders_manual
+	printf 'RC=%s\n' "$?"
+	printf 'G FDL1=%s FDL1_ADDR=%s FDL2=%s FDL2_ADDR=%s SOC=%s EXEC_ADDR=%s S1=%s ED=%s\n' \
+		"$FDL1" "$FDL1_ADDR" "$FDL2" "$FDL2_ADDR" "$SOC" "$EXEC_ADDR" "$SOC_FDL1_ADDR" "$EXEC_ADDR_DEFAULT"
+	local -a RUNNER=("$tmp/argvrunner")
+	need_loaders && run_session fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" check-baud
+}
+c3_want="G FDL1=$tmp/fdl/ums9230/infinix/fdl1-dl.bin FDL1_ADDR=0x65000800 FDL2=$tmp/fdl/ums9230/infinix/fdl2-dl.bin FDL2_ADDR=0x9efffe00 SOC=ums9230 EXEC_ADDR=0x65015f08 S1=0x65000800 ED=0x65015f08"
+# (a) ums9230 FDL1 + sc9863a FDL2, chip 1: "not a pair".
+rm -f "$tmp/c3.argv"
+out=$(printf '%s\n' "$tmp/fdl/ums9230/infinix/fdl1-dl.bin" 0x65000800 "$SC2" 0x9efffe00 1 |
+	menu_run "$tmp/c3.conf" c3_probe 2>&1)
+check "C3 manual: a chip-mixed pair is refused" has "$out" "not a pair"
+check "C3 manual: ...and every global is back to the previous pair" has "$out" "$c3_want"
+check "C3 manual: ...and the next session sends the previous FDL2, not the refused one" \
+	bash -c '[[ -s $1 ]] && grep -q -- "fdl $2 0x9efffe00" "$1" && ! grep -q sc9863a "$1"' _ "$tmp/c3.argv" "$tmp/fdl/ums9230/infinix/fdl2-dl.bin"
+# (b) sc9863a pair at its own addresses, chip 1 (ums9230): the M4 refusal,
+# which runs after soc_profile has switched SOC_FDL1_ADDR and the stubs.
+out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9efffe00 1 |
+	menu_run "$tmp/c3.conf" c3_probe 2>&1)
+check "C3 manual: the FDL1-address refusal restores the globals too" \
+	bash -c '[[ $1 == *"Refusing: FDL1 address"* && $1 == *"$2"* ]]' _ "$out" "$c3_want"
+# (c) the path/chip disagreement after the assignment block.
+out=$(printf '%s\n' "$SC1" 0x5500 "$SC2" 0x9efffe00 3 |
+	menu_run "$tmp/c3.conf" c3_probe 2>&1)
+check "C3 manual: the path/chip refusal restores the globals too" \
+	bash -c '[[ $1 == *"but you picked ums512"* && $1 == *"$2"* ]]' _ "$out" "$c3_want"
+check "C3 manual: the config file is unchanged after all three refusals" \
+	bash -c 'grep -qx "FDL2=$2" "$1" && grep -qx SOC=ums9230 "$1"' _ "$tmp/c3.conf" "$tmp/fdl/ums9230/infinix/fdl2-dl.bin"
+
 # G9: FDL2's address is checked too, not only FDL1's.
 out=$(printf '%s\n' "$SC1" 0x5000 "$SC2" 0x9f000000 2 |
 	menu_run "$tmp/ums.conf" manual_probe 2>&1)
