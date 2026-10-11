@@ -26,10 +26,13 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     add(z, arm64, "spdhost-arm64")
 print(out)
 PY
+# P0-6: the loader pack the app imports (fdl/ + fdl/index), with its own
+# .sha256 next to it; also listed in SHA256SUMS.
+"$here/fdl-pack.sh" "$out" "$short" >/dev/null
 ( cd "$out" && sha256sum \
 	arm32/spdhost arm32/spd_dump arm32/spdhost-arm32-static-"$short".zip \
 	arm64/spdhost arm64/spd_dump arm64/spdhost-arm64-static-"$short".zip \
-	"$zipname" >SHA256SUMS )
+	"$zipname" fdl-pack-"$short".zip >SHA256SUMS )
 echo
 echo "both -> $out/$zipname"
 cat "$out/SHA256SUMS"

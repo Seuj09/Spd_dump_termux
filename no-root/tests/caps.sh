@@ -24,7 +24,7 @@ make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; ech
 bin=$root/spdhost
 
 # The cap list is pinned: adding or dropping one is a deliberate change here.
-want_caps='confirm-plan confirm-token dry-run events frp-part image-tools misc-bytes pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
+want_caps='confirm-plan confirm-token dry-run events frp-part image-tools loaders-check misc-bytes pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
 
 echo "== format =="
 "$bin" caps >"$tmp/caps.out" 2>"$tmp/caps.err"; rc=$?
@@ -57,7 +57,7 @@ check "--help lists caps" bash -c '"$1" --help 2>&1 | grep -q "^  caps "' _ "$bi
 
 echo "== no device, no USB =="
 # The same sources linked with every libusb entry point trapped (exit 99).
-srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan}.c)
+srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan,loaders}.c)
 wraps=-Wl,--wrap=libusb_init,--wrap=libusb_init_context,--wrap=libusb_wrap_sys_device,--wrap=libusb_open_device_with_vid_pid
 if $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2>/dev/null) \
 	-o "$tmp/trapped" "${srcs[@]}" "$root/tests/libusb_trap.c" "$wraps" \

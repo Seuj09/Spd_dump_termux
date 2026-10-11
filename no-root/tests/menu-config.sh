@@ -38,12 +38,12 @@ within() { # OUT LIM
 
 # Real files with chip-naming paths: load_config only accepts paths that exist.
 mkdir -p "$tmp/fdl/sc9863a/itel" "$tmp/fdl/ums9230/infinix" "$tmp/plain"
-: >"$tmp/fdl/sc9863a/itel/fdl1-dl.bin"
-: >"$tmp/fdl/sc9863a/itel/fdl2-dl.bin"
-: >"$tmp/fdl/ums9230/infinix/fdl1-dl.bin"
-: >"$tmp/fdl/ums9230/infinix/fdl2-dl.bin"
-: >"$tmp/plain/fdl1.bin"
-: >"$tmp/plain/fdl2.bin"
+printf L >"$tmp/fdl/sc9863a/itel/fdl1-dl.bin"
+printf L >"$tmp/fdl/sc9863a/itel/fdl2-dl.bin"
+printf L >"$tmp/fdl/ums9230/infinix/fdl1-dl.bin"
+printf L >"$tmp/fdl/ums9230/infinix/fdl2-dl.bin"
+printf L >"$tmp/plain/fdl1.bin"
+printf L >"$tmp/plain/fdl2.bin"
 SC1=$tmp/fdl/sc9863a/itel/fdl1-dl.bin
 SC2=$tmp/fdl/sc9863a/itel/fdl2-dl.bin
 

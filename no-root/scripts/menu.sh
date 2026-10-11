@@ -629,12 +629,23 @@ wizard_apply_universal() {
 		echo "The universal ums9230 loaders are missing from fdl/ums9230/universal/." >&2
 		return 1
 	fi
+	local old_fdl1=${SOC_FDL1_ADDR:-} old_fdl2=${SOC_FDL2_ADDR:-}
+	local old_exec=$EXEC_ADDR_DEFAULT old_alt=$EXEC_ADDR_ALT
 	soc_profile ums9230 || return 1
+	if ! loaders_check_c "${pair[0]}" "$SOC_FDL1_ADDR" "${pair[1]}" "$SOC_FDL2_ADDR" ums9230 \
+		"$EXEC_ADDR_DEFAULT" && [[ -n $LOADERS_CHECK_REASON ]]; then
+		echo "Refusing: $LOADERS_CHECK_REASON. Nothing changed." >&2
+		SOC_FDL1_ADDR=$old_fdl1 SOC_FDL2_ADDR=$old_fdl2
+		EXEC_ADDR_DEFAULT=$old_exec EXEC_ADDR_ALT=$old_alt
+		return 1
+	fi
 	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
 	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
 	echo "  exec stub $EXEC_ADDR_DEFAULT"
 	echo "A wrong chip or address can brick the phone."
 	if ! confirm_action "type yes to use the universal loaders: "; then
+		SOC_FDL1_ADDR=$old_fdl1 SOC_FDL2_ADDR=$old_fdl2
+		EXEC_ADDR_DEFAULT=$old_exec EXEC_ADDR_ALT=$old_alt
 		return 1
 	fi
 	FDL1=${pair[0]}
@@ -884,6 +895,16 @@ configure_loaders_manual_body() {
 		echo "Nothing saved." >&2
 		return 1
 	fi
+	# P0-6: the core's check has the last word. A refusal returns 1 and the
+	# configure_loaders_manual wrapper rolls every global back (C3).
+	if ! loaders_check_c "$nf1" "$na1" "$nf2" "$na2" "${SOC:-none}" "$ea" \
+		"$( [[ -n $ea ]] && exec_stub_path "$ea" 2>/dev/null )"; then
+		if [[ -n $LOADERS_CHECK_REASON ]]; then
+			echo "Refusing: $LOADERS_CHECK_REASON." >&2
+			echo "Nothing saved." >&2
+			return 1
+		fi
+	fi
 	CONFIG_CHIP_ERROR=""
 	save_config
 	echo "Saved $CONFIG (chip ${SOC:-unset}, exec ${ea:-disabled})"
@@ -1020,6 +1041,16 @@ select_shipped_model() {
 	local old_fdl1=${SOC_FDL1_ADDR:-} old_fdl2=${SOC_FDL2_ADDR:-}
 	local old_exec=$EXEC_ADDR_DEFAULT old_alt=$EXEC_ADDR_ALT
 	soc_profile "$soc" || return 1
+	# P0-6: the core checks the pair against fdl/index before it is offered.
+	if ! loaders_check_c "${pair[0]}" "$SOC_FDL1_ADDR" "${pair[1]}" "$SOC_FDL2_ADDR" "$soc" \
+		"$EXEC_ADDR_DEFAULT" && [[ -n $LOADERS_CHECK_REASON ]]; then
+		echo "Refusing: $LOADERS_CHECK_REASON. Nothing changed."
+		SOC_FDL1_ADDR=$old_fdl1
+		SOC_FDL2_ADDR=$old_fdl2
+		EXEC_ADDR_DEFAULT=$old_exec
+		EXEC_ADDR_ALT=$old_alt
+		return 1
+	fi
 	echo "  ${pair[0]} @ $SOC_FDL1_ADDR"
 	echo "  ${pair[1]} @ $SOC_FDL2_ADDR"
 	echo "  exec stub $EXEC_ADDR_DEFAULT"
@@ -1064,6 +1095,50 @@ configure_loaders() {
 	esac
 }
 
+# P0-6: the chip/pair/stub check lives in the core (`spdhost loaders check`,
+# README "loaders check"), shared with the app. The bash checks in this file
+# still run first, so an spdhost too old to have the check (no
+# loaders_format=1 answer) keeps today's behaviour. --dry-run in front: an old
+# build treats `loaders` as an unknown dry-run command and never opens USB.
+# Returns 0 ok, 1 refused (reason in LOADERS_CHECK_REASON), 2 not available.
+LOADERS_CHECK_REASON=""
+loaders_check_c() {
+	local f1=$1 a1=$2 f2=$3 a2=$4 soc=$5 ea=$6 stub=${7:-} bin out rc line
+	local -a args=()
+	LOADERS_CHECK_REASON=""
+	bin=$(resolve_spdhost_bin 2>/dev/null) || return 2
+	[[ -n $bin ]] || return 2
+	[[ -n $soc ]] && args+=(--soc "$soc")
+	args+=(--exec "${ea:-0}")
+	[[ -n $ea && -n $stub ]] && args+=(--stub "$stub")
+	out=$("$bin" --dry-run loaders check "${args[@]}" -- "$f1" "$a1" "$f2" "$a2" 2>/dev/null)
+	rc=$?
+	[[ $out == loaders_format=1$'\n'* && $out == *$'\n'end ]] || return 2
+	if (( rc == 0 )) && [[ $'\n'$out$'\n' == *$'\n'verdict=ok$'\n'* ]]; then
+		while IFS= read -r line; do
+			[[ $line == warning=* ]] && echo "loaders: note: ${line#warning=}" >&2
+		done <<<"$out"
+		return 0
+	fi
+	while IFS= read -r line; do
+		[[ $line == reason=* ]] && { LOADERS_CHECK_REASON=${line#reason=}; break; }
+	done <<<"$out"
+	[[ -n $LOADERS_CHECK_REASON ]] || LOADERS_CHECK_REASON="spdhost loaders check refused this set"
+	return 1
+}
+
+# The same check on what a session would use now: FDL1/FDL2 and their
+# addresses, SOC, and the effective exec stub. A stub that cannot be found is
+# left to exec_stub_path, which explains it before the plug-in wait.
+loaders_check_current() {
+	local ea stub=""
+	ea=$(exec_addr_value 2>/dev/null) || ea=
+	if [[ -n $ea ]]; then
+		stub=$(exec_stub_path "$ea" 2>/dev/null) || return 2
+	fi
+	loaders_check_c "$FDL1" "$FDL1_ADDR" "$FDL2" "$FDL2_ADDR" "${SOC:-}" "$ea" "$stub"
+}
+
 need_loaders() {
 	# A config that pairs one chip's loaders with another chip's addresses must
 	# not reach a session: config_chip_check() explains what is wrong at load
@@ -1074,7 +1149,8 @@ need_loaders() {
 		return 1
 	fi
 	if [[ -f $FDL1 && -n $FDL1_ADDR && -f $FDL2 && -n $FDL2_ADDR ]]; then
-		return 0
+		need_loaders_c
+		return
 	fi
 	echo "Set the loader files first."
 	configure_loaders || return 1
@@ -1084,10 +1160,25 @@ need_loaders() {
 	# FDL1 path ("open : No such file") instead of stopping. Re-check the four
 	# fields, which is the only thing this gate actually promises.
 	if [[ -f $FDL1 && -n $FDL1_ADDR && -f $FDL2 && -n $FDL2_ADDR ]]; then
-		return 0
+		need_loaders_c
+		return
 	fi
 	echo "Still no loader files; option 3 picks them." >&2
 	return 1
+}
+
+# need_loaders' last word: the core's loaders check on the set the session
+# would send (P0-6). Not available (older spdhost) -> the bash checks stand.
+need_loaders_c() {
+	loaders_check_current
+	case $? in
+		1)
+			echo "Refusing: $LOADERS_CHECK_REASON."
+			echo "Option 3 re-picks the loaders."
+			return 1
+			;;
+	esac
+	return 0
 }
 
 ready() {

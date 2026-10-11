@@ -9,6 +9,7 @@
 #include "pac.h"
 #include "events.h"
 #include "plan.h"
+#include "loaders.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -245,7 +246,10 @@ static void usage(void)
 		"                          target, saved table) ending plan-sha256=SHA\n"
 		"  caps                    offline: build sha, protocol version and\n"
 		"                          capability flags, key=value lines (README)\n"
-		"  The eight offline commands open no USB and ignore the device options.\n"
+		"  loaders check [--soc S|none] [--exec ADDR|0] [--stub F] FDL1 A1 FDL2 A2\n"
+		"                          offline: chip/pair/stub check of a loader set\n"
+		"                          against fdl/index (also: loaders list|verify)\n"
+		"  The nine offline commands open no USB and ignore the device options.\n"
 		"  Unlike the release tools they never overwrite their input file.\n"
 		"  read_flash ADDR OFF SIZE OUT  raw read by address, no partition\n"
 		"                               table involved (spd_dump read_flash).\n"
@@ -1516,6 +1520,7 @@ static const char *const spd_caps[] = {
 	"events",        /* --events FD|PATH: JSON-lines event channel (README) */
 	"frp-part",      /* frp-reset refuses frp+persist unless SPDHOST_FRP_PART */
 	"image-tools",   /* gen-spl-unlock[-legacy], gen-fdl1-dl, chsize */
+	"loaders-check", /* loaders check|list|verify + fdl/index (P0-6, README) */
 	"misc-bytes",    /* status file: misc-bytes=N after misc-backup[-expect] */
 	"pack-slot",     /* pack-slot a|b IN OUT */
 	"parts-header",  /* parts FILE starts "# spdhost-parts shift S verified V" */
@@ -2688,6 +2693,9 @@ static int spdhost_main(int argc, char **argv)
 		}
 		return print_caps();
 	}
+	/* P0-6: offline like caps -- reads loader files and fdl/index only. */
+	if (optind < argc && strcmp(argv[optind], "loaders") == 0)
+		return spd_loaders_main(argc - optind, argv + optind, self_path);
 	if (selftest) {
 		/* FIPS 180-4 vectors for the --confirm-token hash. */
 		char h[65];

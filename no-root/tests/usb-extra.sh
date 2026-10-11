@@ -89,7 +89,7 @@ echo "== and the hooks are on the BootROM path only =="
 n=$(grep -c 'spd_usb_clear_halts(&io->usb)' "$root/src/proto.c" || true)
 check "clear_halts is called from exactly one place, in proto.c" test "${n:-0}" = 1
 check "and not from the FDL1/FDL2 code in main.c" \
-	test "$(cat "$root/src/main.c" "$root/src/plan.c" | grep -c 'spd_usb_clear_halts' || true)" = 0
+	test "$(cat "$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" | grep -c 'spd_usb_clear_halts' || true)" = 0
 
 echo "== C9: libusb error classification (PIPE back to the pre-B2-7.1 handling) =="
 # PIPE marks gone again (so the hello / exec / final-chunk paths reacquire as

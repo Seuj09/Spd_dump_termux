@@ -21,7 +21,7 @@ ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*"; fail=$((fail + 1)); }
 check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 cc=${CC:-cc}
-srcs=("$root"/src/{main,plan,usb,usb_list,proto,events,dumpcmd,writecmd,sha256,dhtb,pac}.c)
+srcs=("$root"/src/{main,plan,loaders,usb,usb_list,proto,events,dumpcmd,writecmd,sha256,dhtb,pac}.c)
 $cc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" "${srcs[@]}" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 wraps=-Wl,--wrap=libusb_init,--wrap=libusb_init_context,--wrap=libusb_wrap_sys_device,--wrap=libusb_open_device_with_vid_pid
 $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2>/dev/null) -o "$tmp/trapped" "${srcs[@]}" \

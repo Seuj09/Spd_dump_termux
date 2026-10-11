@@ -151,6 +151,9 @@ jobs:
         working-directory: no-root
         run: |
           ls -l dist dist/arm32 dist/arm64
+          echo "--- fdl pack (P0-6)"
+          cat dist/fdl-pack-*.zip.sha256
+          unzip -l dist/fdl-pack-*.zip | tail -1
           echo "--- dist/SHA256SUMS"
           cat dist/SHA256SUMS
           echo "--- per-architecture zips"
@@ -170,6 +173,7 @@ jobs:
             no-root/dist/arm32/*.zip
             no-root/dist/arm64/*.zip
             no-root/dist/*.zip
+            no-root/dist/*.zip.sha256
             no-root/dist/SHA256SUMS
           if-no-files-found: error
 
@@ -223,6 +227,8 @@ jobs:
             "dist/arm32/spdhost-arm32-static-$short.zip"
             "dist/arm64/spdhost-arm64-static-$short.zip"
             "dist/spdhost-arm32-arm64-static-$short.zip"
+            "dist/fdl-pack-$short.zip"
+            "dist/fdl-pack-$short.zip.sha256"
             "dist/SHA256SUMS"
           )
           for a in "${assets[@]}"; do
@@ -273,6 +279,7 @@ jobs:
             echo "- \`spdhost-arm32-static-$short.zip\` -- 32-bit ARM (Termux armv7l/armv8l)"
             echo "- \`spdhost-arm64-static-$short.zip\` -- 64-bit ARM (aarch64)"
             echo "- \`spdhost-arm32-arm64-static-$short.zip\` -- both trees in one zip"
+            echo "- \`fdl-pack-$short.zip\` (+ \`.sha256\`) -- the \`fdl/\` loaders with \`fdl/index\` (chip, addresses, sha256), for the app's loader import; deterministic zip"
             echo "- \`SHA256SUMS\` -- checksums for all of the above"
             echo
             echo "### SHA-256"

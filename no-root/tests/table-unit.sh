@@ -25,7 +25,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 CC=${CC:-gcc}
 mkdir -p "$tmp/pkg/fdl/ums9230"
 $CC -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/plan.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
 	"$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" \
 	-o "$tmp/pkg/spdhost" || exit 1
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$tmp/pkg/fdl/ums9230/"
