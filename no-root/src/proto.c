@@ -1712,14 +1712,23 @@ static void part_written(struct spd *io, const char *name)
 		spd_slot_forget(io);
 }
 
+const struct spd_src_hooks *spd_src_hooks;
+
 int spd_write_part(struct spd *io, const char *name, const char *path)
 {
 	FILE *fi;
 	uint64_t len, off, ev_last = 0;
 	int step = io->step;
 	int chunk_ms = io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000;
+	int src = -1; /* P0-4: confirm-plan source handle */
 
-	fi = fopen(path, "rb");
+	if (spd_src_hooks) {
+		fi = spd_src_hooks->open(path, &src);
+		if (!fi)
+			return -1;
+	} else {
+		fi = fopen(path, "rb");
+	}
 	if (!fi) {
 		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
 		return -1;
@@ -1777,6 +1786,8 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 		}
 		if (fread(io->temp, 1, n, fi) != n)
 			die("short read");
+		if (src >= 0)
+			spd_src_hooks->update(src, io->temp, n);
 		spd_encode(io, BSL_CMD_MIDST_DATA, io->temp, n);
 		if (spd_send(io) < 0)
 			die("send failed during write");
@@ -1806,6 +1817,13 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 	}
 	fclose(fi);
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
+	/* P0-4: END_DATA still goes out (the loader is not left mid-transfer),
+	 * but a run whose bytes were not the planned image stops here, before
+	 * any later command or the session's end. */
+	if (src >= 0 && spd_src_hooks->final(src, name)) {
+		(void)spd_check_ok(io);
+		return -1;
+	}
 	if (spd_check_ok(io)) {
 		/* spd_dump only omits its "Write Part Done" line here and carries
 		 * on. Report the failure (every byte did get sent, so the caller
@@ -2120,6 +2138,11 @@ int spd_write_nv(struct spd *io, const char *name, const char *path)
 		fclose(fi);
 		return -1;
 	}
+	if (SPD_SRC_CHECK(path, mem, flen, "the NV write")) {
+		free(mem);
+		fclose(fi);
+		return -1;
+	}
 	fclose(fi);
 	body = mem;
 	if (rd32le(mem) == 0x4e56u)
@@ -2241,6 +2264,12 @@ int spd_xml_partitions(const char *path, const char *what, struct spd_xml_part *
 	src = malloc((size_t)sz + 1);
 	if (!src || fread(src, 1, (size_t)sz, fi) != (size_t)sz) {
 		fprintf(stderr, "%s: short read\n", what);
+		free(src);
+		fclose(fi);
+		return -1;
+	}
+	/* P0-4: the table repartition sends is a planned image. */
+	if (!strncmp(what, "repartition", 11) && SPD_SRC_CHECK(path, src, (size_t)sz, what)) {
 		free(src);
 		fclose(fi);
 		return -1;

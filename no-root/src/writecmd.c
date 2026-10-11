@@ -220,6 +220,10 @@ static int write_bak_image(struct spd *io, const char *bak, const char *path,
 			free(buf);
 			return -1;
 		}
+		if (SPD_SRC_CHECK(path, buf, (size_t)flen, "the _bak copy")) {
+			free(buf);
+			return -1;
+		}
 	}
 	/* flen was checked against the row above, so the byte is inside the file. */
 	fprintf(stderr, "write %s_bak: vbmeta verity byte 0x7b: %02x -> 00 (spd_dump"
@@ -561,6 +565,30 @@ int spd_write_force(struct spd *io, const char *name, const char *path, int slot
 			" partition\n", resolved, (unsigned long long)flen, (unsigned long long)psz);
 
 	return force_row_write(io, idx, resolved, path, "w-force");
+}
+
+int spd_write_candidate(const char *d_name)
+{
+	char raw[256], name[40];
+	size_t namelen;
+	char *dot;
+	if (d_name[0] == '.')
+		return 0;
+	snprintf(raw, sizeof(raw), "%s", d_name);
+	namelen = strlen(raw);
+	dot = strrchr(raw, '.');
+	if (dot && (size_t)(dot - raw) < sizeof(name)) {
+		memcpy(name, raw, (size_t)(dot - raw));
+		name[dot - raw] = 0;
+	} else if (namelen < sizeof(name)) {
+		snprintf(name, sizeof(name), "%s", raw);
+	} else {
+		return 0;
+	}
+	if (junk_file(d_name, name))
+		return 0;
+	namelen = strlen(name);
+	return !(namelen >= 4 && !strcmp(name + namelen - 4, "_bak"));
 }
 
 struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n)

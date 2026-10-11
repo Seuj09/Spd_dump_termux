@@ -24,7 +24,7 @@ command -v python3 >/dev/null || { echo "events: SKIP (no python3)"; exit 0; }
 
 CC=${CC:-gcc}
 $CC -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
 	"$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
 $CC -O2 -Wall -Wextra -std=c11 -I"$root/src" "$root/tests/events_unit.c" "$root/src/events.c" -o "$tmp/eu" || exit 1
 make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; echo "events: build failed"; exit 1; }
@@ -247,7 +247,7 @@ for a in 1 2 77 '' 1234567890; do
 done
 check "--help documents --events" bash -c '"$1" --help 2>&1 | grep -q "^  --events FD|PATH"' _ "$bin"
 check "no environment knob for events (plan wiring is --events only)" \
-	nope grep -nE 'getenv\("SPDHOST_EVENTS' "$root/src/main.c" "$root/src/events.c" "$root/src/proto.c"
+	nope grep -nE 'getenv\("SPDHOST_EVENTS' "$root/src/main.c" "$root/src/plan.c" "$root/src/events.c" "$root/src/proto.c"
 check "SPDHOST_STATUS_FILE code path untouched (fopen append, key=value)" \
 	bash -c 'grep -q "fprintf(f, \"%s=%s\\\\n\", key, val);" "$1/src/main.c" && grep -q "fopen(p, \"a\")" "$1/src/main.c"' _ "$root"
 

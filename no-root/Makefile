@@ -7,9 +7,9 @@ CPPFLAGS += $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0)
 
 SRCS = src/main.c src/usb.c src/usb_list.c src/proto.c src/dumpcmd.c \
-       src/writecmd.c src/sha256.c src/dhtb.c src/pac.c src/events.c
+       src/writecmd.c src/sha256.c src/dhtb.c src/pac.c src/events.c src/plan.c
 HDRS = src/usb.h src/usb_list.h src/proto.h src/dumpcmd.h src/writecmd.h \
-       src/sha256.h src/dhtb.h src/pac.h src/events.h
+       src/sha256.h src/dhtb.h src/pac.h src/events.h src/plan.h
 BIN = spdhost
 ARCH := $(shell uname -m)
 # P0-2: `spdhost caps` reports the commit it was built from. The stamp file

@@ -20,6 +20,11 @@ struct spd_op {
  * (only when that slot's files are actually in the directory).
  * flash_each: release-menu "pasang partisi". Write every named image,
  * including the inactive slot. Do not erase metadata and do not set the slot. */
+/* P0-4: 1 when write-parts / write-files would consider the directory entry
+ * D_NAME (a regular file is assumed): the same name rules as spd_plan_writes,
+ * so a confirm-plan binds exactly the images that run could pick. */
+int spd_write_candidate(const char *d_name);
+
 struct spd_op *spd_plan_writes(struct spd *io, const char *dir, int force_ab, int flash_each, int *n);
 
 /* One file onto a resolved partition. Refuses a file bigger than the live

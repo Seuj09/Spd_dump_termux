@@ -12,6 +12,11 @@
  *   MOCK_FAIL_WRITE_MID=P  2nd write MIDST_DATA of partition P is NACKed
  *                     (the transfer is abandoned mid-partition, like a real
  *                     loader that refuses the rest).
+ *   MOCK_STORE=DIR    (P0-4) a write to any partition but misc is kept in
+ *                     DIR/NAME and later reads of NAME come from it (read-back).
+ *   MOCK_STORE_FLIP=P reads of P from the store come back with byte 0 flipped.
+ *   MOCK_ON_WRITE=P:CMD  system(CMD) when START_DATA for P arrives (a test
+ *                     changes an image while it is being sent).
  *   MOCK_MISC_DROPWRITE=1  misc writes are ACKed but not stored (read-back test).
  *   MOCK_MISC_OUT=F   (misc is always a live 1 MiB buffer) (partition writes land in it,
  *                     later reads see them); written to F after each END_DATA
@@ -107,6 +112,10 @@ static void load_tab(void)
 	fclose(f);
 }
 static int streq_env(const char *e, const char *n) { const char *v = getenv(e); return v && !strcmp(v, n); }
+/* MOCK_STORE: DIR/NAME, or NULL when off / misc. */
+static const char *store_path(const char *n)
+{ static char b[1200]; const char *d = getenv("MOCK_STORE"); if (!d || !d[0] || !strcmp(n, "misc")) return NULL;
+  snprintf(b, sizeof b, "%s/%s", d, n); return b; }
 
 /* MOCK_GPT=1: a standard GPT under `user_partition`, built once. The layout is
  * the one spd_dump gpt_info() (common.c:977-1061) and spdhost gpt_probe() read:
@@ -260,7 +269,7 @@ static void log_out(const uint8_t *buf, int len)
 		if (!cur_size || (sz > cur_size && !getenv("MOCK_LOOSE"))) make_reply(0x82, NULL, 0, crc); /* not ACK */
 		else make_reply(0x80, NULL, 0, crc);
 		return; }
-	case 0x11: { uint32_t want = le32(raw + 4); uint64_t off = le32(raw + 8); uint32_t k;
+	case 0x11: { uint32_t want = le32(raw + 4); uint64_t off = le32(raw + 8); uint32_t k; FILE *sf = NULL;
 		if (plen >= 12) off |= (uint64_t)le32(raw + 12) << 32;
 		if (sizeq) { int tl = snprintf((char *)data, 128, "size:%s: 0x%llx", cur_part,
 				(unsigned long long)sizeq);
@@ -271,6 +280,10 @@ static void log_out(const uint8_t *buf, int len)
 		if (want > 0xffff) want = 0xffff;
 		if (!strcmp(cur_part, "misc") && (misc_init(), miscmem) && off + want <= misclen) memcpy(data, miscmem + off, want);
 		else if (gpt_wanted(cur_part) && off + want <= GPT_LEN) memcpy(data, gptbuf + off, want);
+		else if (store_path(cur_part) && (sf = fopen(store_path(cur_part), "rb")) &&
+			fseek(sf, (long)off, SEEK_SET) == 0 && fread(data, 1, want, sf) == want) {
+			fclose(sf); sf = NULL;
+			if (off == 0 && want && streq_env("MOCK_STORE_FLIP", cur_part)) data[0] ^= 1; }
 		else if (streq_env("MOCK_ZERO", cur_part)) memset(data, 0, want);
 		else for (k = 0; k < want; k++) data[k] = part_byte(cur_part, off + k);
 		{ /* MOCK_IMAGES=a,b,...: those partitions start with a real header
@@ -284,6 +297,7 @@ static void log_out(const uint8_t *buf, int len)
 					for (k = (uint32_t)off; k < 8 && k - off < want; k++) data[k - off] = (uint8_t)m[k];
 				}
 		  } }
+		if (sf) fclose(sf);
 		make_reply(0x93, data, (int)want, crc); return; }
 	case 0x06: { /* READ_FLASH: {addr, size, offset}, all big-endian. The byte at
 	              * absolute address (addr + offset) is part_byte("flash", a), so
@@ -346,6 +360,9 @@ static void log_out(const uint8_t *buf, int len)
 		 * size plus a checksum, not a high size word. */
 		if (plen >= 88) wr_size |= (uint64_t)le32(raw + 4 + 76) << 32;
 		if (streq_env("MOCK_FAIL_WRITE", nm) || !part_size(nm) || wr_size > part_size(nm)) { wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
+		if (store_path(nm)) { FILE *o = fopen(store_path(nm), "wb"); if (o) fclose(o); }
+		{ const char *ow = getenv("MOCK_ON_WRITE"); size_t l = strlen(nm);
+		  if (ow && !strncmp(ow, nm, l) && ow[l] == ':') { if (system(ow + l + 1)) {} } }
 		}
 		make_reply(0x80, NULL, 0, crc); return;
 	case 0x02: if (wr_on && ++wmid_count == 2 && streq_env("MOCK_FAIL_WRITE_MID", wr_part)) {
@@ -355,6 +372,8 @@ static void log_out(const uint8_t *buf, int len)
 			wr_on = 0; make_reply(0x82, NULL, 0, crc); return; }
 		if (wr_on && !strcmp(wr_part, "misc") && !getenv("MOCK_MISC_DROPWRITE")) { misc_init();
 		if (miscmem && wr_off + plen <= misclen) memcpy(miscmem + wr_off, raw + 4, plen); }
+		if (wr_on && store_path(wr_part)) { FILE *o = fopen(store_path(wr_part), "r+b");
+			if (o) { if (fseek(o, (long)wr_off, SEEK_SET) == 0) fwrite(raw + 4, 1, plen, o); fclose(o); } }
 		if (wr_on) wr_off += plen;
 		make_reply(0x80, NULL, 0, crc); return;
 	case 0x03: if (wr_on && !strcmp(wr_part, "misc") && getenv("MOCK_MISC_BLOCK") && miscmem) {

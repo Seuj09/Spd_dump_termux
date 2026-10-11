@@ -27,7 +27,7 @@ cp "$root/fdl/ums9230/infinix/fdl1-dl.bin" "$root/fdl/ums9230/infinix/fdl2-dl.bi
 # A real spdhost for pack-slot (offline). The mock FDL2 only supplies the USB
 # symbols; the offline tools never open a device.
 gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" \
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
 	"$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" \
 	-o "$tmp/spdhost" || exit 1

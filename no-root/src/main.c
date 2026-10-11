@@ -8,14 +8,18 @@
 #include "dhtb.h"
 #include "pac.h"
 #include "events.h"
+#include "plan.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* P0-2 `spdhost caps`. The build stamps the commit it was built from
@@ -91,6 +95,11 @@ static void usage(void)
 		"                      line, see set-active) whose exact bytes have this sha256; any\n"
 		"                      other bytes are refused before sending. For a\n"
 		"                      caller that already took a typed confirm.\n"
+		"  --confirm-plan SHA  run the plan `spdhost plan` printed (same commands):\n"
+		"                      rebuilt before USB opens, refused on any difference,\n"
+		"                      single use (nonce), 10 min; it is then the only\n"
+		"                      authorization (no prompt; not with --yes/--dangerous/\n"
+		"                      --confirm-token/--dry-run). README \"Confirm-plan\".\n"
 		"  --part-xml DIR      leave partition_<unixtime>.xml in DIR every time the\n"
 		"                      partition table is read (spd_dump writes that file\n"
 		"                      on every session; the menu points DIR at the dump\n"
@@ -229,9 +238,12 @@ static void usage(void)
 		"  chsize IN OUT           offline: cut a DHTB image to its real size\n"
 		"  unpac [-d DIR] {list|extract|check} FILE.pac [names]\n"
 		"                          offline: read or extract a Spreadtrum .pac\n"
+		"  plan <commands>         offline: print and store the confirm-plan of\n"
+		"                          those commands (every gated step, image sha256,\n"
+		"                          target, saved table) ending plan-sha256=SHA\n"
 		"  caps                    offline: build sha, protocol version and\n"
 		"                          capability flags, key=value lines (README)\n"
-		"  The seven offline commands open no USB and ignore the device options.\n"
+		"  The eight offline commands open no USB and ignore the device options.\n"
 		"  Unlike the release tools they never overwrite their input file.\n"
 		"  read_flash ADDR OFF SIZE OUT  raw read by address, no partition\n"
 		"                               table involved (spd_dump read_flash).\n"
@@ -333,6 +345,13 @@ static const char *confirm_token;
 static int spd_dump_slot;
 static int confirm_token_used;
 
+/* P0-4 --confirm-plan: set once the run's plan was rebuilt, matched and its
+ * nonce consumed (before USB opens). Every gate then takes the matching plan
+ * step instead of a prompt, and refuses anything the plan does not hold. */
+static int plan_mode;
+static int cur_argi = -1; /* argv index of the command being run */
+static void plan_gate(int cls, const char *verb, const char *name, const uint8_t *buf, size_t len);
+
 /* Read one line from FD (raw read(2), no stdio buffering). Returns bytes read
  * (0 = EOF), -1 on error. */
 static int read_line_fd(int fd, char *buf, int cap)
@@ -379,6 +398,10 @@ static int confirm_ask(int yes, const char *verb, const char *name)
 {
 	char buf[64], prompt[256], hex[3 * 64 + 1];
 	int in_fd = -1, out_fd = -1, tty = -1, n, k;
+	if (plan_mode) {
+		plan_gate(1, verb, name, NULL, 0); /* refuses (exit) when not planned */
+		return 1;
+	}
 	if (yes) {
 		fprintf(stderr, "confirmed via --yes: %s '%s'\n", verb, name);
 		return 1;
@@ -431,6 +454,8 @@ static void confirm(int yes, const char *verb, const char *name)
  * caller skips that read. */
 int spd_confirm_read(int yes, const char *what)
 {
+	if (plan_mode)
+		return confirm_ask(0, "read", what);
 	if (yes) {
 		fprintf(stderr, "confirmed via --yes: read '%s'\n", what);
 		return 1;
@@ -447,6 +472,10 @@ static void confirm_dangerous(const char *what)
 	char buf[64], prompt[320], hex[3 * 64 + 1];
 	int in_fd = -1, out_fd = -1, tty = -1, n, k;
 
+	if (plan_mode) {
+		plan_gate(2, what, what, NULL, 0);
+		return;
+	}
 	if (dangerous_ok) {
 		fprintf(stderr, "DANGEROUS confirmed via --dangerous: %s\n", what);
 		return;
@@ -498,6 +527,10 @@ static void confirm_dangerous(const char *what)
 static void authorize_write(int yes, const char *verb, const char *name, const uint8_t *buf, size_t len)
 {
 	char got[65];
+	if (plan_mode) {
+		plan_gate(1, verb, name, buf, len);
+		return;
+	}
 	if (!confirm_token) {
 		confirm(yes, verb, name);
 		return;
@@ -1036,6 +1069,10 @@ static int write_misc_image(struct spd *io, int yes, const char *path, int gate)
 	int rc;
 	if (!w)
 		return -1;
+	if (SPD_SRC_CHECK(path, w, n, "write misc")) {
+		free(w);
+		return -1;
+	}
 	if (n != SPD_MISC_BCB_LEN && n != full) {
 		fprintf(stderr,
 			"write misc: refusing %zu bytes (need %d for a BCB, or %llu for the whole partition)\n",
@@ -1207,6 +1244,8 @@ static int keep_charge_on(void)
 	}
 }
 
+static int plan_readback(struct spd *io, const char *name, int slot, const char *path);
+
 /* write-part NAME FILE, and the tail of wof / wov / firstmode, which build the
  * same kind of image file and then flash it. Every write confirm is here, so
  * no path into a partition can skip the one write-part takes. */
@@ -1217,7 +1256,9 @@ static int do_write_part(struct spd *io, int yes, const char *name, const char *
 		return write_misc_image(io, yes, path, 1);
 	authorize_write(yes, "write", name, NULL, 0);
 	part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
-	return spd_write_named(io, name, path, part_slot);
+	if (spd_write_named(io, name, path, part_slot))
+		return -1;
+	return plan_readback(io, name, part_slot, path);
 }
 
 static int same_file_size(const char *path, uint64_t expect)
@@ -1394,7 +1435,8 @@ static int run_write_plan(struct spd *io, int yes, const char *dir, int force_ab
 			}
 		} else if (ops[k].kind == SPD_OP_WRITE) {
 			int part_slot = ops[k].slot == 'a' ? 1 : ops[k].slot == 'b' ? 2 : 0;
-			if (spd_write_named(io, ops[k].name, ops[k].path, part_slot)) {
+			if (spd_write_named(io, ops[k].name, ops[k].path, part_slot) ||
+				plan_readback(io, ops[k].name, part_slot, ops[k].path)) {
 				free(ops);
 				return -1;
 			}
@@ -1466,6 +1508,7 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
  * guess from usage text. Only features that exist in this build; sorted;
  * one name per line. A name is never reused for something else. */
 static const char *const spd_caps[] = {
+	"confirm-plan",  /* spdhost plan <argv> + --confirm-plan SHA (README) */
 	"confirm-token", /* --confirm-token SHA256 on misc writes / set-active */
 	"dry-run",       /* --dry-run: no USB, DRY packet lines on stdout */
 	"events",        /* --events FD|PATH: JSON-lines event channel (README) */
@@ -1560,6 +1603,857 @@ static void ev_cmd_next(const struct spd *io, const char *cmd, int nfailed)
 	spd_event("cmd", "\"name\":%s,\"state\":\"start\"", spd_ev_q(cmd, q, sizeof(q)));
 }
 
+/* ---- P0-4 confirm-plan (README "Confirm-plan") ----
+ *
+ * `spdhost [opts] plan <commands>` walks the same argv the run will get,
+ * offline, and prints a canonical plan: the core version, a nonce and its
+ * issue/expiry times, the options that change what a run does, the target
+ * (chip + the exact loader files), the sha256 of the partition table the last
+ * real `parts` saved, the argv, every image the run may write (full sha256),
+ * and one `step` per gate the run will reach (op, partition, slot,
+ * offset/size, bound bytes, gate class), then `plan-sha256=`. The plan is
+ * stored under the state dir until it is used or expires.
+ *
+ * `spdhost [opts] --confirm-plan SHA <the same commands>` rebuilds that plan
+ * before USB is opened, staging (or holding open) every image as it hashes
+ * it, refuses any difference, checks the times, and consumes the nonce
+ * (O_CREAT|O_EXCL) before anything is sent. Each gate then takes its own
+ * step once; anything not in the plan is refused. The live table is checked
+ * against the plan's at the first gate. Device-dependent refusals stay as
+ * they are. Without --confirm-plan nothing here runs. */
+enum { PLAN_YES = 1, PLAN_DANGEROUS = 2 };
+#define PLAN_TTL_DEFAULT 600
+
+struct pstep {
+	int argi;
+	int cls;
+	char verb[96];
+	char data[65];
+	int used;
+};
+static struct pstep psteps[256];
+static int npsteps;
+static struct spd *plan_io;
+static const char *plan_self_path = "";
+static char plan_table_want[65];
+static int plan_table_checked;
+
+struct popts {
+	int step, step_set, spd_dump_slot, keep_going;
+	const char *part_xml_dir;
+	const char *self_path;
+};
+
+struct pctx {
+	FILE *f;            /* body: images and steps */
+	int exec;           /* execute side: stage/hold images, rewrite argv */
+	const char *nonce;
+	char **argv;
+	int first, first_gate, parts_at, cls_max;
+	char target[1024];
+	int nloader;
+	uint32_t first_fdl;
+	int have_exec;
+	uint32_t exec_addr;
+	char exec_sha[65];
+};
+
+static void plan_refuse(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+static void plan_refuse(const char *fmt, ...)
+{
+	va_list ap;
+	fprintf(stderr, "plan: ");
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "; nothing sent\n");
+	exit(1);
+}
+
+static const char *slot_of(const char *name)
+{
+	size_t l = strlen(name);
+	if (l > 2 && !strcmp(name + l - 2, "_a"))
+		return "a";
+	if (l > 2 && !strcmp(name + l - 2, "_b"))
+		return "b";
+	return "active";
+}
+
+static void add_step(struct pctx *P, int argi, int cls, const char *op, const char *part,
+	const char *slot, const char *off, const char *size, const char *data, const char *verb)
+{
+	struct pstep *s;
+	if (npsteps >= (int)(sizeof(psteps) / sizeof(psteps[0])))
+		plan_refuse("more than %d gated steps in one run", (int)(sizeof(psteps) / sizeof(psteps[0])));
+	s = &psteps[npsteps++];
+	memset(s, 0, sizeof(*s));
+	s->argi = argi;
+	s->cls = cls;
+	snprintf(s->verb, sizeof(s->verb), "%s", verb);
+	snprintf(s->data, sizeof(s->data), "%s", data ? data : "-");
+	if (P->first_gate < 0)
+		P->first_gate = argi;
+	if (cls > P->cls_max)
+		P->cls_max = cls;
+	fprintf(P->f, "step %d argi=%d class=%s op=", npsteps, argi - P->first, cls == PLAN_DANGEROUS ? "dangerous" : "yes");
+	spd_plan_q(P->f, op);
+	fputs(" part=", P->f);
+	spd_plan_q(P->f, part);
+	fprintf(P->f, " slot=%s offset=", slot);
+	spd_plan_q(P->f, off);
+	fputs(" size=", P->f);
+	spd_plan_q(P->f, size);
+	fprintf(P->f, " data-sha256=%s verb=", s->data);
+	spd_plan_q(P->f, verb);
+	fputc('\n', P->f);
+}
+
+/* One image argument (argv[K]): its full sha256 now; on the execute side it
+ * is staged or held open, and argv[K] then names what the write will read. */
+static void bind_file(struct pctx *P, int k, char sha[65], uint64_t *size)
+{
+	const char *path = P->argv[k];
+	if (!P->exec) {
+		if (spd_file_sha(path, sha, size))
+			plan_refuse("cannot read %s: %s", path, strerror(errno));
+	} else {
+		char staged[1400], tag[32];
+		snprintf(tag, sizeof(tag), "a%d", k);
+		if (spd_plan_take_image(path, P->nonce, tag, -1, staged, sizeof(staged), sha, size))
+			plan_refuse("cannot take %s for this run", path);
+		P->argv[k] = strdup(staged);
+		if (!P->argv[k])
+			plan_refuse("out of memory");
+	}
+	fprintf(P->f, "image arg=%d path=", k - P->first);
+	spd_plan_q(P->f, path);
+	fprintf(P->f, " size=%llu sha256=%s\n", (unsigned long long)*size, sha);
+}
+
+static int cmp_str(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* write-parts / write-files DIR: every file that run could pick, sorted. */
+static void bind_dir(struct pctx *P, int k)
+{
+	const char *dir = P->argv[k];
+	DIR *dp = opendir(dir);
+	struct dirent *de;
+	char **names = NULL, newdir[1400] = "";
+	int n = 0, cap = 0, j, mode = 0;
+	uint64_t total = 0;
+	if (!dp)
+		plan_refuse("cannot open %s: %s", dir, strerror(errno));
+	while ((de = readdir(dp)) != NULL) {
+		char path[1400];
+		struct stat st;
+		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+		if (!spd_write_candidate(de->d_name) || stat(path, &st) || !S_ISREG(st.st_mode))
+			continue;
+		if (n >= cap) {
+			char **g;
+			cap = cap ? cap * 2 : 32;
+			g = realloc(names, (size_t)cap * sizeof(*names));
+			if (!g)
+				plan_refuse("out of memory");
+			names = g;
+		}
+		names[n++] = strdup(de->d_name);
+		total += (uint64_t)st.st_size;
+	}
+	closedir(dp);
+	if (n)
+		qsort(names, (size_t)n, sizeof(*names), cmp_str);
+	fprintf(P->f, "dir arg=%d path=", k - P->first);
+	spd_plan_q(P->f, dir);
+	fprintf(P->f, " images=%d\n", n);
+	if (P->exec && n) {
+		/* One choice for the whole folder: the run reads it as a folder. */
+		mode = spd_plan_choose(P->nonce, total);
+		if (mode < 0)
+			plan_refuse("cannot make a private staging dir");
+	}
+	for (j = 0; j < n; j++) {
+		char path[1400], sha[65], staged[1400], tag[32];
+		uint64_t size = 0;
+		snprintf(path, sizeof(path), "%s/%s", dir, names[j]);
+		if (!P->exec) {
+			if (spd_file_sha(path, sha, &size))
+				plan_refuse("cannot read %s: %s", path, strerror(errno));
+		} else {
+			char *slash;
+			snprintf(tag, sizeof(tag), "a%d", k);
+			if (spd_plan_take_image(path, P->nonce, tag, mode, staged, sizeof(staged), sha, &size))
+				plan_refuse("cannot take %s for this run", path);
+			if (!mode && (slash = strrchr(staged, '/'))) {
+				*slash = 0;
+				snprintf(newdir, sizeof(newdir), "%s", staged);
+			}
+		}
+		fprintf(P->f, "image arg=%d file=", k - P->first);
+		spd_plan_q(P->f, names[j]);
+		fprintf(P->f, " size=%llu sha256=%s\n", (unsigned long long)size, sha);
+		free(names[j]);
+	}
+	free(names);
+	if (P->exec && newdir[0]) {
+		P->argv[k] = strdup(newdir);
+		if (!P->argv[k])
+			plan_refuse("out of memory");
+	}
+}
+
+static void plan_loader(struct pctx *P, const char *path, uint32_t addr)
+{
+	char sha[65], one[128];
+	uint64_t size;
+	if (spd_file_sha(path, sha, &size))
+		plan_refuse("cannot read loader %s: %s", path, strerror(errno));
+	if (!P->nloader)
+		P->first_fdl = addr;
+	P->nloader++;
+	snprintf(one, sizeof(one), " loader%d=0x%08x:%s", P->nloader, (unsigned)addr, sha);
+	if (strlen(P->target) + strlen(one) < sizeof(P->target))
+		strcat(P->target, one);
+}
+
+static void plan_exec(struct pctx *P, uint32_t ea, const char *file)
+{
+	uint64_t size;
+	P->have_exec = 0;
+	if (!ea || !file)
+		return;
+	if (spd_file_sha(file, P->exec_sha, &size))
+		plan_refuse("cannot read exec stub %s", file);
+	P->have_exec = 1;
+	P->exec_addr = ea;
+}
+
+static uint32_t loadfdl_addr(const char *name)
+{
+	const char *p, *last = NULL;
+	unsigned long a;
+	for (p = name; (p = strstr(p, "0X")) != NULL; p += 2)
+		last = p;
+	if (!last)
+		for (p = name; (p = strstr(p, "0x")) != NULL; p += 2)
+			last = p;
+	if (!last)
+		plan_refuse("loadfdl: \"0x\" not found in name of %s", name);
+	errno = 0;
+	a = strtoul(last, NULL, 16);
+	if (errno == ERANGE || a > 0xffffffffUL)
+		plan_refuse("loadfdl: address in %s does not fit in 32 bits", last);
+	return (uint32_t)a;
+}
+
+static int next_arg(int argc, char **argv, int i)
+{
+	return i + 1 < argc && !is_command(argv[i + 1]);
+}
+
+/* The walk. Arity follows the command loop in spdhost_main exactly; a step
+ * the walk misplaces is not taken at its gate, and the run refuses. */
+static void plan_walk(struct pctx *P, int argc, char **argv, int first)
+{
+	int i, stop = 0;
+	for (i = first; i < argc && !stop; ) {
+		const char *cmd = argv[i], *al = cmd_alias(cmd);
+		int a = i;
+		char sha[65];
+		uint64_t size = 0;
+		char num[32];
+		if (al)
+			cmd = al;
+		if (!strcmp(cmd, "ping")) {
+			i += i + 1 < argc && !strcmp(argv[i + 1], "--fdl") ? 2 : 1;
+		} else if (!strcmp(cmd, "exec_addr") || !strcmp(cmd, "exec_addr2")) {
+			uint64_t ea;
+			const char *file = NULL;
+			need(argc, i, 1, cmd);
+			ea = parse_size(argv[i + 1]);
+			if (ea > 0xffffffffull)
+				plan_refuse("exec_addr does not fit in 32 bits");
+			if (i + 2 < argc && !is_command(argv[i + 2])) {
+				file = argv[i + 2];
+				i++;
+			}
+			i += 2;
+			if (!P->nloader) {
+				if (ea && !file)
+					file = find_exec_file(plan_self_path, (uint32_t)ea);
+				if (ea && !file)
+					plan_refuse("exec_addr 0x%x: no stub file", (unsigned)ea);
+				plan_exec(P, (uint32_t)ea, file);
+			}
+		} else if (!strcmp(cmd, "fdl")) {
+			uint64_t addr;
+			need(argc, i, 2, "fdl");
+			addr = parse_size(argv[i + 2]);
+			if (addr > 0xffffffffull)
+				plan_refuse("fdl address does not fit in 32 bits");
+			plan_loader(P, argv[i + 1], (uint32_t)addr);
+			i += 3;
+		} else if (!strcmp(cmd, "loadfdl")) {
+			need(argc, i, 1, "loadfdl");
+			plan_loader(P, argv[i + 1], loadfdl_addr(argv[i + 1]));
+			i += 2;
+		} else if (!strcmp(cmd, "loadexec") || !strcmp(cmd, "loadexec2")) {
+			const char *base;
+			char straddr[9] = { 0 };
+			uint32_t ea = 0;
+			need(argc, i, 1, cmd);
+			base = strrchr(argv[i + 1], '/');
+			base = base ? base + 1 : argv[i + 1];
+			if (sscanf(base, "custom_exec_no_verify_%8[0-9a-fA-F]", straddr) == 1)
+				ea = (uint32_t)strtoul(straddr, NULL, 16);
+			if (!P->nloader)
+				plan_exec(P, access(argv[i + 1], R_OK) == 0 ? ea : 0, argv[i + 1]);
+			i += 2;
+		} else if (!strcmp(cmd, "parts") || !strcmp(cmd, "partition-list") ||
+			!strcmp(cmd, "partition_list") || !strcmp(cmd, "path") ||
+			!strcmp(cmd, "keep_charge") || !strcmp(cmd, "keep-charge")) {
+			if (!strcmp(cmd, "parts") && P->parts_at < 0)
+				P->parts_at = a;
+			i += next_arg(argc, argv, i) ? 2 : 1;
+		} else if (!strcmp(cmd, "read-part")) {
+			need(argc, i, 4, "read-part");
+			if (!strncmp(argv[i + 1], "userdata", 8))
+				add_step(P, a, PLAN_YES, "read-part", argv[i + 1], slot_of(argv[i + 1]),
+					argv[i + 2], argv[i + 3], NULL, "read");
+			i += 5;
+		} else if (!strcmp(cmd, "check-part") || !strcmp(cmd, "part-size") ||
+			!strcmp(cmd, "size_part") || !strcmp(cmd, "part_size") ||
+			!strcmp(cmd, "misc-backup")) {
+			need(argc, i, 1, cmd);
+			i += 2;
+		} else if (!strcmp(cmd, "print") || !strcmp(cmd, "p") || !strcmp(cmd, "chip-uid")) {
+			i++;
+		} else if (!strcmp(cmd, "read-parts") || !strcmp(cmd, "read_parts")) {
+			need(argc, i, 1, cmd);
+			i += i + 2 < argc && !is_command(argv[i + 2]) ? 3 : 2;
+		} else if (!strcmp(cmd, "dump")) {
+			need(argc, i, 2, "dump");
+			if (!strncmp(argv[i + 1], "userdata", 8))
+				add_step(P, a, PLAN_YES, "dump", argv[i + 1], slot_of(argv[i + 1]), "0", "full",
+					NULL, "read");
+			i += 3;
+		} else if (!strcmp(cmd, "misc-backup-expect")) {
+			need(argc, i, 2, cmd);
+			i += 3;
+		} else if (!strcmp(cmd, "write-part") || !strcmp(cmd, "write-part-plain")) {
+			const char *name;
+			need(argc, i, 2, cmd);
+			name = argv[i + 1];
+			bind_file(P, i + 2, sha, &size);
+			snprintf(num, sizeof(num), "%llu", (unsigned long long)size);
+			add_step(P, a, PLAN_YES, cmd, name, slot_of(name), "0", num,
+				strcmp(name, "misc") ? NULL : sha, "write");
+			i += 3;
+		} else if (!strcmp(cmd, "wof") || !strcmp(cmd, "wov")) {
+			need(argc, i, 3, cmd);
+			if (!strcmp(argv[i + 1], "misc"))
+				plan_refuse("%s misc is not plannable (the bytes come from the device); use"
+					" write-part misc FILE", cmd);
+			if (!strcmp(cmd, "wof")) {
+				bind_file(P, i + 3, sha, &size);
+				snprintf(num, sizeof(num), "%llu", (unsigned long long)size);
+			} else {
+				snprintf(num, sizeof(num), "4");
+				fprintf(P->f, "value arg=%d ", i + 3 - P->first);
+				spd_plan_q(P->f, argv[i + 3]);
+				fputc('\n', P->f);
+			}
+			add_step(P, a, PLAN_YES, cmd, argv[i + 1], slot_of(argv[i + 1]), argv[i + 2], num,
+				NULL, "write");
+			i += 4;
+		} else if (!strcmp(cmd, "firstmode")) {
+			need(argc, i, 1, "firstmode");
+			add_step(P, a, PLAN_YES, "firstmode", "miscdata", "active", "0x2420", "4", NULL, "write");
+			fprintf(P->f, "value arg=%d ", i + 1 - P->first);
+			spd_plan_q(P->f, argv[i + 1]);
+			fputc('\n', P->f);
+			i += 2;
+		} else if (!strcmp(cmd, "w-force") || !strcmp(cmd, "w_force")) {
+			need(argc, i, 2, "w-force");
+			bind_file(P, i + 2, sha, &size);
+			snprintf(num, sizeof(num), "%llu", (unsigned long long)size);
+			add_step(P, a, PLAN_YES, "w-force", argv[i + 1], slot_of(argv[i + 1]), "0", num,
+				NULL, "w-force");
+			i += 3;
+		} else if (!strcmp(cmd, "write-parts") || !strcmp(cmd, "write-parts-a") ||
+			!strcmp(cmd, "write-parts-b") || !strcmp(cmd, "write-files")) {
+			int flash = !strcmp(cmd, "write-files");
+			need(argc, i, 1, cmd);
+			bind_dir(P, i + 1);
+			add_step(P, a, PLAN_YES, cmd, "images", !strcmp(cmd, "write-parts-a") ? "a" :
+				!strcmp(cmd, "write-parts-b") ? "b" : flash ? "each" : "from-images",
+				"-", "-", NULL,
+				flash ? "write each named image from" : "write all partitions from");
+			i += 2;
+		} else if (!strcmp(cmd, "repartition")) {
+			need(argc, i, 1, "repartition");
+			bind_file(P, i + 1, sha, &size);
+			snprintf(num, sizeof(num), "%llu", (unsigned long long)size);
+			add_step(P, a, PLAN_YES, "repartition", "table", "-", "-", num, NULL, "repartition from");
+			i += 2;
+		} else if (!strcmp(cmd, "set-active")) {
+			int bcb_kind = -1;
+			char desc[128], h[65], which;
+			need(argc, i, 1, "set-active");
+			if ((argv[i + 1][0] != 'a' && argv[i + 1][0] != 'b') || argv[i + 1][1])
+				plan_refuse("set-active: want a or b");
+			which = argv[i + 1][0];
+			if (i + 2 < argc && !strcmp(argv[i + 2], "--bcb")) {
+				if (i + 3 >= argc || (strcmp(argv[i + 3], "recovery") && strcmp(argv[i + 3], "fastboot")))
+					plan_refuse("set-active: --bcb wants recovery or fastboot");
+				bcb_kind = !strcmp(argv[i + 3], "fastboot");
+			}
+			set_active_desc(which, bcb_kind, desc, sizeof(desc));
+			sha256_hex((const uint8_t *)desc, strlen(desc), h);
+			add_step(P, a, PLAN_YES, bcb_kind < 0 ? "set-active" : bcb_kind ? "set-active+bcb-fastboot+reset" :
+				"set-active+bcb-recovery+reset", "misc", which == 'a' ? "a" : "b", "0x800", "32", h,
+				"set-active");
+			if (bcb_kind >= 0) {
+				i += 4;
+				stop = 1;
+			} else {
+				i += 2;
+			}
+		} else if (!strcmp(cmd, "erase-part")) {
+			need(argc, i, 1, "erase-part");
+			add_step(P, a, PLAN_YES, "erase-part", argv[i + 1], slot_of(argv[i + 1]), "-", "-",
+				NULL, "erase");
+			i += 2;
+		} else if (!strcmp(cmd, "read_flash")) {
+			need(argc, i, 4, cmd);
+			i += 5;
+		} else if (!strcmp(cmd, "read_mem")) {
+			need(argc, i, 3, cmd);
+			i += 4;
+		} else if (!strcmp(cmd, "erase_flash")) {
+			need(argc, i, 2, cmd);
+			add_step(P, a, PLAN_YES, "erase_flash", "-", "-", argv[i + 1], argv[i + 2], NULL,
+				"erase flash at");
+			i += 3;
+		} else if (!strcmp(cmd, "verity")) {
+			int extra = 0;
+			need(argc, i, 1, "verity");
+			if (strcmp(argv[i + 1], "0") && strcmp(argv[i + 1], "1"))
+				plan_refuse("verity: want 0 (disable) or 1 (enable)");
+			if (i + 2 < argc && !is_command(argv[i + 2]))
+				extra = 1;
+			add_step(P, a, PLAN_DANGEROUS, argv[i + 1][0] == '0' ? "verity-disable" : "verity-enable",
+				"vbmeta*", "active", "0x7b", "1", NULL,
+				argv[i + 1][0] == '0' ? "disable verity (vbmeta byte 0x7b)" :
+				"enable verity (vbmeta byte 0x7b)");
+			if (extra) {
+				fprintf(P->f, "backup-dir arg=%d ", i + 2 - P->first);
+				spd_plan_q(P->f, argv[i + 2]);
+				fputc('\n', P->f);
+			}
+			i += 2 + extra;
+		} else if (!strcmp(cmd, "frp-reset")) {
+			const char *fp = getenv("SPDHOST_FRP_PART");
+			need(argc, i, 1, "frp-reset");
+			add_step(P, a, PLAN_DANGEROUS, "frp-reset", fp && fp[0] ? fp : "frp|persist (table)",
+				"active", "0", "full", NULL, "reset FRP (backup, then erase)");
+			i += 2;
+		} else if (!strcmp(cmd, "danger-erase")) {
+			need(argc, i, 1, "danger-erase");
+			add_step(P, a, PLAN_DANGEROUS, "danger-erase", argv[i + 1], slot_of(argv[i + 1]),
+				"-", "-", NULL, "erase");
+			i += 2;
+		} else if (!strcmp(cmd, "reboot-recovery") || !strcmp(cmd, "reboot-fastboot")) {
+			uint8_t bcb[SPD_MISC_BCB_LEN];
+			int kind = !strcmp(cmd, "reboot-fastboot");
+			build_bcb(bcb, kind);
+			sha256_hex(bcb, sizeof(bcb), sha);
+			add_step(P, a, PLAN_YES, kind ? "reboot-fastboot+reset" : "reboot-recovery+reset", "misc",
+				"active", "0", "2048", sha, kind ? "reboot-fastboot via" : "reboot-recovery via");
+			stop = 1;
+		} else if (!strcmp(cmd, "reset") || !strcmp(cmd, "power-off") || !strcmp(cmd, "poweroff")) {
+			stop = 1;
+		} else {
+			plan_refuse("unknown or unplannable command: %s", cmd);
+		}
+	}
+}
+
+/* The whole plan text up to and including "end\n" (malloc'd). */
+static char *plan_build(int exec, int argc, char **argv, int first, const struct popts *o,
+	const char *nonce, long issued, long expires)
+{
+	struct pctx P;
+	char *body = NULL, *text = NULL, tsha[65];
+	size_t blen = 0, tlen = 0;
+	FILE *f;
+	int k;
+	const char *chip = NULL, *fp, *env_kc;
+	char **orig;
+
+	memset(&P, 0, sizeof(P));
+	P.exec = exec;
+	P.nonce = nonce;
+	P.argv = argv;
+	P.first = first;
+	P.first_gate = P.parts_at = -1;
+	npsteps = 0;
+	/* The argv as given, before the execute side points images at staging. */
+	orig = calloc((size_t)argc + 1, sizeof(*orig));
+	if (!orig)
+		plan_refuse("out of memory");
+	for (k = 0; k < argc; k++)
+		orig[k] = argv[k];
+	P.f = open_memstream(&body, &blen);
+	if (!P.f)
+		plan_refuse("out of memory");
+	plan_walk(&P, argc, argv, first);
+	fclose(P.f);
+	if (!npsteps)
+		plan_refuse("these commands reach no confirm gate; run them without a plan");
+	if (P.parts_at < 0 || P.parts_at > P.first_gate)
+		plan_refuse("`parts` must come before the first gated step (argv %d): the run checks the"
+			" live table against the plan's there", P.first_gate - first);
+	if (spd_state_table_sha(tsha))
+		plan_refuse("no saved partition table in the state dir; run a session with `parts` on"
+			" this phone first (it saves %s/table-last)", spd_state_dir() ? spd_state_dir() : "<state>");
+	if (P.have_exec)
+		chip = exec_chip(P.exec_addr);
+	if (!chip && P.nloader)
+		chip = P.first_fdl == 0x65000800u ? "ums9230" : P.first_fdl == 0x5500u ? "ums512" :
+			P.first_fdl == 0x5000u ? "sc9863a" : NULL;
+
+	f = open_memstream(&text, &tlen);
+	if (!f)
+		plan_refuse("out of memory");
+	fprintf(f, "spdhost-plan 1\n");
+	fprintf(f, "build_sha=%s\nbuild_dirty=%s\nprotocol=%d\n", build_sha(), build_dirty(), SPDHOST_PROTOCOL);
+	fprintf(f, "nonce=%s\nissued-at=%ld\nexpires-at=%ld\n", nonce, issued, expires);
+	if (o->step_set)
+		fprintf(f, "opt step=0x%x\n", (unsigned)o->step);
+	else
+		fprintf(f, "opt step=default\n");
+	fprintf(f, "opt spd-dump-slot=%d\nopt keep-going=%d\nopt part-xml=", o->spd_dump_slot, o->keep_going);
+	spd_plan_q(f, o->part_xml_dir);
+	fputs("\nenv SPDHOST_FRP_PART=", f);
+	fp = getenv("SPDHOST_FRP_PART");
+	spd_plan_q(f, fp);
+	fputs("\nenv SPDHOST_NO_KEEP_CHARGE=", f);
+	env_kc = getenv("SPDHOST_NO_KEEP_CHARGE");
+	spd_plan_q(f, env_kc);
+	fprintf(f, "\ntarget chip=%s", chip ? chip : "unknown");
+	if (P.have_exec)
+		fprintf(f, " exec=0x%08x:%s", (unsigned)P.exec_addr, P.exec_sha);
+	else
+		fprintf(f, " exec=none");
+	fprintf(f, "%s\n", P.nloader ? P.target : " loaders=none");
+	fprintf(f, "table-sha256=%s\n", tsha);
+	fprintf(f, "argc=%d\n", argc - first);
+	for (k = first; k < argc; k++) {
+		fprintf(f, "arg %d ", k - first);
+		spd_plan_q(f, orig[k]);
+		fputc('\n', f);
+	}
+	fputs(body, f);
+	fprintf(f, "gate=%s\nend\n", P.cls_max == PLAN_DANGEROUS ? "dangerous" : "yes");
+	fclose(f);
+	free(body);
+	free(orig);
+	snprintf(plan_table_want, sizeof(plan_table_want), "%s", tsha);
+	return text;
+}
+
+static int plan_ttl(void)
+{
+	const char *e = getenv("SPDHOST_PLAN_TTL");
+	long v;
+	char *end = NULL;
+	if (!e || !e[0])
+		return PLAN_TTL_DEFAULT;
+	v = strtol(e, &end, 10);
+	/* Shorter only: the default is also the ceiling. */
+	if (*end || v < 1 || v > PLAN_TTL_DEFAULT) {
+		fprintf(stderr, "plan: SPDHOST_PLAN_TTL=%s ignored (1..%d seconds)\n", e, PLAN_TTL_DEFAULT);
+		return PLAN_TTL_DEFAULT;
+	}
+	return (int)v;
+}
+
+static int random_hex(char *out, size_t bytes)
+{
+	uint8_t b[32];
+	size_t k, got = 0;
+	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+	if (fd < 0 || bytes > sizeof(b))
+		return -1;
+	while (got < bytes) {
+		ssize_t r = read(fd, b + got, bytes - got);
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0) {
+			close(fd);
+			return -1;
+		}
+		got += (size_t)r;
+	}
+	close(fd);
+	for (k = 0; k < bytes; k++)
+		snprintf(out + 2 * k, 3, "%02x", b[k]);
+	return 0;
+}
+
+/* `spdhost [opts] plan <commands>`: offline; prints the plan, stores it. */
+static int plan_command(int argc, char **argv, int first, const struct popts *o)
+{
+	char nonce[33], sha[65], *text, *full;
+	long issued, expires;
+	const char *now_env = getenv("SPDHOST_PLAN_NOW");
+	if (first >= argc) {
+		fprintf(stderr, "plan <commands>: the same commands the run will get\n");
+		return 2;
+	}
+	if (!spd_state_dir())
+		return 1;
+	spd_plan_prune(time(NULL));
+	if (random_hex(nonce, 16)) {
+		fprintf(stderr, "plan: no randomness (/dev/urandom)\n");
+		return 1;
+	}
+	/* SPDHOST_PLAN_NOW (tests): the issue time. It cannot make a plan
+	 * outlive the TTL: a later time is refused as future-dated. */
+	issued = now_env && now_env[0] ? strtol(now_env, NULL, 10) : (long)time(NULL);
+	expires = issued + plan_ttl();
+	text = plan_build(0, argc, argv, first, o, nonce, issued, expires);
+	sha256_hex((const uint8_t *)text, strlen(text), sha);
+	full = malloc(strlen(text) + 80);
+	if (!full)
+		return 1;
+	sprintf(full, "%splan-sha256=%s\n", text, sha);
+	if (spd_plan_store(sha, full)) {
+		fprintf(stderr, "plan: cannot store the plan under %s/pending\n", spd_state_dir());
+		return 1;
+	}
+	fputs(full, stdout);
+	free(text);
+	free(full);
+	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
+}
+
+static long rec_long(const char *t, const char *key)
+{
+	size_t kl = strlen(key);
+	const char *p = t;
+	while (p && *p) {
+		if (!strncmp(p, key, kl) && p[kl] == '=')
+			return strtol(p + kl + 1, NULL, 10);
+		p = strchr(p, '\n');
+		if (p)
+			p++;
+	}
+	return -1;
+}
+
+static int rec_str(const char *t, const char *key, char *out, size_t cap)
+{
+	size_t kl = strlen(key), n;
+	const char *p = t, *e;
+	while (p && *p) {
+		if (!strncmp(p, key, kl) && p[kl] == '=') {
+			p += kl + 1;
+			e = strchr(p, '\n');
+			n = e ? (size_t)(e - p) : strlen(p);
+			if (n >= cap)
+				return -1;
+			memcpy(out, p, n);
+			out[n] = 0;
+			return 0;
+		}
+		p = strchr(p, '\n');
+		if (p)
+			p++;
+	}
+	return -1;
+}
+
+/* Print the first line where the stored plan and the rebuilt one differ. */
+static void plan_diff(const char *want, const char *got)
+{
+	int line = 1;
+	while (*want || *got) {
+		const char *we = strchr(want, '\n'), *ge = strchr(got, '\n');
+		size_t wl = we ? (size_t)(we - want) : strlen(want), gl = ge ? (size_t)(ge - got) : strlen(got);
+		if (wl != gl || memcmp(want, got, wl)) {
+			fprintf(stderr, "confirm-plan: first difference, line %d:\n  planned: %.*s\n  now:     %.*s\n",
+				line, (int)(wl > 300 ? 300 : wl), want, (int)(gl > 300 ? 300 : gl), got);
+			return;
+		}
+		want = we ? we + 1 : want + wl;
+		got = ge ? ge + 1 : got + gl;
+		line++;
+	}
+}
+
+/* --confirm-plan SHA: everything before USB opens. 0 = this run owns the
+ * plan now (nonce consumed); otherwise a refusal was printed. */
+static int plan_execute_start(const char *sha, int argc, char **argv, int first, const struct popts *o)
+{
+	char *rec, *text, got[65], nonce[40];
+	long issued, expires, now = (long)time(NULL);
+	int rc;
+	if (!spd_state_dir())
+		return -1;
+	spd_plan_prune((time_t)now);
+	rec = spd_plan_load(sha);
+	if (!rec) {
+		fprintf(stderr, "confirm-plan: no pending plan %s under %s/pending (unknown, already used,"
+			" or expired); nothing sent\n", sha, spd_state_dir());
+		return -1;
+	}
+	issued = rec_long(rec, "issued-at");
+	expires = rec_long(rec, "expires-at");
+	if (rec_str(rec, "nonce", nonce, sizeof(nonce)) || strlen(nonce) != 32 || issued < 0 || expires < issued) {
+		fprintf(stderr, "confirm-plan: the stored plan %s is malformed; nothing sent\n", sha);
+		return -1;
+	}
+	if (issued > now + 5) {
+		fprintf(stderr, "confirm-plan: refusing a future-dated plan (issued-at %ld, now %ld); nothing sent\n",
+			issued, now);
+		return -1;
+	}
+	if (now > expires) {
+		fprintf(stderr, "confirm-plan: the plan expired at %ld (now %ld); make a new plan; nothing sent\n",
+			expires, now);
+		return -1;
+	}
+	text = plan_build(1, argc, argv, first, o, nonce, issued, expires);
+	sha256_hex((const uint8_t *)text, strlen(text), got);
+	if (strcmp(got, sha)) {
+		fprintf(stderr, "confirm-plan: refusing: this run's plan (sha256 %s) is not the confirmed plan %s;"
+			" nothing sent\n", got, sha);
+		plan_diff(rec, text);
+		free(text);
+		free(rec);
+		return -1;
+	}
+	free(text);
+	free(rec);
+	/* Single use, decided here, before USB opens and long before the first
+	 * device write: a crash or a cable drop after this point is not
+	 * replayable; resuming takes a new plan and a new confirm. */
+	rc = spd_plan_consume(nonce, sha, expires);
+	if (rc) {
+		fprintf(stderr, "confirm-plan: %s; nothing sent\n", rc == 1 ?
+			"the plan's nonce was already used (another run took it)" :
+			"cannot record the nonce as used");
+		return -1;
+	}
+	plan_mode = 1;
+	spd_plan_hooks_on();
+	fprintf(stderr, "confirm-plan: plan %s accepted; nonce consumed (single use); %d step%s, %d image%s"
+		" staged, %d streamed\n", sha, npsteps, npsteps == 1 ? "" : "s",
+		spd_plan_staged_count(), spd_plan_staged_count() == 1 ? "" : "s", spd_plan_stream_count());
+	return 0;
+}
+
+static void plan_gate(int cls, const char *verb, const char *name, const uint8_t *buf, size_t len)
+{
+	int k;
+	char got[65];
+	if (!plan_table_checked) {
+		char live[65];
+		if (!plan_io || spd_table_sha(plan_io, live)) {
+			fprintf(stderr, "confirm-plan: refusing %s '%s': no partition table was read in this"
+				" session; nothing sent\n", verb, name);
+			exit(1);
+		}
+		if (strcmp(live, plan_table_want)) {
+			fprintf(stderr, "confirm-plan: refusing %s '%s': the live partition table (sha256 %s) is"
+				" not the one the plan was made against (%s): another phone, or the table"
+				" changed. Nothing sent.\n", verb, name, live, plan_table_want);
+			exit(1);
+		}
+		plan_table_checked = 1;
+		fprintf(stderr, "confirm-plan: live partition table matches the plan (sha256 %s)\n", live);
+	}
+	for (k = 0; k < npsteps; k++)
+		if (psteps[k].argi == cur_argi && !psteps[k].used && psteps[k].cls == cls &&
+			(cls == PLAN_DANGEROUS || !strcmp(psteps[k].verb, verb)))
+			break;
+	if (k == npsteps) {
+		fprintf(stderr, "confirm-plan: refusing %s '%s': not a step of the confirmed plan (or"
+			" already taken); nothing sent for it\n", verb, name);
+		exit(1);
+	}
+	if (strcmp(psteps[k].data, "-")) {
+		if (!buf) {
+			fprintf(stderr, "confirm-plan: refusing %s '%s': no bytes to check\n", verb, name);
+			exit(1);
+		}
+		sha256_hex(buf, len, got);
+		if (strcmp(got, psteps[k].data)) {
+			fprintf(stderr, "confirm-plan: refusing %s '%s': the bytes hash to %s, the plan bound %s;"
+				" nothing written\n", verb, name, got, psteps[k].data);
+			exit(1);
+		}
+	} else if (buf) {
+		fprintf(stderr, "confirm-plan: refusing %s '%s': the plan bound no bytes for it\n", verb, name);
+		exit(1);
+	}
+	psteps[k].used = 1;
+	fprintf(stderr, "confirm-plan: step %d authorized: %s '%s'%s\n", k + 1, verb, name,
+		cls == PLAN_DANGEROUS ? " (dangerous)" : "");
+}
+
+/* Post-write read-back for the small critical images (misc has its own). */
+static int plan_readback(struct spd *io, const char *name, int slot, const char *path)
+{
+	char resolved[40], base[40], got[65], fsha[65];
+	const char *want;
+	uint64_t psz = 0, flen = 0;
+	uint8_t *mem;
+	size_t l;
+	if (!plan_mode)
+		return 0;
+	if (spd_lookup_part(io, name, slot, resolved, sizeof(resolved), &psz) != 0)
+		snprintf(resolved, sizeof(resolved), "%s", name);
+	snprintf(base, sizeof(base), "%s", resolved);
+	l = strlen(base);
+	if (l > 2 && (!strcmp(base + l - 2, "_a") || !strcmp(base + l - 2, "_b")))
+		base[l - 2] = 0;
+	if (strcmp(base, "boot") && strncmp(base, "vbmeta", 6) && strcmp(base, "frp") && strcmp(base, "persist"))
+		return 0;
+	if (spd_file_sha(path, fsha, &flen) || !flen)
+		return 0;
+	want = spd_plan_src_sha(path);
+	if (!want)
+		want = fsha;
+	if (flen > (64ull << 20)) {
+		fprintf(stderr, "confirm-plan: %s is over 64 MiB; no read-back\n", resolved);
+		return 0;
+	}
+	mem = malloc((size_t)flen);
+	if (!mem || spd_read_part_mem(io, resolved, 0, flen, mem)) {
+		free(mem);
+		fprintf(stderr, "confirm-plan: SUSPECT %s: the read-back after the write failed; stopping"
+			" before the session ends\n", resolved);
+		return -1;
+	}
+	sha256_hex(mem, (size_t)flen, got);
+	free(mem);
+	if (strcmp(got, want)) {
+		fprintf(stderr, "confirm-plan: SUSPECT %s: read-back sha256 %s is not the image's %s;"
+			" stopping before the session ends\n", resolved, got, want);
+		return -1;
+	}
+	fprintf(stderr, "confirm-plan: read-back of %s matches (%llu bytes, sha256 %s)\n", resolved,
+		(unsigned long long)flen, got);
+	return 0;
+}
+
 static int spdhost_main(int argc, char **argv);
 
 int main(int argc, char **argv)
@@ -1590,6 +2484,7 @@ static int spdhost_main(int argc, char **argv)
 		{"dry-run", no_argument, NULL, 'D'},
 		{"spd-dump-slot", no_argument, NULL, 'S'},
 		{"events", required_argument, NULL, 'E'},
+		{"confirm-plan", required_argument, NULL, 'Q'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
@@ -1607,6 +2502,8 @@ static int spdhost_main(int argc, char **argv)
 	const char *emit;
 	const char *part_xml_dir = NULL;
 	const char *events_spec = NULL;
+	const char *confirm_plan = NULL;
+	struct popts popts;
 
 	/* --part-xml wins, but the env var is how the menu configures it for a
 	 * whole run. Both are taken verbatim, so an empty value (--part-xml ""
@@ -1718,6 +2615,13 @@ static int spdhost_main(int argc, char **argv)
 		case 'S':
 			spd_dump_slot = 1;
 			break;
+		case 'Q':
+			if (strlen(optarg) != 64 || strspn(optarg, "0123456789abcdef") != 64) {
+				fprintf(stderr, "bad --confirm-plan: need the 64 lowercase hex plan-sha256 from `spdhost plan`\n");
+				return 2;
+			}
+			confirm_plan = optarg;
+			break;
 		case 'E':
 			if (spd_ev_check_spec(optarg)) {
 				fprintf(stderr, "bad --events: %s (need an open FD >= 3, or a PATH)\n", optarg);
@@ -1730,6 +2634,32 @@ static int spdhost_main(int argc, char **argv)
 			return c == 'h' ? 0 : 2;
 		}
 	}
+	{
+		ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+		if (n < 0)
+			snprintf(self_path, sizeof(self_path), "%s", argv[0]);
+		else
+			self_path[n] = 0;
+	}
+	plan_self_path = self_path;
+	memset(&popts, 0, sizeof(popts));
+	popts.step = step;
+	popts.step_set = step_set;
+	popts.spd_dump_slot = spd_dump_slot;
+	popts.keep_going = keep_going;
+	popts.part_xml_dir = part_xml_dir;
+	popts.self_path = self_path;
+	/* P0-4: --confirm-plan is the only authorization in its run, and a plan
+	 * is never made for, or run with, a blanket one. */
+	if ((confirm_plan || (optind < argc && strcmp(argv[optind], "plan") == 0)) &&
+		(yes || dangerous_ok || confirm_token || (confirm_plan && dry) ||
+		 (confirm_plan && optind < argc && strcmp(argv[optind], "plan") == 0))) {
+		fprintf(stderr, "spdhost: plan / --confirm-plan cannot be combined with --yes, --dangerous,"
+			" --confirm-token, --dry-run, or each other\n");
+		return 2;
+	}
+	if (optind < argc && strcmp(argv[optind], "plan") == 0)
+		return plan_command(argc, argv, optind + 1, &popts);
 	/* Before the self-test and every device path: caps opens nothing. */
 	if (optind < argc && strcmp(argv[optind], "caps") == 0) {
 		if (optind + 1 < argc) {
@@ -1842,6 +2772,10 @@ static int spdhost_main(int argc, char **argv)
 	if (events_spec)
 		spd_ev_open(events_spec, build_sha(), build_dirty(), SPDHOST_PROTOCOL);
 
+	/* P0-4: rebuild + match + consume, all before USB is opened. */
+	if (confirm_plan && plan_execute_start(confirm_plan, argc, argv, optind, &popts))
+		return 1;
+
 	envfd = getenv("TERMUX_USB_FD");
 	/* SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts: it is read only
 	 * when TERMUX_USB_FD is unset or empty. (The old form did the assignment
@@ -1868,13 +2802,7 @@ static int spdhost_main(int argc, char **argv)
 	io = spd_new(verbose, step);
 	io->usb.timeout_ms = timeout;
 	io->part_xml_dir = part_xml_dir;
-	{
-		ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-		if (n < 0)
-			snprintf(self_path, sizeof(self_path), "%s", argv[0]);
-		else
-			self_path[n] = 0;
-	}
+	plan_io = io;
 	if (dry) {
 		/* No USB at all: spd_send/spd_recv short-circuit on io->dry, and
 		 * line-state / clear_halt (control transfers) are skipped. */
@@ -1906,6 +2834,7 @@ static int spdhost_main(int argc, char **argv)
 		}
 		if (spd_ev_fd >= 0)
 			ev_cmd_next(io, cmd, nfailed);
+		cur_argi = i;
 		if (strcmp(cmd, "ping") == 0) {
 			int fdl = 0;
 			if (i + 1 < argc && strcmp(argv[i + 1], "--fdl") == 0) {
@@ -2074,6 +3003,9 @@ static int spdhost_main(int argc, char **argv)
 			}
 			if (spd_list_parts(io, out))
 				return 1;
+			/* P0-4: the table a later `plan` binds (state dir table-last). */
+			if (!dry)
+				spd_state_save_table(io);
 			i++;
 		} else if (strcmp(cmd, "read-part") == 0) {
 			uint64_t rsize, rnamesz = 0, roff;
@@ -2351,6 +3283,10 @@ static int spdhost_main(int argc, char **argv)
 					return 1;
 				}
 				fclose(f);
+				if (SPD_SRC_CHECK(argv[i + 3], mem, (size_t)flen, cmd)) {
+					free((void *)mem);
+					return 1;
+				}
 				len = (size_t)flen;
 			}
 			slot = io->nparts > 0 ? spd_active_slot(io) : 0;
@@ -2362,6 +3298,9 @@ static int spdhost_main(int argc, char **argv)
 			}
 			if (!wov)
 				free((void *)mem);
+			/* P0-4: the image this run built itself is what it may write. */
+			if (plan_mode && spd_plan_register_file(img))
+				return 1;
 			if (do_write_part(io, yes, argv[i + 1], img))
 				return 1;
 			i += 4;
@@ -2390,6 +3329,8 @@ static int spdhost_main(int argc, char **argv)
 			slot = io->nparts > 0 ? spd_active_slot(io) : 0;
 			rc = spd_mem_to_part_file(io, "miscdata", 0x2420, modebuf, 4, save_dir, slot,
 				img, sizeof(img));
+			if (!rc && plan_mode && spd_plan_register_file(img))
+				rc = 1;
 			if (!rc)
 				rc = do_write_part(io, yes, "miscdata", img);
 			io->step = saved;
@@ -2429,7 +3370,8 @@ static int spdhost_main(int argc, char **argv)
 			 * refuses by name. */
 			authorize_write(yes, "w-force", argv[i + 1], NULL, 0);
 			part_slot = io->nparts > 0 ? spd_active_slot(io) : 0;
-			if (spd_write_force(io, argv[i + 1], argv[i + 2], part_slot))
+			if (spd_write_force(io, argv[i + 1], argv[i + 2], part_slot) ||
+				plan_readback(io, argv[i + 1], part_slot, argv[i + 2]))
 				return 1;
 			i += 3;
 		} else if (strcmp(cmd, "write-parts") == 0 || strcmp(cmd, "write-parts-a") == 0 ||

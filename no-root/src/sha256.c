@@ -56,3 +56,50 @@ void sha256_hex(const uint8_t *data, size_t len, char out[65])
 	for (i = 0; i < 8; i++)
 		snprintf(out + 8 * i, 9, "%08x", h[i]);
 }
+
+void sha256_init(struct sha256_ctx *c)
+{
+	static const uint32_t iv[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+	memcpy(c->h, iv, sizeof(iv));
+	c->nbuf = 0;
+	c->len = 0;
+}
+
+void sha256_update(struct sha256_ctx *c, const void *data, size_t len)
+{
+	const uint8_t *p = data;
+	c->len += len;
+	if (c->nbuf) {
+		size_t take = 64 - c->nbuf < len ? 64 - c->nbuf : len;
+		memcpy(c->buf + c->nbuf, p, take);
+		c->nbuf += take;
+		p += take;
+		len -= take;
+		if (c->nbuf < 64)
+			return;
+		block(c->h, c->buf);
+		c->nbuf = 0;
+	}
+	for (; len >= 64; p += 64, len -= 64)
+		block(c->h, p);
+	memcpy(c->buf, p, len);
+	c->nbuf = len;
+}
+
+void sha256_final_hex(struct sha256_ctx *c, char out[65])
+{
+	uint8_t tail[128];
+	uint64_t bits = c->len * 8;
+	size_t i, tl = c->nbuf < 56 ? 64 : 128;
+	memset(tail, 0, sizeof(tail));
+	memcpy(tail, c->buf, c->nbuf);
+	tail[c->nbuf] = 0x80;
+	for (i = 0; i < 8; i++)
+		tail[tl - 1 - i] = (uint8_t)(bits >> (8 * i));
+	block(c->h, tail);
+	if (tl == 128)
+		block(c->h, tail + 64);
+	for (i = 0; i < 8; i++)
+		snprintf(out + 8 * i, 9, "%08x", c->h[i]);
+}

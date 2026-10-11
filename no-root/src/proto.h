@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "usb.h" /* also declares spd_interrupted, shared with the USB layer */
 
@@ -175,6 +176,20 @@ int spd_exec(struct spd *io, int timeout_ms, int allow_incompatible);
  * for it. Non-fatal: -1 when the exchange could not be made at all. */
 int spd_flash_info(struct spd *io);
 
+/* P0-4 confirm-plan image sources. NULL (the CLI default) except in a
+ * --confirm-plan run, where every write reads its file through these:
+ * OPEN refuses a file that is not a planned image (NULL), UPDATE/FINAL keep
+ * a running sha256 over the bytes actually sent (FINAL: 0 = they are the
+ * planned image), CHECK_BUF checks a file read whole into memory. */
+struct spd_src_hooks {
+	FILE *(*open)(const char *path, int *h);
+	void (*update)(int h, const void *buf, size_t n);
+	int (*final)(int h, const char *part);
+	int (*check_buf)(const char *path, const void *buf, size_t n, const char *what);
+};
+extern const struct spd_src_hooks *spd_src_hooks;
+#define SPD_SRC_CHECK(path, buf, n, what) \
+	(spd_src_hooks ? spd_src_hooks->check_buf((path), (buf), (n), (what)) : 0)
 int spd_read_part(struct spd *io, const char *name, uint64_t offset, uint64_t size, const char *out_path);
 int spd_write_part(struct spd *io, const char *name, const char *path);
 int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len);

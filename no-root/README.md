@@ -168,6 +168,92 @@ or a dump — is covered by that batch's own typed `yes` instead, and spdhost as
 for it in the session, not through a token. Both gates are typed and per-session;
 the token adds the exact-bytes check on top.
 
+### Confirm-plan (for a caller with no terminal)
+
+A caller that cannot type `yes` (the app) asks for a plan first and then runs
+exactly that plan. There is no `--yes` in this path, and nothing about the
+default changes: without `--confirm-plan` the CLI still asks on the terminal
+(and still takes `--confirm-token` for misc). `scripts/menu.sh` does not use
+confirm-plan.
+
+```
+spdhost plan exec_addr ... fdl ... fdl ... parts pt.txt write-part boot_a boot.img reset
+# ...prints the plan, ending in plan-sha256=<64 hex>; show it, let the user agree, then:
+spdhost --usb-fd N --confirm-plan <64 hex> exec_addr ... fdl ... fdl ... parts pt.txt write-part boot_a boot.img reset
+```
+
+**`spdhost plan ARGS`** opens no USB and writes nothing to a device. It walks
+the same command line the run will get (options that only pick the device,
+such as `--usb-fd`, `--vid/--pid`, `--timeout`, do not belong to the plan) and
+prints one canonical text:
+
+```
+spdhost-plan 1
+build_sha=...            core version: build_sha, build_dirty, protocol
+nonce=<32 hex>           random, single use
+issued-at=T / expires-at=T+600
+opt ... / env ...        options and environment that change what is written
+target chip=ums9230 exec=ADDR:SHA loader1=ADDR:SHA loader2=ADDR:SHA
+table-sha256=...         sha256 of the partition table the last real `parts` saved
+argc=N, arg K VALUE      the command line, indices from the first command
+image arg=K path=P size=S sha256=H      every image, full-file sha256
+step N argi=K class=yes|dangerous op=... part=... slot=... offset=... size=... data-sha256=... verb=...
+gate=yes|dangerous       the highest class of any step
+end
+plan-sha256=<sha256 of every line above>
+```
+
+Values are `%XX`-escaped. A command line with several gated steps (a
+`write-parts` folder, `repartition` then writes, `write-part` then
+`reboot-recovery`) is one plan with one `gate=`; the run then passes each step
+without asking again. The plan is stored as `pending/<plan-sha256>.plan` in the
+state dir. A command that cannot be planned exactly (`wof`/`wov misc`, a
+command line with no saved table) is refused with exit 1 and nothing stored.
+
+**`--confirm-plan SHA`** loads `pending/SHA.plan`, rebuilds the plan from this
+command line, the files on disk and the saved table **before USB opens**, and
+refuses (exit 1, no USB) on any difference, printing the first differing line.
+Then, still before USB opens, it checks the plan's time (expired, or issued
+more than 5 s in the future, is refused) and consumes the nonce: it creates
+`used/<nonce>` with `O_CREAT|O_EXCL`, fsyncs it and the directory, and removes
+the pending file. Consumption is not undone by failure, a crash or Ctrl-C: a
+plan runs at most once, in this or any other process, and of two processes
+racing one plan exactly one gets past this point. It cannot be combined with
+`--yes`, `--dangerous`, `--confirm-token`, `--dry-run` or `plan` (exit 2).
+
+During the run every gate (`yes`, `dangerous`, the misc token, the userdata
+read confirm) is answered from the plan instead of the terminal: only a step
+the plan lists, at the same command, with the same class and verb, and, for
+misc, the same bytes, passes, and each step passes once. Anything else is
+refused, never prompted. The live partition table is hashed at the first gate
+and must equal the plan's `table-sha256` (so `parts` comes before the first
+gated command). The device's own hard refusals (`erase-part persist`, size
+checks, the `frp`/`persist` rule, ...) still apply.
+
+**Images.** At execute start each image is copied into
+`staging/<nonce>/` while being hashed, and the write reads the copy. When there
+is not room for the copy plus 64 MiB, the original file is kept open instead
+and hashed as it is sent; if that running hash does not match the plan after
+the last chunk, spdhost stops before anything else is sent (no reset, no
+`end_session`), reports the partition as suspect and leaves any backup it
+made alone. `SPDHOST_PLAN_STAGE=copy|stream` forces one mode. Staging is
+removed at exit, and stale staging and expired pending plans are pruned when
+the next plan or run starts. After writing `misc`, `vbmeta*`, `boot*`, `frp`
+or `persist` (up to 64 MiB), spdhost reads the partition back and compares
+the sha256.
+
+**State dir.** `SPDHOST_STATE_DIR` if set, else `$XDG_STATE_HOME/spdhost`,
+else `$HOME/.local/state/spdhost`; on Termux that is
+`/data/data/com.termux/files/home/.local/state/spdhost`. The app sets
+`SPDHOST_STATE_DIR` to a folder in its private files. It is created mode
+0700 with `pending/`, `used/` and `staging/`; a state dir that is not owned
+by the user or is group/world-writable is refused. `table-last` (0600) is
+rewritten after every successful real `parts` (`--dry-run` never touches it).
+
+`SPDHOST_PLAN_TTL=S` (1..600) shortens the 10-minute expiry and
+`SPDHOST_PLAN_NOW=T` sets `issued-at`; both are read by `plan` only, for
+tests, and neither can make a plan last longer.
+
 ## Run
 
 One line is one session. Every command on that line shares the USB
@@ -556,6 +642,7 @@ caps_format=1
 build_sha=0123456789abcdef0123456789abcdef01234567
 protocol=1
 build_dirty=0
+cap=confirm-plan
 cap=confirm-token
 cap=dry-run
 cap=events
@@ -589,6 +676,7 @@ end
 
 | cap | meaning |
 |---|---|
+| `confirm-plan` | `spdhost plan ARGS` and `--confirm-plan SHA256` (see "Confirm-plan") |
 | `confirm-token` | `--confirm-token SHA256` authorises one misc write / set-active |
 | `dry-run` | `--dry-run`: no USB, one `DRY` line per packet on stdout |
 | `events` | `--events FD\|PATH`: JSON-lines event channel (see "Event channel") |
@@ -700,6 +788,7 @@ Options go before the commands, and never in front of the device path.
 --keep-going      a failed read-part is logged and the next command runs
 --yes             skip the typed yes for write/erase/repartition/reboot-*
 --dangerous       authorize verity/frp-reset/danger-erase without a typed word
+--confirm-plan SHA256    run exactly the plan `spdhost plan` printed (see "Confirm-plan")
 --confirm-token SHA256   authorize one misc write whose bytes hash to it
 --part-xml DIR    leave partition_<unixtime>.xml in DIR on every table read
                   (env SPDHOST_PART_XML_DIR; "" = off). The menu sets it to the
