@@ -24,7 +24,7 @@ make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; ech
 bin=$root/spdhost
 
 # The cap list is pinned: adding or dropping one is a deliberate change here.
-want_caps='confirm-plan confirm-token dry-run events frp-part image-tools images-list loaders-check misc-bytes ops-dump pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
+want_caps='confirm-plan confirm-token dry-run events frp-part image-tools images-list loaders-check misc-bytes ops-dump ops-misc pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
 
 echo "== format =="
 "$bin" caps >"$tmp/caps.out" 2>"$tmp/caps.err"; rc=$?

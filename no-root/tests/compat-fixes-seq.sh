@@ -176,7 +176,9 @@ c10() { # DIR [ENV...]
 	local d=$1; shift
 	mkdir -p "$d/meta"
 	printf '%s\n' '# spdhost-parts shift 10 verified 0' 'misc 2048' >"$d/meta/partition_list.txt"
+	# the bash path (an spdhost without cap=ops-misc); ops-misc.sh covers the core's
 	( export "$@"; source ./menu_env.sh; DUMP_DIR=$d; RUNNER=("$tmp/c10run")
+	  spdhost_has_cap() { [[ $1 != ops-misc ]]; }
 	  MISC_CONFIRM_TOKEN=$REC guarded_misc_session reboot-recovery reboot-recovery 2>&1 )
 }
 out=$(c10 "$tmp/c10a" C10_X=1)
