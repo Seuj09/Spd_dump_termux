@@ -210,6 +210,15 @@ without asking again. The plan is stored as `pending/<plan-sha256>.plan` in the
 state dir. A command that cannot be planned exactly (`wof`/`wov misc`, a
 command line with no saved table) is refused with exit 1 and nothing stored.
 
+**A/B names need their suffix.** A plan step names the slot it writes. On a
+table where both `NAME_a` and `NAME_b` exist, an unsuffixed `NAME` (`boot`,
+`vbmeta`, ...) would follow whichever slot is active when the run starts, so
+`plan` refuses it (exit 1, nothing stored): pass `boot_a` or `boot_b`. The
+same check runs again when `--confirm-plan` rebuilds the plan, so a pending
+plan with an unsuffixed A/B name is refused before USB opens. The argument is
+never rewritten to a twin. An unsuffixed name with no `_a`/`_b` pair (a
+non-A/B phone, or only one twin) still plans as `slot=active`.
+
 **`--confirm-plan SHA`** loads `pending/SHA.plan`, rebuilds the plan from this
 command line, the files on disk and the saved table **before USB opens**, and
 refuses (exit 1, no USB) on any difference, printing the first differing line.

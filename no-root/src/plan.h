@@ -29,6 +29,8 @@ int spd_table_sha(const struct spd *io, char out[65]);
 void spd_state_save_table(const struct spd *io);
 /* sha256 of table-last, -1 when there is none. */
 int spd_state_table_sha(char out[65]);
+/* table-last as malloc'd text, NULL when there is none. */
+char *spd_state_table_load(void);
 
 /* Remove expired pending plans and used nonces, and staging dirs no run
  * holds any more. */
