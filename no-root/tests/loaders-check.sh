@@ -192,7 +192,7 @@ check "--dry-run in front changes nothing (menu.sh calls it that way)" \
 check "caps lists loaders-check" bash -c '"$1" caps | grep -qx cap=loaders-check' _ "$bin"
 
 echo "== offline: no libusb call at all (trap build) =="
-srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan,loaders}.c)
+srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan,loaders,ops}.c)
 wraps=-Wl,--wrap=libusb_init,--wrap=libusb_init_context,--wrap=libusb_wrap_sys_device,--wrap=libusb_open_device_with_vid_pid
 if $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2>/dev/null) \
 	-o "$root/.loaders-trapped" "${srcs[@]}" "$root/tests/libusb_trap.c" "$wraps" \

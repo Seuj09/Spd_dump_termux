@@ -91,7 +91,7 @@ check "TERMUX_USB_FD is ignored under --usb-fd-sock (connect error, not a wrap o
 # ------------------------------------------------------------------- B
 echo "== B. a whole session over the socket = the same session over --usb-fd =="
 $CC -O2 -w -std=c11 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -I"$root/tests" \
-	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/ops.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
 	"$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || { bad "mock_fdl2 build"; }
 cp "$root/fdl/ums9230/custom_exec_no_verify_65015f08.bin" "$root/fdl/ums9230/infinix/fdl1-dl.bin" \
 	"$root/fdl/ums9230/infinix/fdl2-dl.bin" "$tmp/"

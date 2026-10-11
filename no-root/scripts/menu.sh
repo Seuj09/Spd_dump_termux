@@ -1957,6 +1957,10 @@ dump_live_session() {
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	dump_meta_dir >/dev/null
+	if spdhost_has_cap ops-dump; then
+		ops_dump_session "$target"
+		return
+	fi
 	# B1-2/C4: free-space preflight from the cached byte table when present.
 	# Planned BEFORE the slotinfo below is removed: all_lite and slotless
 	# names depend on the active slot, which load_parts_state reads from it.
@@ -1977,6 +1981,39 @@ dump_live_session() {
 		load_parts_state && echo "table refreshed: $raw (slot ${ACTIVE_SLOT:-unknown})"
 	fi
 	verify_dump_manifest "$rc"
+}
+
+# P0-7: the core's `ops dump` reads the table into meta/, plans the bytes from
+# that LIVE table (active slot included, so all_lite counts what dumpcmd.c
+# really reads), refuses before the first read when DUMP_DIR is short of space,
+# dumps, and writes the size-checked meta/SHA256SUMS lines itself. The menu
+# only builds the argv (the APK builds the same one). An older spdhost without
+# cap=ops-dump keeps the bash path above (cached-table preflight +
+# verify_dump_manifest).
+ops_dump_session() {
+	local rc man p
+	local -a pre=()
+	for p in "$@"; do
+		pre+=(--preset "$p")
+	done
+	ready || return 1
+	run_session --keep-going fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" \
+		ops dump "$DUMP_DIR" "${pre[@]}" "$BOOT_AFTER"
+	rc=$?
+	if [[ -s $(parts_cache_path) ]]; then
+		load_parts_state && echo "table refreshed: $(parts_cache_path) (slot ${ACTIVE_SLOT:-unknown})"
+	fi
+	man=$(dump_manifest_path read)
+	if [[ ! -f $man ]]; then
+		echo "FAILED: spdhost wrote no $man (session exit $rc)"
+		(( rc != 0 )) || rc=1
+	elif grep -q '^refused space' "$man"; then
+		echo "REFUSED: not enough free space in $DUMP_DIR (spdhost checked the live table; nothing was read)."
+		(( rc != 0 )) || rc=1
+	elif (( rc == 0 )); then
+		echo "dump complete; sha256 lines in $(dump_meta_file SHA256SUMS read)"
+	fi
+	return "$rc"
 }
 
 # Name to hand spdhost `dump`: fuzzy-match against the cached table when there
@@ -2016,6 +2053,10 @@ dump_many_session() {
 	raw=$(parts_cache_path)
 	mkdir -p "$DUMP_DIR"
 	echo "One session: refresh the table, then dump $*."
+	if spdhost_has_cap ops-dump; then
+		ops_dump_session "$@"
+		return
+	fi
 	# C4 (audit6): the multi-name line (and imei) gets the same free-space
 	# preflight as a single dump: the sum of each name's row.
 	if load_parts_state 2>/dev/null; then
@@ -2975,10 +3016,24 @@ flash_input_menu() {
 	local f base stage="" i tdir
 	need_loaders || return
 	mkdir -p "$INPUT_DIR"
+	# P0-7: with cap=images-list the core decides which files are images
+	# (the write-parts rule); the .img/.bin staging below is unchanged.
+	local -A core_ok=()
+	local core_list=0 bin cf
+	if spdhost_has_cap images-list && bin=$(resolve_spdhost_bin 2>/dev/null) &&
+		"$bin" images list "$INPUT_DIR" >/dev/null 2>&1; then
+		core_list=1
+		while IFS=$'\t' read -r _ cf _; do
+			core_ok[$cf]=1
+		done < <("$bin" images list "$INPUT_DIR" 2>/dev/null)
+	fi
+	flash_candidate() { # BASE (the .img name the file is used as) FILE-BASE
+		if (( core_list )); then [[ -n ${core_ok[$2]:-} ]]; else part_image_candidate "$1"; fi
+	}
 	shopt -s nullglob
 	for f in "$INPUT_DIR"/*.img; do
 		base=$(basename "$f")
-		if part_image_candidate "$base"; then
+		if flash_candidate "$base" "$base"; then
 			names+=("${base%.img}")
 			stage_src+=("$f")
 			stage_dst+=("$base")
@@ -2992,7 +3047,7 @@ flash_input_menu() {
 			echo "Not using $base: ${base%.bin}.img is also there."
 			continue
 		fi
-		if part_image_candidate "${base%.bin}.img"; then
+		if flash_candidate "${base%.bin}.img" "$base"; then
 			names+=("${base%.bin}")
 			stage_src+=("$f")
 			stage_dst+=("${base%.bin}.img")
@@ -3127,8 +3182,16 @@ promote_dump_action() {
 	mkdir -p "$INPUT_DIR" || { echo "Could not create $INPUT_DIR" >&2; return 1; }
 	# Top-level DUMP_DIR only (not meta/): before-* backups and SHA256SUMS live
 	# under meta/ and must not appear as flashable images.
+	local bin
+	if spdhost_has_cap images-list && bin=$(resolve_spdhost_bin 2>/dev/null) &&
+		"$bin" images list "$DUMP_DIR" >/dev/null 2>&1; then
+		# P0-7: the core's picker list (write-parts rule); a dump is NAME.img.
+		while IFS=$'\t' read -r _ base _; do
+			[[ $base == *.img ]] && names+=("$base")
+		done < <("$bin" images list "$DUMP_DIR" 2>/dev/null)
+	fi
 	shopt -s nullglob
-	for f in "$DUMP_DIR"/*; do
+	(( ${#names[@]} )) || for f in "$DUMP_DIR"/*; do
 		[[ -f $f ]] || continue
 		base=$(basename "$f")
 		part_image_candidate "$base" || continue
@@ -3222,7 +3285,14 @@ promote_dump_action() {
 # part_image_candidate does not reject. Prints one name per line.
 restore_image_names() {
 	# Top-level dir only (not meta/): same image-only rule as menu [6]/[9].
-	local dir=$1 f base
+	local dir=$1 f base bin
+	# P0-7: the core lists exactly what write-parts will pick (one rule, the
+	# APK picker uses the same command). Older builds: the bash filter below.
+	if spdhost_has_cap images-list && bin=$(resolve_spdhost_bin 2>/dev/null) &&
+		"$bin" images list "$dir" >/dev/null 2>&1; then
+		"$bin" images list "$dir" 2>/dev/null | cut -f1
+		return 0
+	fi
 	shopt -s nullglob
 	for f in "$dir"/*; do
 		[[ -f $f ]] || continue

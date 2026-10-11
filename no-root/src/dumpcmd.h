@@ -54,4 +54,12 @@ int spd_misc_backup(struct spd *io, const char *out);
 const uint8_t *spd_misc_guard_image(size_t *len);
 int spd_misc_guard_armed(void);
 int spd_misc_verify(struct spd *io, const uint8_t *buf, size_t len);
+/* P0-7 (`ops dump`): mkdir OUTDIR/meta, read the active slot once and save
+ * OUTDIR/meta/misc-slotinfo.img; until spd_dump_unprepare() every spd_dump
+ * call uses that slot instead of asking again. Returns the slot (0/1/2) or -1. */
+int spd_dump_prepare(struct spd *io, const char *outdir);
+void spd_dump_unprepare(void);
+/* Bytes and file count spd_dump(TARGET) will read with this table and SLOT
+ * (same row choices). 0 = planned, -1 = a single name not in the table. */
+int spd_dump_plan(struct spd *io, const char *target, int slot, uint64_t *bytes, int *files);
 #endif

@@ -657,6 +657,114 @@ int spd_read_parts(struct spd *io, const char *xml_path, const char *dir, int co
 	return 0;
 }
 
+/* ---- P0-7: what a dump will read, before it reads anything ---- */
+static int prepared_slot = -1;
+
+int spd_dump_prepare(struct spd *io, const char *outdir)
+{
+	char meta[1050], sp[1100];
+	int n = snprintf(meta, sizeof(meta), "%s/meta", outdir);
+	if (n <= 0 || (size_t)n >= sizeof(meta)) {
+		fprintf(stderr, "dump: outdir/meta path is too long\n");
+		return -1;
+	}
+	if (mkdir(meta, 0755) != 0 && errno != EEXIST) {
+		fprintf(stderr, "dump: mkdir %s: %s\n", meta, strerror(errno));
+		return -1;
+	}
+	snprintf(sp, sizeof(sp), "%s/misc-slotinfo.img", meta);
+	slot_copy_path = sp;
+	prepared_slot = spd_active_slot(io);
+	slot_copy_path = NULL;
+	return prepared_slot;
+}
+
+void spd_dump_unprepare(void)
+{
+	prepared_slot = -1;
+}
+
+static void plan_add(uint64_t *bytes, int *files, uint64_t n)
+{
+	*bytes += n;
+	(*files)++;
+}
+
+/* A row's read length as dump_one reads it: an nv1 name is read from its nv2
+ * twin at +512, 512 bytes shorter (spd_nv_read_adjust, without its log line). */
+static uint64_t plan_row_bytes(const char *name, uint64_t size)
+{
+	const char *p = strstr(name, "nv1") ? strrchr(name, '1') : NULL;
+	return p && size > 512 ? size - 512 : size;
+}
+
+/* Bytes spd_dump(TARGET) reads with this table and SLOT, the same row
+ * choices it makes (skip_bulk, presets, slot resolution). super also counts
+ * the metadata image read beside it, at the table's metadata row (the device
+ * sizes the real read). 0 = planned, -1 = a single name not in the table. */
+int spd_dump_plan(struct spd *io, const char *target, int slot, uint64_t *bytes, int *files)
+{
+	int i, mode, meta = find_part(io, "metadata");
+	uint64_t meta_bytes = meta >= 0 ? io->ptab[meta].size : 0;
+	*bytes = 0;
+	*files = 0;
+#define PLAN_ROW(idx) do { \
+		plan_add(bytes, files, plan_row_bytes(io->ptab[idx].name, io->ptab[idx].size)); \
+		if (!strcmp(io->ptab[idx].name, "super") && meta_bytes) \
+			*bytes += meta_bytes; \
+	} while (0)
+	if (!strcmp(target, "all") || !strcmp(target, "all_lite")) {
+		mode = strcmp(target, "all_lite") ? DUMP_ALL : DUMP_ALL_LITE;
+		if (find_part(io, "splloader") < 0)
+			plan_add(bytes, files, SPLLOADER_BYTES);
+		for (i = 0; i < io->nparts; i++) {
+			if (io->ptab[i].size == 0 || skip_bulk(io->ptab[i].name, mode, slot))
+				continue;
+			PLAN_ROW(i);
+		}
+	} else if (!strcmp(target, "preset_modem")) {
+		if (slot > 0)
+			plan_add(bytes, files, spd_misc_size(io));
+		for (i = 0; i < io->nparts; i++)
+			if (io->ptab[i].size && preset_modem_want(io->ptab[i].name))
+				PLAN_ROW(i);
+	} else if (!strcmp(target, "preset_resign")) {
+		for (i = PRESET_RESIGN_N - 1; i >= 0; i--) {
+			const char *n = preset_resign[i];
+			int idx;
+			if (!strcmp(n, "splloader")) {
+				if (find_part(io, n) < 0)
+					plan_add(bytes, files, SPLLOADER_BYTES);
+				continue;
+			}
+			idx = find_part(io, n);
+			if (idx < 0 && slot > 0) {
+				char nm[40];
+				snprintf(nm, sizeof(nm), "%s_%c", n, slot == 1 ? 'a' : 'b');
+				idx = find_part(io, nm);
+			}
+			if (idx >= 0)
+				PLAN_ROW(idx);
+		}
+	} else {
+		int idx = find_part(io, target);
+		if (idx < 0 && !strcmp(target, "splloader")) {
+			plan_add(bytes, files, SPLLOADER_BYTES);
+			return 0;
+		}
+		if (idx < 0 && slot > 0) {
+			char nm[40];
+			snprintf(nm, sizeof(nm), "%s_%c", target, slot == 1 ? 'a' : 'b');
+			idx = find_part(io, nm);
+		}
+		if (idx < 0)
+			return -1;
+		PLAN_ROW(idx);
+	}
+#undef PLAN_ROW
+	return 0;
+}
+
 /* dump TARGET OUTDIR, where TARGET is all, all_lite, preset_modem,
  * preset_resign, or a partition name.
  * Sizes come from the live table (bytes). all/all_lite also dump splloader
@@ -696,9 +804,15 @@ int spd_dump(struct spd *io, const char *target, const char *outdir, int yes)
 			return -1;
 		}
 		manifest_started = 1;
-		slot_copy_path = sp;
-		slot = spd_active_slot(io);
-		slot_copy_path = NULL;
+		if (prepared_slot >= 0) {
+			/* P0-7: `ops dump` read the slot (and saved slotinfo) once
+			 * before its preflight; every target in that run uses it. */
+			slot = prepared_slot;
+		} else {
+			slot_copy_path = sp;
+			slot = spd_active_slot(io);
+			slot_copy_path = NULL;
+		}
 		fprintf(manifest, "slot %s\n", slot == 1 ? "a" : slot == 2 ? "b" : "none");
 		fflush(manifest);
 	}

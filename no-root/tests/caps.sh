@@ -24,7 +24,7 @@ make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; ech
 bin=$root/spdhost
 
 # The cap list is pinned: adding or dropping one is a deliberate change here.
-want_caps='confirm-plan confirm-token dry-run events frp-part image-tools loaders-check misc-bytes pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
+want_caps='confirm-plan confirm-token dry-run events frp-part image-tools images-list loaders-check misc-bytes ops-dump pack-slot parts-header status-file unpac usb-fd usb-fd-sock'
 
 echo "== format =="
 "$bin" caps >"$tmp/caps.out" 2>"$tmp/caps.err"; rc=$?
@@ -57,7 +57,7 @@ check "--help lists caps" bash -c '"$1" --help 2>&1 | grep -q "^  caps "' _ "$bi
 
 echo "== no device, no USB =="
 # The same sources linked with every libusb entry point trapped (exit 99).
-srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan,loaders}.c)
+srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events,plan,loaders,ops}.c)
 wraps=-Wl,--wrap=libusb_init,--wrap=libusb_init_context,--wrap=libusb_wrap_sys_device,--wrap=libusb_open_device_with_vid_pid
 if $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2>/dev/null) \
 	-o "$tmp/trapped" "${srcs[@]}" "$root/tests/libusb_trap.c" "$wraps" \
@@ -93,6 +93,10 @@ check "usb-fd: --usb-fd is parsed (fd < 3 refused)" bash -c '[ "$1" = 2 ] && gre
 check "status-file: SPDHOST_STATUS_FILE is read by the core" grep -q 'getenv("SPDHOST_STATUS_FILE")' "$root/src/main.c" "$root/src/plan.c"
 check "misc-bytes: the core writes the misc-bytes status key" grep -q '"misc-bytes"' "$root/src/main.c" "$root/src/plan.c"
 check "frp-part: frp-reset reads SPDHOST_FRP_PART" grep -q 'SPDHOST_FRP_PART' "$root/src/main.c" "$root/src/plan.c"
+"$bin" images >/dev/null 2>"$tmp/t.err"; rc=$?
+check "images-list: offline command (usage, exit 2)" bash -c '[ "$1" = 2 ] && grep -q "^images list DIR" "$2"' _ "$rc" "$tmp/t.err"
+"$bin" --dry-run ops dump >/dev/null 2>"$tmp/t.err"; rc=$?
+check "ops-dump: ops dump is parsed (missing DIR refused, exit 2)" bash -c '[ "$1" = 2 ] && grep -q "ops dump: missing DIR" "$2"' _ "$rc" "$tmp/t.err"
 check "parts-header: parts files start with the # spdhost-parts header" grep -q '# spdhost-parts shift %d verified %d' "$root/src/proto.c"
 
 echo "== build stamping =="

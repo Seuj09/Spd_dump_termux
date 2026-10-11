@@ -27,7 +27,7 @@ cp "$root/fdl/ums9230/infinix/fdl1-dl.bin" "$root/fdl/ums9230/infinix/fdl2-dl.bi
 # A real spdhost for pack-slot (offline). The mock FDL2 only supplies the USB
 # symbols; the offline tools never open a device.
 gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" \
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/ops.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
 	"$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" \
 	-o "$tmp/spdhost" || exit 1
@@ -474,16 +474,15 @@ rm -f "$tmp/ran/log"
 tr=$tmp/many.pty
 python3 "$drive" "$tr" "Press Enter to continue" '\r' -- \
 	"$tmp/fn.sh dump_many_session boot_a vbmeta" </dev/null
-check "dump two names: one session, a dump each, --keep-going" \
+# P0-7: through the core's `ops dump` (it reads the table itself), a --preset each.
+check "dump two names: one session, one ops dump with a --preset each, --keep-going" \
 	bash -c "grep -q -- --keep-going $tmp/ran/log &&
-		grep -q 'dump boot_a $tmp/dump' $tmp/ran/log &&
-		grep -q 'dump vbmeta $tmp/dump' $tmp/ran/log &&
-		grep -q -- 'parts ' $tmp/ran/log && ! grep -q -- --yes $tmp/ran/log"
+		grep -q 'ops dump $tmp/dump --preset boot_a --preset vbmeta' $tmp/ran/log &&
+		! grep -q -- --yes $tmp/ran/log"
 
 tr=$(menu dump_imei_session "Press Enter to continue" '\r')
 check "dump imei: the six release names, in one session" \
-	bash -c "for n in miscdata prodnv l_fixnv1 l_fixnv2 l_runtimenv1 l_runtimenv2; do
-		grep -q \"dump \$n $tmp/dump\" $tmp/ran/log || exit 1; done"
+	bash -c "grep -q 'ops dump $tmp/dump --preset miscdata --preset prodnv --preset l_fixnv1 --preset l_fixnv2 --preset l_runtimenv1 --preset l_runtimenv2' $tmp/ran/log"
 
 # ---------------------------------------- the live misc read
 # read_misc_image is the live misc copy the slot tools work from. It has to

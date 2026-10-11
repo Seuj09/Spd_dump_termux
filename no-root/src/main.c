@@ -10,6 +10,7 @@
 #include "events.h"
 #include "plan.h"
 #include "loaders.h"
+#include "ops.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -175,6 +176,14 @@ static void usage(void)
 		"                               row, plus misc when the device is A/B\n"
 		"  dump preset_resign DIR       spd_dump r preset_resign: vbmeta, splloader,\n"
 		"                               uboot, sml, trustos, teecfg, boot, recovery\n"
+		"  ops dump DIR --preset P [--preset P ...] [--headroom MIB]\n"
+		"                               reads the table into DIR/meta/, plans the\n"
+		"                               bytes from it, refuses before any read when\n"
+		"                               DIR has less free space than that + MIB\n"
+		"                               (default 64), dumps, then writes size-checked\n"
+		"                               sha256 lines to DIR/meta/SHA256SUMS. P: all,\n"
+		"                               all_lite, preset_modem, preset_resign, imei,\n"
+		"                               or partition names (README \"ops dump\").\n"
 		"  misc-backup FILE             read all of misc to FILE and check it;\n"
 		"                               a later misc write in this session is\n"
 		"                               then read back and verified. Failure\n"
@@ -249,7 +258,10 @@ static void usage(void)
 		"  loaders check [--soc S|none] [--exec ADDR|0] [--stub F] FDL1 A1 FDL2 A2\n"
 		"                          offline: chip/pair/stub check of a loader set\n"
 		"                          against fdl/index (also: loaders list|verify)\n"
-		"  The nine offline commands open no USB and ignore the device options.\n"
+		"  images list DIR [--json] [--verify]\n"
+		"                          offline: the images a restore of DIR picks,\n"
+		"                          with size and the meta/SHA256SUMS digest\n"
+		"  The ten offline commands open no USB and ignore the device options.\n"
 		"  Unlike the release tools they never overwrite their input file.\n"
 		"  read_flash ADDR OFF SIZE OUT  raw read by address, no partition\n"
 		"                               table involved (spd_dump read_flash).\n"
@@ -671,6 +683,7 @@ static int is_command(const char *s)
 		strcmp(s, "chip-uid") == 0 ||
 		strcmp(s, "reboot-recovery") == 0 || strcmp(s, "reboot-fastboot") == 0 ||
 		strcmp(s, "reset") == 0 || strcmp(s, "dump") == 0 ||
+		strcmp(s, "ops") == 0 ||
 		strcmp(s, "misc-backup") == 0 || strcmp(s, "misc-backup-expect") == 0 ||
 		strcmp(s, "power-off") == 0 || strcmp(s, "poweroff") == 0;
 }
@@ -1520,8 +1533,10 @@ static const char *const spd_caps[] = {
 	"events",        /* --events FD|PATH: JSON-lines event channel (README) */
 	"frp-part",      /* frp-reset refuses frp+persist unless SPDHOST_FRP_PART */
 	"image-tools",   /* gen-spl-unlock[-legacy], gen-fdl1-dl, chsize */
+	"images-list",   /* images list DIR [--json] [--verify] (P0-7, README) */
 	"loaders-check", /* loaders check|list|verify + fdl/index (P0-6, README) */
 	"misc-bytes",    /* status file: misc-bytes=N after misc-backup[-expect] */
+	"ops-dump",      /* ops dump DIR --preset P: preflight + meta/SHA256SUMS (P0-7) */
 	"pack-slot",     /* pack-slot a|b IN OUT */
 	"parts-header",  /* parts FILE starts "# spdhost-parts shift S verified V" */
 	"status-file",   /* SPDHOST_STATUS_FILE key=value result lines */
@@ -2738,6 +2753,9 @@ static int spdhost_main(int argc, char **argv)
 	/* P0-6: offline like caps -- reads loader files and fdl/index only. */
 	if (optind < argc && strcmp(argv[optind], "loaders") == 0)
 		return spd_loaders_main(argc - optind, argv + optind, self_path);
+	/* P0-7: offline like loaders -- reads one folder, opens no USB. */
+	if (optind < argc && strcmp(argv[optind], "images") == 0)
+		return spd_images_main(argc - optind, argv + optind);
 	if (selftest) {
 		/* FIPS 180-4 vectors for the --confirm-token hash. */
 		char h[65];
@@ -3250,6 +3268,20 @@ static int spdhost_main(int argc, char **argv)
 				}
 			}
 			i += 3;
+		} else if (strcmp(cmd, "ops") == 0) {
+			struct spd_ops_dump_args oa;
+			int nx = spd_ops_dump_args(argc, argv, i, &oa);
+			if (nx < 0)
+				return 2;
+			need_fdl2(io, "ops dump");
+			if (spd_ops_dump(io, &oa, yes)) {
+				if (!keep_going)
+					return 1;
+				nfailed++;
+				if (strlen(failed) + 10 < sizeof(failed))
+					strcat(failed, " ops:dump");
+			}
+			i = nx;
 		} else if (strcmp(cmd, "misc-backup") == 0) {
 			need(argc, i, 1, "misc-backup");
 			need_fdl2(io, "misc-backup");

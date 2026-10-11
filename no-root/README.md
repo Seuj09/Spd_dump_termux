@@ -768,6 +768,73 @@ this run and the saved config stay as they were (audit6 C3). The menu's own
 bash checks still run first, so an spdhost too old to have the check keeps
 the previous behaviour.
 
+### Dump op and image list
+
+`ops dump` is the dump the menu and the app both run (P0-7); the rules live in
+the core so the two cannot drift. It is a session command (after the two
+`fdl`s), and it does the table read itself:
+
+```
+spdhost [--part-xml DIR/meta] fdl ... fdl ... ops dump DIR --preset P [--preset P ...] [--headroom MIB] reset
+```
+
+`P` is `all`, `all_lite`, `preset_modem`, `preset_resign`, `imei` (miscdata,
+prodnv, l_fixnv1/2, l_runtimenv1/2), or a partition name (`boot` follows the
+live slot, `boot_b` is that row, `splloader` is 256 KiB). The words must be the
+only preset; names can be repeated. In order it:
+
+1. reads the live table into `DIR/meta/partition_list.txt` (and the confirm-plan
+   state dir, like `parts`) and the active slot into `DIR/meta/misc-slotinfo.img`,
+   once; stale `dump-manifest.txt` / `misc-slotinfo.img` of an earlier run are
+   removed (images never are);
+2. **plans** the bytes from that live table with the rows `dump` really reads:
+   `all`/`all_lite` skip blackbox/cache/userdata, `all_lite` also the inactive
+   slot (super, system, vendor... are read), `super` adds its metadata, nv1 is
+   512 bytes shorter (audit6 C4: the old menu estimate skipped super and kept
+   both slots);
+3. **refuses before the first read** when `statvfs(DIR)` has less than the plan
+   + `--headroom` MiB (default 64) available: `ops dump: REFUSED: not enough free
+   space ...`, a `refused space NEED AVAIL` manifest line, exit nonzero (with
+   `--keep-going` the ending still runs). A failed `statvfs` is noted and the
+   dump goes on, as the menu did;
+4. dumps each preset (the same reads as `dump`: `NAME.img`, a failed read leaves
+   `NAME.img.partial`, an unsized one `NAME.img.unverified`);
+5. checks `DIR/meta/dump-manifest.txt`: each file that completed at exactly the
+   expected size is hashed and its line in `DIR/meta/SHA256SUMS` replaced
+   (relative names: `cd DIR && sha256sum -c meta/SHA256SUMS`). An old flat
+   dump's root `SHA256SUMS` moves into `meta/` first. An unverified file's line
+   is dropped. Any failed, unverified or missing file makes the exit nonzero.
+
+Layout (A5): `DIR` holds only the images; `DIR/meta/` holds `SHA256SUMS`,
+`dump-manifest.txt` (`slot`, `start NAME BYTES FILE`, `ok|fail|unverified
+NAME`, `missing NAME`, `plan FILES BYTES`), `partition_list.txt`,
+`misc-slotinfo.img` and, with `--part-xml DIR/meta` (the menu sets
+`SPDHOST_PART_XML_DIR`), `partition_<time>.xml` and `sprdpart.bin`. A
+`--preset userdata` read asks first on the terminal, like `dump userdata`
+(declined without one). `ops dump` is not a confirm-plan op in this build
+(`plan` refuses it): it writes nothing to the phone. The caller composes the
+ending (`reset` / `power-off`); `ops dump` never resets on its own.
+
+`images list DIR [--json] [--verify]` is offline (no USB): the files a restore
+of `DIR` (`write-parts`) would pick -- root only, the same junk rule, so
+`meta/`, `*-before-*`, `*-slot[ab]`, `misc-slotinfo`, `*_bak`, `.partial`,
+`.tmp`, `.unverified`, XML/txt and loaders are never offered -- sorted by file
+name. Text: `NAME<TAB>FILE<TAB>BYTES<TAB>SHA256|-` per line. JSON (one line):
+
+```
+{"v":1,"dir":"DIR","layout":"meta","images":[{"name":"boot_a","file":"boot_a.img","bytes":67108864,"slot":"a","sha256":"…","verified":true}]}
+```
+
+`layout` is `meta`, `flat` (an old dump with a root `SHA256SUMS`) or `none`;
+`sha256` is the recorded line (`null` without one); `verified` is present only
+with `--verify` (the file was hashed and matches). Exit 1 when `DIR` cannot be
+read, 2 on usage. caps: `ops-dump`, `images-list`.
+
+menu.sh uses `ops dump` for every dump (one name, several names, all,
+all_lite, imei, the presets) and `images list` for the restore and
+"copy dumps to the flash folder" pickers when caps list them; an older
+binary keeps the bash path.
+
 ### Event channel
 
 `--events FD|PATH` makes spdhost write progress as JSON lines, one object per
@@ -803,6 +870,9 @@ does not know. The types:
 | `progress` | `op` (`loader`/`read`/`write`), `name`, `done`, `total` (bytes) | at most once per MiB, and at the end |
 | `status` | `key`, `value` | every `SPDHOST_STATUS_FILE` line, the same text |
 | `usb` | `state`: `gone`, `reopened`, `reopen-failed` | the device dropped off the bus |
+| `preflight` | `op` (`dump`), `files`, `need`, `headroom`, `avail` (-1 unknown), `slot`, `table_verified`, `ok` | `ops dump`, after the table and slot, before the first read |
+| `dump-file` | `name`, `file`, `bytes`, `state` (`ok`/`failed`/`unverified`/`missing`), `sha256` (ok only) | `ops dump`, each file after the reads |
+| `op` | `op` (`dump`), `state` (`ok`/`failed`/`refused`), `files`, `failed` or `why` | `ops dump` finished |
 | `dropped` | `count`, `total` (no `seq`) | events were lost, see below |
 | `end` | `rc`, `dropped` | last line; `rc` -1 when the run stopped by `exit()` mid-command |
 

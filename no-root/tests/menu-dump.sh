@@ -17,7 +17,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 make -C "$root/spd_dump" GITVER.h >/dev/null
 mkdir -p "$tmp/pkg/fdl/ums9230"
 gcc -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
+	"$root/src/main.c" "$root/src/plan.c" "$root/src/loaders.c" "$root/src/ops.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" -o "$tmp/pkg/spdhost" || exit 1
 gcc -O1 -w -std=c99 -D_GNU_SOURCE -DUSE_LIBUSB=1 -D__ANDROID__ -I"$root/spd_dump" -I"$root/tests" \
 	"$root/spd_dump/spd_dump.c" "$root/spd_dump/common.c" "$root/tests/mock_fdl2.c" -lm -lpthread -o "$tmp/spd_dump" || exit 1
 gcc -O2 -w -I"$root/tests" "$root/tests/gen_expected.c" -o "$tmp/gen_expected" || exit 1
@@ -28,6 +28,11 @@ cat > "$tmp/runner" <<R
 MOCK_LOG=\${MOCK_LOG:-$tmp/mock.seq} exec "$tmp/pkg/spdhost" --usb-fd 7 "\$@" 7</dev/null
 R
 chmod +x "$tmp/runner"
+# P0-7: this file pins the menu's own bash dump path (the fallback for an
+# spdhost without cap=ops-dump): SPDHOST_BIN answers no caps. The core path
+# (`ops dump`) is the "core path" section at the end and tests/ops-dump.sh.
+printf '#!/bin/sh\nexit 1\n' > "$tmp/nocaps"; chmod +x "$tmp/nocaps"
+export SPDHOST_BIN=$tmp/nocaps
 # KiB units, as eMMC FDL2 reports them (spd_dump divisor stays 10).
 # (spd_dump's heuristic: any entry < 1024 units lowers the divisor, i.e. the
 # table is then read as bigger units. menu.sh copies that rule exactly.)
@@ -304,6 +309,50 @@ dump_live_session l_fixnv1 </dev/null >"$tmp/cnv.log" 2>&1; rc=$?
 spd_all "$tmp/snv" l_fixnv1 MOCK_PTABLE="$tmp/ptnv" MOCK_SLOT=a
 check "nv1 dump matches spd_dump (nv2 at +512, 1048064 bytes, rc=$rc)" \
 	bash -c "[ $rc = 0 ] && [ -f '$tmp/snv/l_fixnv1.bin' ] && cmp -s '$DUMP_DIR/l_fixnv1.img' '$tmp/snv/l_fixnv1.bin' && [ \$(stat -c %s '$DUMP_DIR/l_fixnv1.img') = 1048064 ]"
+
+# ---- core path: the same menu calls with an spdhost that has cap=ops-dump ----
+export SPDHOST_BIN=$tmp/pkg/spdhost MOCK_PTABLE=$tmp/pt MOCK_SLOT=b
+unset -f cls pause ready
+cls() { :; }; pause() { :; }; ready() { :; }
+DUMP_DIR=$tmp/o5
+dump_live_session all_lite </dev/null >"$tmp/o5.log" 2>&1; rc=$?
+check "core: one-session all_lite (slot b): 1 run of ops dump, rc=$rc" \
+	bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/o5.log') = 1 ] && grep -q ' ops dump $DUMP_DIR --preset all_lite reset' '$tmp/o5.log'"
+check "core: all_lite == spd_dump r all_lite (slot b)" same_as_spd "$DUMP_DIR" "$tmp/s5"
+check "core: table cache refreshed, slot b, 4 SHA256SUMS lines that verify" \
+	bash -c "grep -qx 'boot_b 4096' '$(meta_of partition_list.txt)' && [ '$ACTIVE_SLOT' = b ] && cd '$DUMP_DIR' && [ \$(wc -l < meta/SHA256SUMS) = 4 ] && sha256sum -c --quiet meta/SHA256SUMS"
+check "core: the bash and the core dump give the same SHA256SUMS" \
+	cmp -s <(sort "$tmp/b5/meta/SHA256SUMS") <(sort "$tmp/o5/meta/SHA256SUMS")
+DUMP_DIR=$tmp/o9; mkdir -p "$DUMP_DIR"; echo stale > "$DUMP_DIR/boot_b.img"
+MOCK_FAIL_MID=boot_b dump_live_session all </dev/null >"$tmp/o9.log" 2>&1; rc=$?
+check "core keep-going: rc=$rc, boot_b failed, older copy called out, others verified" \
+	bash -c "[ $rc != 0 ] && grep -q 'ops dump: FAILED (1 of 6)' '$tmp/o9.log' && grep -q 'FAIL boot_b' '$tmp/o9.log' && [ -f '$DUMP_DIR/boot_b.img.partial' ] && [ \"\$(cat '$DUMP_DIR/boot_b.img')\" = stale ] && grep -q 'OLDER copy' '$tmp/o9.log' && cd '$DUMP_DIR' && [ \$(wc -l < meta/SHA256SUMS) = 5 ] && sha256sum -c --quiet meta/SHA256SUMS"
+DUMP_DIR=$tmp/o9n; MOCK_FAIL_START=uboot_a dump_live_session all </dev/null >"$tmp/o9n.log" 2>&1; rc=$?
+check "core READ_START NACK: rc=$rc, uboot_a failed (no file), 5 others ok" \
+	bash -c "[ $rc != 0 ] && grep -q 'ops dump: FAILED (1 of 6)' '$tmp/o9n.log' && [ ! -e '$DUMP_DIR/uboot_a.img' ] && [ \$(wc -l < '$DUMP_DIR/meta/SHA256SUMS') = 5 ]"
+DUMP_DIR=$tmp/o10; dump_live_session nosuch </dev/null >"$tmp/o10.log" 2>&1; rc=$?
+check "core unknown name: nonzero rc ($rc), reported" bash -c "[ $rc != 0 ] && grep -q 'FAIL nosuch: not in the live table' '$tmp/o10.log'"
+# C4 in the core: the plan is made from the LIVE table (slot b), so the bash
+# cached-table estimate is not used; a short folder is refused in-session
+# before the first read (tests/ops-dump.sh has the byte-exact cases).
+DUMP_DIR=$tmp/o13; mkdir -p "$DUMP_DIR/meta"
+out=$( require_free_space() { echo "BASH-PREFLIGHT"; return 1; }
+	dump_live_session all_lite </dev/null 2>&1 ); rc=$?
+check "core: no bash cached-table preflight; the core plans from the live table" \
+	bash -c '[[ $1 != *BASH-PREFLIGHT* && $1 == *"ops dump: plan "*"slot b"* ]] && [ "$2" = 0 ]' _ "$out" "$rc"
+DUMP_DIR=$tmp/o11; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b1/meta/partition_list.txt" "$DUMP_DIR/meta/"
+printf 'y\nall_lite\n' | dump_partition >"$tmp/o11.log" 2>&1; rc=$?
+check "core menu Refresh=y then all_lite: ONE session, slot b live (rc=$rc)" \
+	bash -c "[ $rc = 0 ] && [ \$(grep -c '^+ ' '$tmp/o11.log') = 1 ] && [ -f '$DUMP_DIR/boot_b.img' ] && [ ! -e '$DUMP_DIR/boot_a.img' ]"
+DUMP_DIR=$tmp/o12; mkdir -p "$DUMP_DIR/meta"; cp "$tmp/b2/meta/partition_list.txt" "$tmp/b2/meta/misc-slotinfo.img" "$DUMP_DIR/meta/"
+printf 'n\nboot\n' | dump_partition >"$tmp/o12.log" 2>&1; rc=$?
+check "core menu Refresh=n: ops dump re-reads the live table and slot (rc=$rc)" \
+	bash -c "[ $rc = 0 ] && grep -q ' ops dump $DUMP_DIR --preset boot ' '$tmp/o12.log' && cmp -s '$DUMP_DIR/boot_b.img' '$tmp/boot_b.exp'"
+DUMP_DIR=$tmp/onv; export MOCK_PTABLE=$tmp/ptnv MOCK_SLOT=a
+dump_live_session l_fixnv1 </dev/null >"$tmp/onv.log" 2>&1; rc=$?
+check "core nv1 dump matches spd_dump (nv2 at +512, 1048064 bytes, rc=$rc)" \
+	bash -c "[ $rc = 0 ] && cmp -s '$DUMP_DIR/l_fixnv1.img' '$tmp/snv/l_fixnv1.bin' && grep -q ' l_fixnv1.img$' '$DUMP_DIR/meta/SHA256SUMS'"
+check "menu never passes --yes (core path either)" bash -c "! grep -h '^+ ' '$tmp'/o*.log | grep -q -- '--yes'"
 
 echo "menu-dump: $pass passed, $fail failed"
 (( fail == 0 ))
