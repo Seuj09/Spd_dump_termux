@@ -24,7 +24,7 @@ bad() { echo "FAIL: $*"; fail=$((fail + 1)); }
 check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 
 gcc -O2 -w -std=c11 -D_GNU_SOURCE -I"$root/tests" \
-	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" \
+	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
 	"$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" \
 	-o "$tmp/spdhost" || exit 1

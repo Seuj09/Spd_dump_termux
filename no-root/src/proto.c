@@ -2,6 +2,7 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "proto.h"
+#include "events.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -563,8 +564,12 @@ static int reopen_if_gone(struct spd *io)
 	if (!io->usb.gone)
 		return -1;
 	fprintf(stderr, "USB reset; reopening\n");
-	if (spd_usb_reacquire(&io->usb))
+	SPD_EV("usb", "\"state\":\"gone\"");
+	if (spd_usb_reacquire(&io->usb)) {
+		SPD_EV("usb", "\"state\":\"reopen-failed\"");
 		return -1;
+	}
+	SPD_EV("usb", "\"state\":\"reopened\"");
 	io->recv_pos = 0;
 	io->recv_len = 0;
 	return 0;
@@ -582,6 +587,22 @@ static int reopen_if_gone(struct spd *io)
  * less likely. Rationale, not a guarantee: on some phones the narrow window
  * really does need a near-hello_to_max wait from the very first try, which
  * is what SPDHOST_BROM_NO_RAMP=1 is for. */
+/* P0-3: one `hello` event per try, sent only after that try's outcome is
+ * known (never between its send and its receive). MS is from the start of
+ * the BootROM hello, -1 for a loader hello (which has no wall clock). */
+static void ev_hello(const char *stage, int try_no, int of, const char *result, long long ms)
+{
+	if (spd_ev_fd < 0)
+		return;
+	if (ms >= 0)
+		spd_event("hello", "\"stage\":\"%s\",\"try\":%d,\"of\":%d,\"result\":\"%s\",\"ms\":%lld",
+			stage, try_no, of, result, ms);
+	else
+		spd_event("hello", "\"stage\":\"%s\",\"try\":%d,\"of\":%d,\"result\":\"%s\"",
+			stage, try_no, of, result);
+}
+#define EV_HELLO(st, t, of, res, ms) do { if (spd_ev_fd >= 0) ev_hello(st, t, of, res, ms); } while (0)
+
 static int ramp_hello_to(int i, int lo, int hi, int ramp)
 {
 	if (ramp <= 1 || lo >= hi)
@@ -685,6 +706,7 @@ reacq_restart:
 			if (now - t0 >= wall_ms) {
 				fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
 					wall_ms, i, tries);
+				EV_HELLO("brom", i, tries, "wall", now - t0);
 				break;
 			}
 			if (brom_trace)
@@ -702,6 +724,7 @@ reacq_restart:
 			if (now - t0 >= wall_ms) {
 				fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
 					wall_ms, i, tries);
+				EV_HELLO("brom", i, tries, "wall", now - t0);
 				break;
 			}
 		}
@@ -715,6 +738,8 @@ reacq_restart:
 			fprintf(stderr, "brom: try %d of %d send rc=%d to=%dms @%lldms\n",
 				i + 1, tries, rc, try_to, mono_ms() - t0);
 		if (rc < 0) {
+			EV_HELLO(brom ? "brom" : "loader", i + 1, tries, io->usb.gone ? "gone" : rc == -2 ? "send-timeout" : "send-error",
+				brom ? mono_ms() - t0 : -1);
 			if (reopen_if_gone(io) == 0)
 				continue;
 			/* BootROM only: send TIMEOUT (-2, gone unset) is a soft fail —
@@ -726,6 +751,7 @@ reacq_restart:
 				if (now - t0 >= wall_ms) {
 					fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
 						wall_ms, i + 1, tries);
+					EV_HELLO("brom", i + 1, tries, "wall", now - t0);
 					break;
 				}
 				continue;
@@ -745,17 +771,20 @@ reacq_restart:
 					i + 1, tries, n, mono_ms() - t0);
 		}
 		if (n < 0) {
+			EV_HELLO(brom ? "brom" : "loader", i + 1, tries, io->usb.gone ? "gone" : "recv-error", brom ? mono_ms() - t0 : -1);
 			if (reopen_if_gone(io) == 0)
 				continue;
 			return -1;
 		}
 		if (n == 0) {
 			fprintf(stderr, "check baud %d/%d: timeout\n", i + 1, tries);
+			EV_HELLO(brom ? "brom" : "loader", i + 1, tries, "timeout", brom ? mono_ms() - t0 : -1);
 			if (brom) {
 				now = mono_ms();
 				if (now - t0 >= wall_ms) {
 					fprintf(stderr, "check baud: wall %d ms exceeded after %d of %d tries\n",
 						wall_ms, i + 1, tries);
+					EV_HELLO("brom", i + 1, tries, "wall", now - t0);
 					break;
 				}
 			}
@@ -764,6 +793,7 @@ reacq_restart:
 		if (spd_type(io) != BSL_REP_VER) {
 			fprintf(stderr, "check baud %d/%d: response 0x%04x\n",
 				i + 1, tries, spd_type(io));
+			EV_HELLO(brom ? "brom" : "loader", i + 1, tries, "response", brom ? mono_ms() - t0 : -1);
 			continue;
 		}
 		{
@@ -771,6 +801,7 @@ reacq_restart:
 			const uint8_t *payload = spd_payload(io, &plen);
 			fprintf(stderr, "version: %.*s\n", (int)plen, (const char *)payload);
 		}
+		EV_HELLO(brom ? "brom" : "loader", i + 1, tries, "ver", brom ? mono_ms() - t0 : -1);
 		return 0;
 	}
 
@@ -810,22 +841,26 @@ int spd_check_baud_loader(struct spd *io)
 			pause_ms(500);
 		spd_encode(io, BSL_CMD_CHECK_BAUD, NULL, (size_t)nbytes);
 		if (spd_send(io) < 0) {
+			EV_HELLO("loader", i + 1, 10, io->usb.gone ? "gone" : "send-error", -1);
 			if (reopen_if_gone(io) == 0)
 				continue;
 			return -1;
 		}
 		n = spd_recv(io, io->usb.timeout_ms);
 		if (n < 0) {
+			EV_HELLO("loader", i + 1, 10, io->usb.gone ? "gone" : "recv-error", -1);
 			if (reopen_if_gone(io) == 0)
 				continue;
 			return -1;
 		}
 		if (n == 0) {
 			fprintf(stderr, "loader check baud %d (%d x 0x7e): timeout\n", i + 1, nbytes);
+			EV_HELLO("loader", i + 1, 10, "timeout", -1);
 			continue;
 		}
 		if (spd_type(io) != BSL_REP_VER) {
 			fprintf(stderr, "loader check baud %d: response 0x%04x\n", i + 1, spd_type(io));
+			EV_HELLO("loader", i + 1, 10, "response", -1);
 			continue;
 		}
 		{
@@ -833,6 +868,7 @@ int spd_check_baud_loader(struct spd *io)
 			const uint8_t *p = spd_payload(io, &plen);
 			fprintf(stderr, "version: %.*s\n", (int)plen, (const char *)p);
 		}
+		EV_HELLO("loader", i + 1, 10, "ver", -1);
 		return 0;
 	}
 	return -1;
@@ -893,6 +929,7 @@ int spd_send_loader(struct spd *io, const char *path, uint32_t addr)
 	uint8_t *mem = load_file(path, &size);
 	uint8_t hdr[8];
 	size_t off;
+	uint64_t ev_last = 0;
 	int step = io->step > 0 && io->step < 528 ? io->step : 528;
 
 	if (size > 0xffffffffu)
@@ -910,6 +947,7 @@ int spd_send_loader(struct spd *io, const char *path, uint32_t addr)
 		if (spd_check_ok(io))
 			exit(1);
 		off += n;
+		SPD_EV_PROGRESS("loader", path, off, size, &ev_last);
 	}
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
 	if (spd_check_ok(io))
@@ -1210,7 +1248,7 @@ static int read_part_core_q(struct spd *io, const char *name, uint64_t offset, u
 	const char *out_path, uint8_t *mem, int quiet)
 {
 	FILE *fo = NULL;
-	uint64_t done = 0;
+	uint64_t done = 0, ev_last = 0;
 	int mode64 = (offset + size) > 0xffffffffu;
 	int step = io->step;
 	int bad = 0;
@@ -1282,6 +1320,8 @@ static int read_part_core_q(struct spd *io, const char *name, uint64_t offset, u
 		if (mem)
 			memcpy(mem + done, p, plen);
 		done += plen;
+		if (!quiet)
+			SPD_EV_PROGRESS("read", name, done, size, &ev_last);
 		if (plen != n)
 			break;
 	}
@@ -1675,7 +1715,7 @@ static void part_written(struct spd *io, const char *name)
 int spd_write_part(struct spd *io, const char *name, const char *path)
 {
 	FILE *fi;
-	uint64_t len, off;
+	uint64_t len, off, ev_last = 0;
 	int step = io->step;
 	int chunk_ms = io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000;
 
@@ -1762,6 +1802,7 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 			return -1;
 		}
 		off += n;
+		SPD_EV_PROGRESS("write", name, off, len, &ev_last);
 	}
 	fclose(fi);
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
@@ -1776,7 +1817,7 @@ int spd_write_part(struct spd *io, const char *name, const char *path)
 
 int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, size_t len)
 {
-	uint64_t off;
+	uint64_t off, ev_last = 0;
 	int step = io->step;
 	int chunk_ms = io->usb.timeout_ms > 15000 ? io->usb.timeout_ms : 15000;
 
@@ -1827,6 +1868,7 @@ int spd_write_part_buf(struct spd *io, const char *name, const uint8_t *buf, siz
 			return -1;
 		}
 		off += n;
+		SPD_EV_PROGRESS("write", name, off, (uint64_t)len, &ev_last);
 	}
 	spd_encode(io, BSL_CMD_END_DATA, NULL, 0);
 	if (spd_check_ok(io)) {

@@ -7,6 +7,7 @@
 #include "sha256.h"
 #include "dhtb.h"
 #include "pac.h"
+#include "events.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +26,11 @@
  * new feature adds a cap instead. */
 #ifndef SPDHOST_BUILD_SHA
 #define SPDHOST_BUILD_SHA "unknown"
+#endif
+/* P0-3 follow-up (a): 1 when the build tree had uncommitted changes to
+ * tracked files, 0 when clean; stamped next to the sha. */
+#ifndef SPDHOST_BUILD_DIRTY
+#define SPDHOST_BUILD_DIRTY "unknown"
 #endif
 #define SPDHOST_CAPS_FORMAT 1
 #define SPDHOST_PROTOCOL 1
@@ -95,6 +101,10 @@ static void usage(void)
 		"                      block (other slot tries 1, successful 0)\n"
 		"  --dry-run           no USB: fake ACK/VER replies, print each packet\n"
 		"                      (DRY <cmd> addr/len) to stdout; for sequence tests\n"
+		"  --events FD|PATH    JSON-lines progress events (stage, hello tries,\n"
+		"                      bytes/total, per-command result) to an open FD >= 3\n"
+		"                      or appended to PATH. Never waits: events a slow or\n"
+		"                      absent reader cannot take are dropped and counted.\n"
 		"\n"
 		"Commands, run in order on the same connection:\n"
 		"  ping [--fdl]                 BootROM hello, or FDL hello with --fdl\n"
@@ -814,6 +824,13 @@ static void status_note(const char *key, const char *val)
 {
 	const char *p = getenv("SPDHOST_STATUS_FILE");
 	FILE *f;
+	/* P0-3: every status line is also an event (the channel is a superset
+	 * of this file, which is written exactly as before). */
+	if (spd_ev_fd >= 0) {
+		char qk[96], qv[96];
+		spd_event("status", "\"key\":%s,\"value\":%s", spd_ev_q(key, qk, sizeof(qk)),
+			spd_ev_q(val, qv, sizeof(qv)));
+	}
 	if (!p || !p[0] || !(f = fopen(p, "a")))
 		return;
 	fprintf(f, "%s=%s\n", key, val);
@@ -1451,6 +1468,7 @@ static const char *find_exec_file(const char *self_path, uint32_t addr)
 static const char *const spd_caps[] = {
 	"confirm-token", /* --confirm-token SHA256 on misc writes / set-active */
 	"dry-run",       /* --dry-run: no USB, DRY packet lines on stdout */
+	"events",        /* --events FD|PATH: JSON-lines event channel (README) */
 	"frp-part",      /* frp-reset refuses frp+persist unless SPDHOST_FRP_PART */
 	"image-tools",   /* gen-spl-unlock[-legacy], gen-fdl1-dl, chsize */
 	"misc-bytes",    /* status file: misc-bytes=N after misc-backup[-expect] */
@@ -1470,10 +1488,22 @@ static int is_sha1_hex(const char *s)
 	return k == 40;
 }
 
+static const char *build_sha(void)
+{
+	return is_sha1_hex(SPDHOST_BUILD_SHA) ? SPDHOST_BUILD_SHA : "unknown";
+}
+
+static const char *build_dirty(void)
+{
+	const char *d = SPDHOST_BUILD_DIRTY;
+	return (!strcmp(d, "0") || !strcmp(d, "1")) && is_sha1_hex(SPDHOST_BUILD_SHA) ? d : "unknown";
+}
+
 /* `spdhost caps`: stdout only, no USB, no device, no files. Format 1:
  *   caps_format=1
  *   build_sha=<40 lowercase hex | unknown>
  *   protocol=<n>
+ *   build_dirty=<0 | 1 | unknown>     (additive key, P0-3)
  *   cap=<name>        (zero or more, sorted)
  *   end
  * Readers check caps_format=1 on the first line, ignore keys they do not
@@ -1482,15 +1512,66 @@ static int print_caps(void)
 {
 	size_t k;
 	printf("caps_format=%d\n", SPDHOST_CAPS_FORMAT);
-	printf("build_sha=%s\n", is_sha1_hex(SPDHOST_BUILD_SHA) ? SPDHOST_BUILD_SHA : "unknown");
+	printf("build_sha=%s\n", build_sha());
 	printf("protocol=%d\n", SPDHOST_PROTOCOL);
+	printf("build_dirty=%s\n", build_dirty()); /* P0-3, additive: after the P0-2 lines */
 	for (k = 0; k < sizeof(spd_caps) / sizeof(spd_caps[0]); k++)
 		printf("cap=%s\n", spd_caps[k]);
 	printf("end\n");
 	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
 }
 
+/* P0-3 per-command events. The command loop has many exits, so a command's
+ * result is settled when the next one starts (or the run ends): "ok" unless
+ * it bumped nfailed (--keep-going) or the run ended non-zero inside it. */
+static const char *ev_cmd;
+static int ev_cmd_nfailed;
+static int ev_stage_seen = -1;
+
+static void ev_stage(const struct spd *io)
+{
+	static const char *const names[] = { "brom", "fdl1", "fdl2" };
+	int st = io->fdl_stage < 0 ? 0 : io->fdl_stage > 2 ? 2 : io->fdl_stage;
+	if (spd_ev_fd < 0 || st == ev_stage_seen)
+		return;
+	ev_stage_seen = st;
+	spd_event("stage", "\"stage\":\"%s\"", names[st]);
+}
+
+static void ev_cmd_close(int ok)
+{
+	char q[96];
+	if (spd_ev_fd < 0 || !ev_cmd)
+		return;
+	spd_event("cmd", "\"name\":%s,\"state\":\"%s\"", spd_ev_q(ev_cmd, q, sizeof(q)),
+		ok ? "ok" : "failed");
+	ev_cmd = NULL;
+}
+
+static void ev_cmd_next(const struct spd *io, const char *cmd, int nfailed)
+{
+	char q[96];
+	if (spd_ev_fd < 0)
+		return;
+	ev_stage(io); /* a stage the previous command reached comes before its result */
+	ev_cmd_close(nfailed == ev_cmd_nfailed);
+	ev_cmd = cmd;
+	ev_cmd_nfailed = nfailed;
+	spd_event("cmd", "\"name\":%s,\"state\":\"start\"", spd_ev_q(cmd, q, sizeof(q)));
+}
+
+static int spdhost_main(int argc, char **argv);
+
 int main(int argc, char **argv)
+{
+	int rc = spdhost_main(argc, argv);
+	/* A command still open here ended the run: ok only if the run is. */
+	ev_cmd_close(rc == 0);
+	spd_ev_end(rc);
+	return rc;
+}
+
+static int spdhost_main(int argc, char **argv)
 {
 	static const struct option opts[] = {
 		{"usb-fd", required_argument, NULL, 'f'},
@@ -1508,6 +1589,7 @@ int main(int argc, char **argv)
 		{"self-test", no_argument, NULL, 'T'},
 		{"dry-run", no_argument, NULL, 'D'},
 		{"spd-dump-slot", no_argument, NULL, 'S'},
+		{"events", required_argument, NULL, 'E'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
@@ -1524,6 +1606,7 @@ int main(int argc, char **argv)
 	const char *envfd;
 	const char *emit;
 	const char *part_xml_dir = NULL;
+	const char *events_spec = NULL;
 
 	/* --part-xml wins, but the env var is how the menu configures it for a
 	 * whole run. Both are taken verbatim, so an empty value (--part-xml ""
@@ -1634,6 +1717,13 @@ int main(int argc, char **argv)
 			break;
 		case 'S':
 			spd_dump_slot = 1;
+			break;
+		case 'E':
+			if (spd_ev_check_spec(optarg)) {
+				fprintf(stderr, "bad --events: %s (need an open FD >= 3, or a PATH)\n", optarg);
+				return 2;
+			}
+			events_spec = optarg;
 			break;
 		default:
 			usage();
@@ -1747,6 +1837,11 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* Device sessions and --dry-run only: caps and the offline tools above
+	 * never open the event channel. */
+	if (events_spec)
+		spd_ev_open(events_spec, build_sha(), build_dirty(), SPDHOST_PROTOCOL);
+
 	envfd = getenv("TERMUX_USB_FD");
 	/* SPD_USB_FD aliases TERMUX_USB_FD for non-Termux hosts: it is read only
 	 * when TERMUX_USB_FD is unset or empty. (The old form did the assignment
@@ -1790,6 +1885,7 @@ int main(int argc, char **argv)
 		spd_usb_open(&io->usb, fd, vid, pid, timeout);
 		spd_usb_enable_reacquire(&io->usb, self_path);
 	}
+	SPD_EV("session", "\"usb\":\"%s\"", dry ? "dry" : fd >= 0 ? "fd" : "scan");
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];
@@ -1808,6 +1904,8 @@ int main(int argc, char **argv)
 			interrupted_stop = 1;
 			break;
 		}
+		if (spd_ev_fd >= 0)
+			ev_cmd_next(io, cmd, nfailed);
 		if (strcmp(cmd, "ping") == 0) {
 			int fdl = 0;
 			if (i + 1 < argc && strcmp(argv[i + 1], "--fdl") == 0) {
@@ -2578,6 +2676,10 @@ int main(int argc, char **argv)
 	}
 	if (i < argc && !interrupted_stop)
 		fprintf(stderr, "note: ignored after reset/power-off/reboot-*: %s ... (the device left FDL2)\n", argv[i]);
+	if (spd_ev_fd >= 0) {
+		ev_stage(io);
+		ev_cmd_close(!interrupted_stop && nfailed == ev_cmd_nfailed);
+	}
 
 	if (!dry)
 		spd_usb_close(&io->usb);

@@ -15,7 +15,7 @@ ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*"; fail=$((fail + 1)); }
 
 gcc -O2 -Wall -Wextra -std=c11 -D_FILE_OFFSET_BITS=64 -I"$root/src" -I"$root/tests" \
-	"$root/tests/proto-frame.c" "$root/src/proto.c" -o "$tmp/pf" || exit 1
+	"$root/tests/proto-frame.c" "$root/src/proto.c" "$root/src/events.c" -o "$tmp/pf" || exit 1
 
 # clean and two-frames are the control: the frame itself must still be read,
 # so a fix that simply swallows everything cannot pass.

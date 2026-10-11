@@ -137,12 +137,17 @@ LIB=(-L"$sysroot/lib" -lusb-1.0)
 echo "building spdhost"
 # P0-2: `spdhost caps` reports this commit (build_sha); spd_dump below uses it too.
 sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
+# P0-3: build_dirty (1 = tracked files differ from HEAD), as the Makefile does.
+if [[ $sha == unknown ]]; then dirty=unknown
+elif git -C "$root" diff --quiet HEAD -- 2>/dev/null; then dirty=0
+else dirty=1; fi
 cc -static -s -O2 -Wall -Wextra -Wno-sign-compare -Werror=implicit-function-declaration \
-	-std=c11 -D_FILE_OFFSET_BITS=64 -DSPDHOST_BUILD_SHA="\"$sha\"" "${INC[@]}" \
+	-std=c11 -D_FILE_OFFSET_BITS=64 -DSPDHOST_BUILD_SHA="\"$sha\"" \
+	-DSPDHOST_BUILD_DIRTY="\"$dirty\"" "${INC[@]}" \
 	-o "$OUT/spdhost" \
 	"$root/src/main.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" \
 	"$root/src/dumpcmd.c" "$root/src/writecmd.c" "$root/src/sha256.c" \
-	"$root/src/dhtb.c" "$root/src/pac.c" \
+	"$root/src/dhtb.c" "$root/src/pac.c" "$root/src/events.c" \
 	"${LIB[@]}" -lpthread
 
 # --- spd_dump (vendored TomKing tree) ---------------------------------------

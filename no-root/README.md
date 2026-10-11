@@ -555,8 +555,10 @@ device, reads and writes no files, and ignores the device options and
 caps_format=1
 build_sha=0123456789abcdef0123456789abcdef01234567
 protocol=1
+build_dirty=0
 cap=confirm-token
 cap=dry-run
+cap=events
 cap=frp-part
 cap=image-tools
 cap=misc-bytes
@@ -574,6 +576,11 @@ end
   caps. `caps_format` changes only if this layout changes.
 - **`build_sha`:** the full commit the binary was built from (`make` and the
   cross build stamp it), or `unknown` for a build outside git.
+- **`build_dirty`:** `1` when tracked files differed from that commit at
+  build time (staged or not; untracked files do not count), `0` when they did
+  not. `unknown` whenever `build_sha` is. Stamped the same way as `build_sha`.
+  Added after the first three lines; a reader finds keys by name, not by
+  line number (only line 1 is fixed).
 - **`protocol`:** the caller-interface version (commands, their arguments and
   exit codes, `SPDHOST_STATUS_FILE` keys). It goes up only when something
   existing changes incompatibly; a new feature adds a cap instead.
@@ -584,6 +591,7 @@ end
 |---|---|
 | `confirm-token` | `--confirm-token SHA256` authorises one misc write / set-active |
 | `dry-run` | `--dry-run`: no USB, one `DRY` line per packet on stdout |
+| `events` | `--events FD\|PATH`: JSON-lines event channel (see "Event channel") |
 | `frp-part` | `frp-reset` refuses a table with both `frp` and `persist` unless `SPDHOST_FRP_PART` names one |
 | `image-tools` | `gen-spl-unlock`, `gen-spl-unlock-legacy`, `gen-fdl1-dl`, `chsize` |
 | `misc-bytes` | the status file gets `misc-bytes=N` after `misc-backup[-expect]` |
@@ -599,6 +607,84 @@ The menu decides whether the built-in image tools (`[8]` unlock) and `unpac`
 `gen_spl-unlock`, `[16]` asks you to rebuild. The menu runs
 `spdhost --dry-run caps`, so even such an old binary opens no USB for the
 question.
+
+### Event channel
+
+`--events FD|PATH` makes spdhost write progress as JSON lines, one object per
+line, for a caller (the app) that wants more than the text on stderr. FD is
+an already-open descriptor number, 3 or higher (a pipe, a socket, a FIFO or a
+file); anything else is a PATH, opened for append (created with mode 0600).
+A bad FD (below 3, not open) is refused with exit 2. A PATH that cannot be
+opened, for example a FIFO nobody is reading, gets one
+`events: PATH: ...; events off` line on stderr and the run goes on without
+events. There is no environment variable for it. `caps`, `--self-test` and
+the offline tools (`unpac`, `pack-slot`, the image tools) never open it; a
+device session and `--dry-run` do.
+
+Every line has the same envelope:
+
+```
+{"v":1,"seq":N,"t":MS,"ev":"TYPE",...}
+```
+
+`v` is the format version (1), `seq` counts events from 1, `t` is
+milliseconds since the channel opened. A reader ignores types and fields it
+does not know. The types:
+
+| `ev` | fields | when |
+|---|---|---|
+| `start` | `build_sha`, `build_dirty`, `protocol`, `pid` | first line |
+| `session` | `usb`: `fd`, `scan` or `dry` | the device is open (or dry-run) |
+| `stage` | `stage`: `brom`, `fdl1`, `fdl2` | the device reached a stage |
+| `cmd` | `name`, `state`: `start`, `ok`, `failed` | each command on the command line |
+| `hello` | `stage` (`brom`/`loader`), `try`, `of`, `result`, `ms` (BootROM only) | after each hello try |
+| `progress` | `op` (`loader`/`read`/`write`), `name`, `done`, `total` (bytes) | at most once per MiB, and at the end |
+| `status` | `key`, `value` | every `SPDHOST_STATUS_FILE` line, the same text |
+| `usb` | `state`: `gone`, `reopened`, `reopen-failed` | the device dropped off the bus |
+| `dropped` | `count`, `total` (no `seq`) | events were lost, see below |
+| `end` | `rc`, `dropped` | last line; `rc` -1 when the run stopped by `exit()` mid-command |
+
+`hello` `result` is `ver` (answered), `timeout`, `response` (something
+other than VER), `send-timeout`, `send-error`, `recv-error`, `gone` or `wall`
+(the hello's time budget ran out; `try` is then the tries done). A command's
+`ok`/`failed` is settled when the next command starts or the run ends. A
+sample (`--dry-run exec_addr ... fdl ... fdl ...`):
+
+```
+{"v":1,"seq":1,"t":0,"ev":"start","build_sha":"0123456789abcdef0123456789abcdef01234567","build_dirty":"0","protocol":1,"pid":4242}
+{"v":1,"seq":2,"t":0,"ev":"session","usb":"dry"}
+{"v":1,"seq":3,"t":0,"ev":"stage","stage":"brom"}
+{"v":1,"seq":4,"t":0,"ev":"cmd","name":"exec_addr","state":"start"}
+{"v":1,"seq":5,"t":0,"ev":"cmd","name":"exec_addr","state":"ok"}
+{"v":1,"seq":6,"t":0,"ev":"cmd","name":"fdl","state":"start"}
+{"v":1,"seq":7,"t":0,"ev":"hello","stage":"brom","try":1,"of":15,"result":"ver","ms":0}
+{"v":1,"seq":8,"t":1,"ev":"progress","op":"loader","name":"fdl1-dl.bin","done":61624,"total":61624}
+{"v":1,"seq":9,"t":1,"ev":"hello","stage":"loader","try":1,"of":10,"result":"ver"}
+{"v":1,"seq":10,"t":1,"ev":"stage","stage":"fdl1"}
+{"v":1,"seq":11,"t":1,"ev":"cmd","name":"fdl","state":"ok"}
+{"v":1,"seq":12,"t":1,"ev":"cmd","name":"fdl","state":"start"}
+{"v":1,"seq":13,"t":6,"ev":"progress","op":"loader","name":"fdl2-dl.bin","done":1040008,"total":1040008}
+{"v":1,"seq":14,"t":6,"ev":"stage","stage":"fdl2"}
+{"v":1,"seq":15,"t":6,"ev":"cmd","name":"fdl","state":"ok"}
+{"v":1,"seq":16,"t":6,"ev":"end","rc":0,"dropped":0}
+```
+
+**The channel never waits for its reader**, so it cannot slow the transfer
+or the BootROM hello. Each event is one line of at most 1024 bytes (under
+`PIPE_BUF`, so a pipe takes a line whole or not at all), written once without
+blocking: `send(MSG_DONTWAIT|MSG_NOSIGNAL)` on a socket; on a pipe, FIFO or
+tty, `O_NONBLOCK` is set on the descriptor for the run and put back at the
+end (it is shared with whoever else holds that pipe end); a regular file is
+written plainly. A line the reader has no room for right now is dropped and
+counted; the next line that does get through is preceded by a
+`{"v":1,"t":..,"ev":"dropped","count":N,"total":T}` line, and `end` repeats
+the total. `dropped` lines have no `seq`, so the gaps in `seq` are exactly
+the lost events. A reader that went away (`EPIPE`) turns the channel off
+for the rest of the run; SIGPIPE is ignored while events are on, so it
+cannot kill spdhost (child processes it starts inherit that). A hello event
+is sent only after its try finished, never between the send and the reply.
+With events off, nothing of this runs. `SPDHOST_STATUS_FILE` is unchanged;
+every line it gets is also a `status` event.
 
 ### Options
 
@@ -620,6 +706,7 @@ Options go before the commands, and never in front of the device path.
                   dump folder's meta/, as spd_dump leaves that file behind itself
 --verbose
 --dry-run         no USB: fake replies, print each packet for sequence tests
+--events FD|PATH  JSON-lines progress events; never waits (see "Event channel")
 --self-test       framing check, no device
 ```
 

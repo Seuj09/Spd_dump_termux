@@ -44,12 +44,16 @@
  * Replies: CHECK_BAUD->VER SPRD3; READ_START(0x10)->ACK if name known and size<=partsize else NACK(0x8b? use 0x82);
  * READ_MIDST(0x11)->READ_FLASH(0x93) with deterministic bytes, clipped at partition end; else ACK.
  * Checksum of reply: CRC16 if incoming frame's CRC16 is valid, else additive (CHK_ORIG). */
+#if !defined(_GNU_SOURCE) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* nanosleep */
+#endif
 #include <libusb-1.0/libusb.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAXR (0x10000 + 16)
 static uint8_t reply[2 * MAXR + 4];
@@ -220,6 +224,10 @@ static void log_out(const uint8_t *buf, int len)
 	for (i = 0; i < len; i++) if (buf[i] != 0x7e) allmark = 0;
 	if (allmark) {
 		fprintf(logf, "SEQ CHECK_BAUD n=%d\n", len); fflush(logf);
+		/* MOCK_HELLO_MISS=N (P0-3 timing test): the BootROM ignores its first
+		 * N hellos, so those tries time out. */
+		{ static int miss = -1; if (miss < 0) miss = getenv("MOCK_HELLO_MISS") ? atoi(getenv("MOCK_HELLO_MISS")) : 0;
+		  if (connects == 0 && miss > 0) { miss--; reply_len = reply_pos = 0; return; } }
 		make_reply(0x81, (const uint8_t *)"SPRD3", 5, connects == 0); /* BootROM: CRC16; FDL1/2: additive */
 		return;
 	}
@@ -422,7 +430,7 @@ int libusb_control_transfer(libusb_device_handle *h, uint8_t rt, uint8_t r, uint
 	unsigned char *d, uint16_t l, unsigned int t) { (void)h; (void)rt; (void)r; (void)v; (void)i; (void)d; (void)t; return l; }
 int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned char *d, int len, int *got, unsigned int t)
 {
-	(void)h; (void)t;
+	(void)h;
 	if (!(ep & 0x80)) {
 		/* A zero-length OUT transfer is the ZLP spd_usb_bulk_send adds after
 		 * a frame that fills its last 512-byte packet. It is not a frame:
@@ -442,6 +450,9 @@ int libusb_bulk_transfer(libusb_device_handle *h, unsigned char ep, unsigned cha
 	if (reply_pos >= reply_len) {
 		*got = 0;
 		if (bus_pipe) { bus_pipe = 0; return LIBUSB_ERROR_PIPE; }
+		/* MOCK_SLEEP_TIMEOUT=1 (P0-3 timing test): a timeout takes its real
+		 * time, capped at 200 ms. */
+		if (getenv("MOCK_SLEEP_TIMEOUT")) { struct timespec ts = { 0, (long)(t < 200 ? t : 200) * 1000000L }; nanosleep(&ts, NULL); }
 		return LIBUSB_ERROR_TIMEOUT;
 	}
 	if (len > reply_len - reply_pos) len = reply_len - reply_pos;

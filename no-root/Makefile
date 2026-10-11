@@ -7,26 +7,30 @@ CPPFLAGS += $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0)
 
 SRCS = src/main.c src/usb.c src/usb_list.c src/proto.c src/dumpcmd.c \
-       src/writecmd.c src/sha256.c src/dhtb.c src/pac.c
+       src/writecmd.c src/sha256.c src/dhtb.c src/pac.c src/events.c
 HDRS = src/usb.h src/usb_list.h src/proto.h src/dumpcmd.h src/writecmd.h \
-       src/sha256.h src/dhtb.h src/pac.h
+       src/sha256.h src/dhtb.h src/pac.h src/events.h
 BIN = spdhost
 ARCH := $(shell uname -m)
 # P0-2: `spdhost caps` reports the commit it was built from. The stamp file
-# is rewritten only when HEAD moves, so a new commit relinks the binary and
+# is rewritten only when HEAD (or build_dirty) changes, so a new commit relinks the binary and
 # an unchanged tree does not. Outside git it says "unknown".
 BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+# P0-3: build_dirty=1 when tracked files differ from HEAD (staged or not;
+# untracked files do not count). "unknown" when the sha is unknown.
+BUILD_DIRTY := $(if $(filter unknown,$(BUILD_SHA)),unknown,$(shell git diff --quiet HEAD -- 2>/dev/null && echo 0 || echo 1))
 SHA_STAMP = .build-sha
 
 .PHONY: all clean cross-arm32 cross-arm64 cross FORCE
 all: $(BIN)
 
 $(SHA_STAMP): FORCE
-	@[ "$$(cat $@ 2>/dev/null)" = "$(BUILD_SHA)" ] || echo "$(BUILD_SHA)" > $@
+	@[ "$$(cat $@ 2>/dev/null)" = "$(BUILD_SHA) $(BUILD_DIRTY)" ] || echo "$(BUILD_SHA) $(BUILD_DIRTY)" > $@
 
 $(BIN): $(SRCS) $(HDRS) $(SHA_STAMP)
 	@echo "spdhost: compiling for $(ARCH)"
-	$(CC) $(CFLAGS) $(CPPFLAGS) -DSPDHOST_BUILD_SHA='"$(BUILD_SHA)"' -o $@ $(SRCS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DSPDHOST_BUILD_SHA='"$(BUILD_SHA)"' \
+		-DSPDHOST_BUILD_DIRTY='"$(BUILD_DIRTY)"' -o $@ $(SRCS) $(LDLIBS)
 
 clean:
 	rm -f $(BIN) $(SHA_STAMP)

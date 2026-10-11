@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # P0-2: `spdhost caps` and the menu's use of it.
+# P0-3 adds build_dirty (line 4, additive) and cap=events.
 #
 # caps tells a caller (menu.sh now, the app later) what this build can do:
 # the commit it was built from, the caller-interface protocol version and
@@ -23,7 +24,7 @@ make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; ech
 bin=$root/spdhost
 
 # The cap list is pinned: adding or dropping one is a deliberate change here.
-want_caps='confirm-token dry-run frp-part image-tools misc-bytes pack-slot parts-header status-file unpac usb-fd'
+want_caps='confirm-token dry-run events frp-part image-tools misc-bytes pack-slot parts-header status-file unpac usb-fd'
 
 echo "== format =="
 "$bin" caps >"$tmp/caps.out" 2>"$tmp/caps.err"; rc=$?
@@ -32,9 +33,10 @@ check "caps writes nothing to stderr" test ! -s "$tmp/caps.err"
 check "line 1 is caps_format=1" test "$(sed -n 1p "$tmp/caps.out")" = caps_format=1
 check "line 2 is build_sha=<40 hex|unknown>" grep -qxE 'build_sha=([0-9a-f]{40}|unknown)' <(sed -n 2p "$tmp/caps.out")
 check "line 3 is protocol=1" test "$(sed -n 3p "$tmp/caps.out")" = protocol=1
+check "line 4 is build_dirty=<0|1|unknown> (P0-3, additive)" grep -qxE 'build_dirty=(0|1|unknown)' <(sed -n 4p "$tmp/caps.out")
 check "the last line is end" test "$(tail -n 1 "$tmp/caps.out")" = end
 check "every other line is cap=<name>, names [a-z0-9:-]" \
-	bash -c '[ -z "$(sed -e 1,3d -e "\$d" "$1" | grep -vxE "cap=[a-z0-9][a-z0-9:-]*")" ]' _ "$tmp/caps.out"
+	bash -c '[ -z "$(sed -e 1,4d -e "\$d" "$1" | grep -vxE "cap=[a-z0-9][a-z0-9:-]*")" ]' _ "$tmp/caps.out"
 got=$(sed -n 's/^cap=//p' "$tmp/caps.out")
 check "cap names are sorted and unique" test "$got" = "$(printf '%s\n' "$got" | LC_ALL=C sort -u)"
 check "the cap list is exactly: $want_caps" test "$(echo $got)" = "$want_caps"
@@ -43,6 +45,9 @@ check "every line is key=value except the final end" \
 if git -C "$root" rev-parse HEAD >/dev/null 2>&1; then
 	check "build_sha is the commit make built from (git rev-parse HEAD)" \
 		test "$(sed -n 2p "$tmp/caps.out")" = "build_sha=$(git -C "$root" rev-parse HEAD)"
+	if git -C "$root" diff --quiet HEAD --; then want_dirty=0; else want_dirty=1; fi
+	check "build_dirty is $want_dirty: tracked files vs HEAD at build time (git diff --quiet HEAD)" \
+		test "$(sed -n 4p "$tmp/caps.out")" = "build_dirty=$want_dirty"
 fi
 "$bin" caps extra >/dev/null 2>"$tmp/x.err"; rc=$?
 check "caps with an argument is refused (exit 2)" bash -c '[ "$1" = 2 ] && grep -q "caps takes no arguments" "$2"' _ "$rc" "$tmp/x.err"
@@ -52,7 +57,7 @@ check "--help lists caps" bash -c '"$1" --help 2>&1 | grep -q "^  caps "' _ "$bi
 
 echo "== no device, no USB =="
 # The same sources linked with every libusb entry point trapped (exit 99).
-srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac}.c)
+srcs=("$root"/src/{main,usb,usb_list,proto,dumpcmd,writecmd,sha256,dhtb,pac,events}.c)
 wraps=-Wl,--wrap=libusb_init,--wrap=libusb_init_context,--wrap=libusb_wrap_sys_device,--wrap=libusb_open_device_with_vid_pid
 if $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2>/dev/null) \
 	-o "$tmp/trapped" "${srcs[@]}" "$root/tests/libusb_trap.c" "$wraps" \
@@ -61,8 +66,8 @@ if $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 $(pkg-config --cflags libusb-1.0 2
 	check "(the trap works: a device command hits it)" grep -q '^TRAP ' "$tmp/t0.err"
 	"$tmp/trapped" caps >"$tmp/t1.out" 2>"$tmp/t1.err"; rc=$?
 	check "caps: exit 0, no libusb call" bash -c '[ "$1" = 0 ] && ! grep -q TRAP "$2"' _ "$rc" "$tmp/t1.err"
-	check "caps from the trapped build: build_sha=unknown (no stamp), same caps" \
-		bash -c 'grep -qx build_sha=unknown "$1" && diff <(grep "^cap=" "$1") <(grep "^cap=" "$2") >/dev/null' _ "$tmp/t1.out" "$tmp/caps.out"
+	check "caps from the trapped build: build_sha=unknown, build_dirty=unknown (no stamp), same caps" \
+		bash -c 'grep -qx build_sha=unknown "$1" && grep -qx build_dirty=unknown "$1" && diff <(grep "^cap=" "$1") <(grep "^cap=" "$2") >/dev/null' _ "$tmp/t1.out" "$tmp/caps.out"
 	TERMUX_USB_FD=7 "$tmp/trapped" caps >/dev/null 2>"$tmp/t2.err"; rc=$?
 	check "caps with TERMUX_USB_FD set: no libusb call" bash -c '[ "$1" = 0 ] && ! grep -q TRAP "$2"' _ "$rc" "$tmp/t2.err"
 	"$tmp/trapped" --usb-fd 9 --vid 0x1782 --pid 0x4d00 caps >/dev/null 2>"$tmp/t3.err" 9</dev/null; rc=$?
@@ -97,6 +102,22 @@ check "the cross build passes -DSPDHOST_BUILD_SHA (both arches use cross-arm32.s
 $cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 -DSPDHOST_BUILD_SHA='"not-a-sha"' $(pkg-config --cflags libusb-1.0 2>/dev/null) \
 	-o "$tmp/bogus" "${srcs[@]}" $(pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0) 2>/dev/null
 check "a stamp that is not 40 hex reports unknown" bash -c '"$1" caps | grep -qx build_sha=unknown' _ "$tmp/bogus"
+check "Makefile passes -DSPDHOST_BUILD_DIRTY (from git diff --quiet HEAD) and stamps it" \
+	bash -c 'grep -q -- "-DSPDHOST_BUILD_DIRTY=" "$1/Makefile" && grep -q "git diff --quiet HEAD" "$1/Makefile" && grep -q "BUILD_SHA) \$(BUILD_DIRTY)" "$1/Makefile"' _ "$root"
+check "the cross build passes -DSPDHOST_BUILD_DIRTY" bash -c 'grep -q -- "-DSPDHOST_BUILD_DIRTY=" "$1/scripts/cross-arm32.sh"' _ "$root"
+sha=0123456789abcdef0123456789abcdef01234567
+for d in 0 1 maybe; do
+	$cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 -DSPDHOST_BUILD_SHA="\"$sha\"" -DSPDHOST_BUILD_DIRTY="\"$d\"" \
+		$(pkg-config --cflags libusb-1.0 2>/dev/null) -o "$tmp/dirty" "${srcs[@]}" \
+		$(pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0) 2>/dev/null
+	want=$d; [[ $d == maybe ]] && want=unknown
+	check "a build stamped dirty=$d reports build_dirty=$want" bash -c '"$1" caps | sed -n 4p | grep -qx "build_dirty=$2"' _ "$tmp/dirty" "$want"
+done
+$cc -O1 -w -std=c11 -D_FILE_OFFSET_BITS=64 -DSPDHOST_BUILD_SHA='"not-a-sha"' -DSPDHOST_BUILD_DIRTY='"0"' \
+	$(pkg-config --cflags libusb-1.0 2>/dev/null) -o "$tmp/dirty" "${srcs[@]}" \
+	$(pkg-config --libs libusb-1.0 2>/dev/null || echo -lusb-1.0) 2>/dev/null
+check "build_dirty is unknown whenever build_sha is" bash -c '"$1" caps | sed -n 4p | grep -qx build_dirty=unknown' _ "$tmp/dirty"
+check "events: --events is parsed (fd < 3 refused)" bash -c '"$1" --events 2 caps >/dev/null 2>&1; [ $? = 2 ]' _ "$bin"
 
 echo "== menu.sh asks caps =="
 m=$root/scripts/menu.sh
