@@ -161,7 +161,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ github.sha }}
+          # The per-architecture zips live in dist/arm32/ and dist/arm64/, and
+          # the APK job unzips them from those paths. upload-artifact keeps
+          # paths relative to the common root of these patterns (no-root/dist),
+          # so the artifact unpacks as arm32/<zip>, arm64/<zip>, the combined
+          # zip and SHA256SUMS -- the same layout as no-root/dist.
           path: |
+            no-root/dist/arm32/*.zip
+            no-root/dist/arm64/*.zip
             no-root/dist/*.zip
             no-root/dist/SHA256SUMS
           if-no-files-found: error
@@ -405,6 +412,7 @@ jobs:
           sudo apt-get install -y -qq qemu-user-static file unzip >/dev/null
           sha=$(git rev-parse HEAD)
           rm -rf unz jniLibs && mkdir -p unz
+          echo "--- artifact layout"; find dist -type f | sort
           unzip -q dist/arm32/spdhost-arm32-static-*.zip -d unz
           unzip -q dist/arm64/spdhost-arm64-static-*.zip -d unz
           # ABI dir, zip tree, qemu, and what `file` must say.
