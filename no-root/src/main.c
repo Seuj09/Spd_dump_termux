@@ -2768,9 +2768,8 @@ static int spdhost_main(int argc, char **argv)
 	}
 
 	/* Device sessions and --dry-run only: caps and the offline tools above
-	 * never open the event channel. */
-	if (events_spec)
-		spd_ev_open(events_spec, build_sha(), build_dirty(), SPDHOST_PROTOCOL);
+	 * never open the event channel. Events themselves open after the USB fd
+	 * is resolved (see below), so --events can never be the USB fd. */
 
 	/* P0-4: rebuild + match + consume, all before USB is opened. */
 	if (confirm_plan && plan_execute_start(confirm_plan, argc, argv, optind, &popts))
@@ -2792,6 +2791,16 @@ static int spdhost_main(int argc, char **argv)
 			return 2;
 		}
 		fd = (int)v;
+	}
+
+	/* Opened once the USB fd is known, so it can never be the USB fd
+	 * (its flags and its data belong to usbfs). */
+	if (events_spec) {
+		if (spd_ev_is_usb_fd(events_spec, fd)) {
+			fprintf(stderr, "bad --events: %s is the USB fd\n", events_spec);
+			return 2;
+		}
+		spd_ev_open(events_spec, build_sha(), build_dirty(), SPDHOST_PROTOCOL);
 	}
 
 	if (step < 0x800 || step > 0xf800 || (step & 0x7ff)) {

@@ -29,8 +29,17 @@ void spd_ev_progress(const char *op, const char *name, uint64_t done, uint64_t t
 /* The final `end` event (rc, total dropped). Idempotent; atexit runs it with
  * rc -1 for a run that ended in exit() rather than a return from main. */
 void spd_ev_end(int rc);
-/* S as a JSON string literal (quotes included) in BUF; truncated to fit. */
+/* 1 when the --events SPEC is an FD that is the USB fd USB_FD (the same
+ * number, or another descriptor of the same file). The caller refuses it. */
+int spd_ev_is_usb_fd(const char *spec, int usb_fd);
+/* S as a JSON string literal (quotes included) in BUF, always valid UTF-8
+ * (invalid bytes become \ufffd). Too long for CAP: cut on a character
+ * boundary, ending in \u2026. */
 const char *spd_ev_q(const char *s, char *buf, unsigned cap);
+
+#ifdef SPD_EV_TEST
+void spd_ev_test_hooks(int noreopen, int failsetfl);
+#endif
 
 #define SPD_EV(...) do { if (spd_ev_fd >= 0) spd_event(__VA_ARGS__); } while (0)
 #define SPD_EV_PROGRESS(...) do { if (spd_ev_fd >= 0) spd_ev_progress(__VA_ARGS__); } while (0)

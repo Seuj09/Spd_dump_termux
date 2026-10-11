@@ -26,7 +26,7 @@ CC=${CC:-gcc}
 $CC -O2 -w -std=c11 -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I"$root/tests" \
 	"$root/src/main.c" "$root/src/plan.c" "$root/src/usb.c" "$root/src/usb_list.c" "$root/src/proto.c" "$root/src/events.c" "$root/src/dumpcmd.c" \
 	"$root/src/writecmd.c" "$root/src/sha256.c" "$root/src/dhtb.c" "$root/src/pac.c" "$root/tests/mock_fdl2.c" -o "$tmp/sh" || exit 1
-$CC -O2 -Wall -Wextra -std=c11 -I"$root/src" "$root/tests/events_unit.c" "$root/src/events.c" -o "$tmp/eu" || exit 1
+$CC -O2 -Wall -Wextra -std=c11 -DSPD_EV_TEST -I"$root/src" "$root/tests/events_unit.c" "$root/src/events.c" -o "$tmp/eu" || exit 1
 make -C "$root" spdhost >"$tmp/make.log" 2>&1 || { tail -20 "$tmp/make.log"; echo "events: build failed"; exit 1; }
 bin=$root/spdhost
 R=$root/tests/events_reader.py
@@ -182,11 +182,40 @@ check "dropped accounting: one dropped notice before the next line that gets thr
 check "reader closed (EPIPE): no SIGPIPE death, the run goes on" bash -c '"$1" epipe | grep -qx "epipe alive"' _ "$tmp/eu"
 check "socket nobody reads: send never waits, the socket's flags are left alone" \
 	bash -c 'o=$("$1" sock) && [[ $o == *flags_same=1* ]] && [ "${o#*worst_ms=}" != "${o#*worst_ms=}x" ] && [ "$(echo "$o" | sed "s/.*worst_ms=\([0-9]*\).*/\1/")" -le 5 ]' _ "$tmp/eu"
-check "pipe FD: O_NONBLOCK while events are on, put back at the end; FD_CLOEXEC set" \
-	bash -c '[ "$("$1" flags)" = "flags before_nb=0 during_nb=1 after_nb=0 cloexec=1" ]' _ "$tmp/eu"
+check "pipe FD: a private non-blocking descriptor; the caller's flags never change; FD_CLOEXEC set" \
+	bash -c '[ "$("$1" flags)" = "flags before_nb=0 during_nb=0 after_nb=0 cloexec=1 private=1 private_nb=1 lines=2" ]' _ "$tmp/eu"
+check "no private descriptor (fallback): O_NONBLOCK on the shared one while on, put back at the end" \
+	bash -c '[ "$("$1" fallback)" = "fallback before_nb=0 during_nb=1 after_nb=0 cloexec=1 private=0 private_nb=1 lines=2" ]' _ "$tmp/eu"
+check "no private descriptor and the fd is spdhost's stdout: events off, stdout's flags untouched" \
+	bash -c '"$1" stdout 2>&1 >/dev/null | tr "\n" "|" | grep -qx "events: fd [0-9]*: no private descriptor .* is spdhost.s stdout/stderr; events off|stdout off=1 flags_same=1|"' _ "$tmp/eu"
+check "O_NONBLOCK cannot be set (forced): events off, never a blocking channel" \
+	bash -c '"$1" setfl 2>&1 | tr "\n" "|" | grep -qx "events: fd [0-9]*: cannot make writes non-blocking; events off|setfl off=1 flags_same=1|"' _ "$tmp/eu"
 "$tmp/eu" long > long.out
 check "an over-long event becomes a well-formed truncated marker; strings are JSON-escaped" \
 	bash -c 'python3 "$1" schema long.out && grep -q "\"ev\":\"status\",\"truncated\":true}" long.out && python3 -c "import json,sys; e=[json.loads(l) for l in open(\"long.out\")]; sys.exit(e[2][\"key\"]!=\"a\\\"b\\\\c\\n\\x01\")"' _ "$C"
+
+"$tmp/eu" utf8 > utf8.out
+check "UTF-8: every line strict UTF-8 JSON; non-ASCII kept, invalid bytes become U+FFFD" \
+	python3 -c '
+import json,sys
+e=[json.loads(l.decode("utf-8","strict")) for l in open("utf8.out","rb")]
+v={x.get("key"):x.get("value") for x in e if x["ev"]=="status"}
+sys.exit(not (v["ok"]=="/sdcard/\u00e9t\u00e9/\u4e2d\U0001f600.bin" and v["bad"]=="x\ufffd\ufffdy"+"\ufffd"*8))'
+check "a cut string ends on a character boundary with a \u2026 mark (q[96] mid-character, long non-ASCII loader path)" \
+	python3 -c '
+import json,sys
+e=[json.loads(l.decode("utf-8","strict")) for l in open("utf8.out","rb")]
+v={x.get("key"):x.get("value") for x in e if x["ev"]=="status"}
+p=[x["name"] for x in e if x["ev"]=="progress"][0]
+sys.exit(not (v["cut96"]=="a"*86+"\u2026" and p.startswith("/sdcard/\u4e2d") and p.endswith("\u4e2d\u2026") and v["fit"]=="abcdefghijklm" and v["fit1"]=="abcdefg\u2026"))'
+nd="$tmp/$(printf 'r\xc3\xa9p\xff')"; mkdir -p "$nd"; cp fdl1-dl.bin "$nd/fdl1-$(printf '\xe4\xb8\xad').bin"
+"$bin" --events "$tmp/u8.jsonl" --dry-run "${EX[@]}" fdl "$nd/fdl1-$(printf '\xe4\xb8\xad').bin" 0x65000800 >/dev/null 2>&1
+check "spdhost: a non-ASCII / invalid-byte FDL path gives a strict-UTF-8 progress event" \
+	python3 -c '
+import json,sys
+e=[json.loads(l.decode("utf-8","strict")) for l in open("u8.jsonl","rb")]
+p=[x["name"] for x in e if x["ev"]=="progress"]
+sys.exit(not (len(p)==1 and "r\u00e9p\ufffd/fdl1-\u4e2d.bin" in p[0]))'
 
 echo "== timing: a slow or absent reader leaves hello and transfer timing alone =="
 # BootROM ignores 4 hellos; each timeout takes its real time (MOCK_SLEEP_TIMEOUT).
@@ -234,6 +263,41 @@ check "--dry-run: DRY frames on stdout identical with events on" cmp -s dry-off.
 check "--dry-run: the session event says usb=dry" grep -q '"ev":"session","usb":"dry"' dry.jsonl
 python3 "$R" never dry-never.ev -- "$bin" --events 9 "${dry[@]}" >dry-never.out 2>/dev/null
 check "--dry-run with a never-read pipe: DRY frames identical" cmp -s dry-off.out dry-never.out
+# MED-1: the events fd a dup of spdhost's own stdout (3>&1), stdout read
+# late: stdout must still get every DRY line (it blocks as it always did);
+# only events may be dropped. 2>&1 the same for stderr.
+"$bin" "${dry[@]}" >dry-ref.out 2>dry-ref.err
+"$bin" --events 3 "${dry[@]}" 3>&1 2>/dev/null | (sleep 2; cat) > dry-dup1.out
+check "--events 3 3>&1 with a late stdout reader: DRY output byte-identical once event lines are taken out ($(grep -c '^DRY' dry-dup1.out)/$(grep -c '^DRY' dry-ref.out) DRY lines)" \
+	python3 -c '
+import re,sys,json
+a=open("dry-dup1.out","rb").read()
+ev=re.findall(rb"\{\"v\":1,[^\n]*\n",a)
+rest=re.sub(rb"\{\"v\":1,[^\n]*\n",b"",a)
+[json.loads(l) for l in ev]
+sys.exit(not (rest==open("dry-ref.out","rb").read() and len(ev)>=1))'
+"$bin" --events 3 "${dry[@]}" 2>&1 >/dev/null 3>&2 | (sleep 2; cat) > dry-dup2.out
+check "--events 3 3>&2 with a late stderr reader: stderr byte-identical once event lines are taken out" \
+	python3 -c '
+import re,sys
+a=open("dry-dup2.out","rb").read()
+sys.exit(not re.sub(rb"\{\"v\":1,[^\n]*\n",b"",a)==open("dry-ref.err","rb").read())'
+dup() { # NAME [--events 3]: a mock session, stdout to a late reader, fd 3 = stdout
+	local n=$1; shift
+	( MOCK_LOG=$n.seq SPDHOST_STATUS_FILE=$PWD/$n.st timeout 60 ./sh --usb-fd 7 "$@" "${SESSION[@]}" \
+		7</dev/null </dev/null 3>&1 2>"$n.err" | (sleep 1; cat) > "$n.out"; echo "${PIPESTATUS[0]}" > "$n.rc" )
+}
+rm -f dupoff.* dupon.*
+dup dupoff; dup dupon --events 3
+check "mock session with --events 3 3>&1: rc, USB frame trace, status file, stderr and stdout (less event lines) as events off" \
+	bash -c '[ "$(cat dupon.rc)" = 0 ] && cmp -s dupoff.rc dupon.rc && cmp -s dupoff.seq dupon.seq && cmp -s dupoff.st dupon.st && cmp -s dupoff.err dupon.err && grep -q "\"ev\":\"start\"" dupon.out && diff <(grep -v "^{\"v\":1," dupon.out) dupoff.out >/dev/null'
+# LOW-5: the events fd may not be the USB fd.
+for a in "--usb-fd 7 --events 7" "--usb-fd 7 --events 8"; do
+	"$bin" $a --dry-run ping 7</dev/null 8<&7 >/dev/null 2>e.err; rc=$?
+	check "'$a' (8 a dup of 7) refused: exit 2, bad --events: is the USB fd" bash -c '[ "$1" = 2 ] && grep -q "^bad --events: [0-9]* is the USB fd" "$2"' _ "$rc" e.err
+done
+TERMUX_USB_FD=7 "$bin" --events 7 --dry-run ping 7</dev/null >/dev/null 2>e.err; rc=$?
+check "TERMUX_USB_FD=7 --events 7 refused (exit 2)" bash -c '[ "$1" = 2 ] && grep -q "^bad --events: 7 is the USB fd" "$2"' _ "$rc" e.err
 "$bin" caps > caps.out
 check "caps lists cap=events" grep -qx cap=events caps.out
 "$bin" --events "$tmp/caps.jsonl" caps >/dev/null 2>&1

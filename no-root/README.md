@@ -702,7 +702,9 @@ question.
 line, for a caller (the app) that wants more than the text on stderr. FD is
 an already-open descriptor number, 3 or higher (a pipe, a socket, a FIFO or a
 file); anything else is a PATH, opened for append (created with mode 0600).
-A bad FD (below 3, not open) is refused with exit 2. A PATH that cannot be
+A bad FD (below 3, not open, or the USB fd from `--usb-fd` /
+`TERMUX_USB_FD` / `SPD_USB_FD`, by number or as another descriptor of the
+same device) is refused with exit 2. A PATH that cannot be
 opened, for example a FIFO nobody is reading, gets one
 `events: PATH: ...; events off` line on stderr and the run goes on without
 events. There is no environment variable for it. `caps`, `--self-test` and
@@ -746,12 +748,12 @@ sample (`--dry-run exec_addr ... fdl ... fdl ...`):
 {"v":1,"seq":5,"t":0,"ev":"cmd","name":"exec_addr","state":"ok"}
 {"v":1,"seq":6,"t":0,"ev":"cmd","name":"fdl","state":"start"}
 {"v":1,"seq":7,"t":0,"ev":"hello","stage":"brom","try":1,"of":15,"result":"ver","ms":0}
-{"v":1,"seq":8,"t":1,"ev":"progress","op":"loader","name":"fdl1-dl.bin","done":61624,"total":61624}
+{"v":1,"seq":8,"t":1,"ev":"progress","op":"loader","name":"/sdcard/spd/fdl1-dl.bin","done":61624,"total":61624}
 {"v":1,"seq":9,"t":1,"ev":"hello","stage":"loader","try":1,"of":10,"result":"ver"}
 {"v":1,"seq":10,"t":1,"ev":"stage","stage":"fdl1"}
 {"v":1,"seq":11,"t":1,"ev":"cmd","name":"fdl","state":"ok"}
 {"v":1,"seq":12,"t":1,"ev":"cmd","name":"fdl","state":"start"}
-{"v":1,"seq":13,"t":6,"ev":"progress","op":"loader","name":"fdl2-dl.bin","done":1040008,"total":1040008}
+{"v":1,"seq":13,"t":6,"ev":"progress","op":"loader","name":"/sdcard/spd/fdl2-dl.bin","done":1040008,"total":1040008}
 {"v":1,"seq":14,"t":6,"ev":"stage","stage":"fdl2"}
 {"v":1,"seq":15,"t":6,"ev":"cmd","name":"fdl","state":"ok"}
 {"v":1,"seq":16,"t":6,"ev":"end","rc":0,"dropped":0}
@@ -761,9 +763,15 @@ sample (`--dry-run exec_addr ... fdl ... fdl ...`):
 or the BootROM hello. Each event is one line of at most 1024 bytes (under
 `PIPE_BUF`, so a pipe takes a line whole or not at all), written once without
 blocking: `send(MSG_DONTWAIT|MSG_NOSIGNAL)` on a socket; on a pipe, FIFO or
-tty, `O_NONBLOCK` is set on the descriptor for the run and put back at the
-end (it is shared with whoever else holds that pipe end); a regular file is
-written plainly. A line the reader has no room for right now is dropped and
+tty, spdhost opens its own description of it (`/proc/self/fd/N`, with
+`O_NONBLOCK`) and writes there, so the flags of the caller's descriptor,
+and of spdhost's own stdout and stderr when FD is one of them
+(`--events 3 3>&1`), are never changed; a regular file is written plainly.
+If that private description cannot be had, spdhost refuses an FD that is
+its own stdout or stderr (`events: fd N: ...; events off`), and otherwise
+sets `O_NONBLOCK` on the shared descriptor for the run and puts it back at
+the end (a killed run cannot put it back); if even that fails, events go
+off rather than risk a blocking write. A line the reader has no room for right now is dropped and
 counted; the next line that does get through is preceded by a
 `{"v":1,"t":..,"ev":"dropped","count":N,"total":T}` line, and `end` repeats
 the total. `dropped` lines have no `seq`, so the gaps in `seq` are exactly
@@ -773,6 +781,25 @@ cannot kill spdhost (child processes it starts inherit that). A hello event
 is sent only after its try finished, never between the send and the reply.
 With events off, nothing of this runs. `SPDHOST_STATUS_FILE` is unchanged;
 every line it gets is also a `status` event.
+
+Strings in events (names, paths, status values) are always valid UTF-8:
+non-ASCII text is kept as it is, a byte that is not valid UTF-8 becomes
+`\ufffd`, and a string too long for its field is cut on a character
+boundary and ends in `\u2026` (`…`), so a cut name can be told from a
+whole one.
+
+For the app (or any other reader):
+
+- **Use a pipe or a socket**, passed as `--events FD`. A PATH is for
+  debugging: a regular file is written synchronously, and on Android's
+  `/sdcard` (FUSE) a write can stall for milliseconds under I/O load, on the
+  same thread that runs the hello and the transfer. Do not point
+  `--events` at a file under `/sdcard`.
+- **The process exit status is authoritative.** `end` is best-effort: it is
+  dropped like any other event if the reader is behind when spdhost exits,
+  and a run that stopped by `exit()` mid-command reports `end` `rc` -1 with
+  that command's `ok`/`failed` never sent. Take success or failure from the
+  exit status, and treat `end` and the last `cmd` result as optional.
 
 ### Options
 
