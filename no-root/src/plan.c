@@ -235,6 +235,19 @@ int spd_file_sha(const char *path, char out[65], uint64_t *size)
 	return 0;
 }
 
+static char *slurp(const char *path, size_t cap);
+
+/* table-last as text (malloc'd), or NULL when there is none. */
+char *spd_state_table_load(void)
+{
+	char path[1100];
+	const char *d = spd_state_dir();
+	if (!d)
+		return NULL;
+	snprintf(path, sizeof(path), "%s/table-last", d);
+	return slurp(path, 4 << 20);
+}
+
 int spd_state_table_sha(char out[65])
 {
 	char path[1100];

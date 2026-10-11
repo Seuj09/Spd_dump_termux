@@ -1673,13 +1673,52 @@ static void plan_refuse(const char *fmt, ...)
 	exit(1);
 }
 
+/* P0-4b: table-last as plan_build read it (NULL: none saved), and which side
+ * is walking it (the message differs). */
+static char *plan_tbl;
+static int plan_tbl_exec;
+
+/* 1 when table-last has a row named exactly NAME. */
+static int plan_tbl_has(const char *name)
+{
+	size_t l = strlen(name);
+	const char *p = plan_tbl;
+	while (p && *p) {
+		if (*p != '#' && !strncmp(p, name, l) && p[l] == ' ')
+			return 1;
+		p = strchr(p, '\n');
+		if (p)
+			p++;
+	}
+	return 0;
+}
+
+/* The slot a plan step binds. _a/_b name it. An unsuffixed name binds
+ * slot=active only when the saved table has no A/B twins for it: when both
+ * NAME_a and NAME_b are rows, which one "NAME" writes depends on the slot
+ * that is active when the run starts, which the plan cannot bind. So a plan
+ * (and the run that rebuilds it, before USB) refuses it and asks for the
+ * suffix. argv is never rewritten to a twin. */
 static const char *slot_of(const char *name)
 {
 	size_t l = strlen(name);
+	char ta[80], tb[80];
 	if (l > 2 && !strcmp(name + l - 2, "_a"))
 		return "a";
 	if (l > 2 && !strcmp(name + l - 2, "_b"))
 		return "b";
+	snprintf(ta, sizeof(ta), "%s_a", name);
+	snprintf(tb, sizeof(tb), "%s_b", name);
+	if (l < 70 && plan_tbl_has(ta) && plan_tbl_has(tb)) {
+		if (plan_tbl_exec)
+			fprintf(stderr, "confirm-plan: refusing '%s': this A/B table has both %s and %s, and"
+				" an unsuffixed name follows the live active slot; make a new plan with %s or %s;"
+				" nothing sent\n", name, ta, tb, ta, tb);
+		else
+			fprintf(stderr, "plan: '%s' is an A/B pair on the saved table (%s and %s): use %s or"
+				" %s on this A/B table; nothing stored\n", name, ta, tb, ta, tb);
+		exit(1);
+	}
 	return "active";
 }
 
@@ -2114,6 +2153,9 @@ static char *plan_build(int exec, int argc, char **argv, int first, const struct
 	P.f = open_memstream(&body, &blen);
 	if (!P.f)
 		plan_refuse("out of memory");
+	free(plan_tbl);
+	plan_tbl = spd_state_table_load();
+	plan_tbl_exec = exec;
 	plan_walk(&P, argc, argv, first);
 	fclose(P.f);
 	if (!npsteps)

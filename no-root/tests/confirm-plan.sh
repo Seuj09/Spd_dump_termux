@@ -269,6 +269,39 @@ check "danger-erase persist under its plan: no typed word (rc $rc)" bash -c "[ $
 run u9 --confirm-plan "$(sha_of u8b)" "${L[@]}" parts pt.txt frp-reset frp.bak; rc=$?
 check "frp-reset plan made with SPDHOST_FRP_PART=persist does not run without it (rc $rc)" bash -c "[ $rc = 1 ] && nousb u9"
 
+echo "== P0-4b: unsuffixed names on an A/B table need the suffix =="
+np=$(ls state/pending | wc -l)
+plan ab1 "${L[@]}" parts pt.txt write-part boot boot.img reset; rc=$?
+check "A/B table (boot_a + boot_b): plan write-part boot exits 1, asks for the suffix, stores nothing (rc $rc)" \
+	bash -c "[ $rc = 1 ] && grep -q \"plan: 'boot' is an A/B pair on the saved table (boot_a and boot_b): use boot_a or boot_b on this A/B table; nothing stored\" ab1.perr && ! grep -q plan-sha256 ab1.plan && [ \$(ls state/pending | wc -l) = $np ]"
+plan ab2 "${L[@]}" parts pt.txt erase-part vbmeta; r2=$?
+plan ab3 "${L[@]}" parts pt.txt read-part userdata 0 4096 u.bin write-part-plain boot boot.img; r3=$?
+check "same refusal for erase-part vbmeta and for an unsuffixed write after another step (rc $r2 $r3)" \
+	bash -c "[ $r2$r3 = 11 ] && grep -q \"'vbmeta' is an A/B pair\" ab2.perr && grep -q \"'boot' is an A/B pair\" ab3.perr"
+plan ab4 "${L[@]}" parts pt.txt write-part boot_a boot.img reset; rc=$?
+check "write-part boot_a still plans, slot=a; argv is not rewritten (rc $rc)" \
+	bash -c "[ $rc = 0 ] && grep -q 'op=write-part part=boot_a slot=a ' ab4.plan && grep -qx 'arg 12 boot_a' ab4.plan"
+printf '%s\n' 'misc 1024' 'boot 4096' 'recovery_a 1024' 'vbmeta 1024' 'userdata 8192' > ptn
+(export MOCK_PTABLE=$tmp/ptn MOCK_SLOT= SPDHOST_STATE_DIR=$tmp/stn MOCK_IMAGES=vbmeta
+ run n0 "${L[@]}" parts pt.txt
+ plan n1 "${L[@]}" parts pt.txt write-part boot boot.img reset
+ plan n2 "${L[@]}" parts pt.txt write-part recovery boot.img
+ run n1 --confirm-plan "$(sha_of n1)" "${L[@]}" parts pt.txt write-part boot boot.img reset; echo $? > n1.rc)
+check "non-A/B table (only boot): plan write-part boot keeps slot=active" \
+	bash -c "grep -q 'op=write-part part=boot slot=active ' n1.plan"
+check "one twin only (recovery_a, no recovery_b): unsuffixed recovery still plans with slot=active" \
+	grep -q 'op=write-part part=recovery slot=active ' n2.plan
+check "non-A/B: the slot=active plan runs and writes boot (rc $(cat n1.rc))" \
+	bash -c "[ \$(cat n1.rc) = 0 ] && grep -q \"step 1 authorized: write 'boot'\" n1.log && cmp -s store/boot boot.orig"
+(export MOCK_PTABLE=$tmp/ptn MOCK_SLOT= SPDHOST_STATE_DIR=$tmp/stn MOCK_IMAGES=vbmeta
+ plan n3 "${L[@]}" parts pt.txt write-part boot boot.img reset)
+SN3=$(sha_of n3)
+cp state/table-last stn/table-last
+(export SPDHOST_STATE_DIR=$tmp/stn
+ run n3 --confirm-plan "$SN3" "${L[@]}" parts pt.txt write-part boot boot.img reset; echo $? > n3.rc)
+check "stale pending plan with unsuffixed boot, table now A/B: execute refused before USB, nonce not consumed (rc $(cat n3.rc))" \
+	bash -c "[ \$(cat n3.rc) = 1 ] && grep -q \"confirm-plan: refusing 'boot': this A/B table has both boot_a and boot_b\" n3.log && nousb n3 && [ -f stn/pending/$SN3.plan ] && [ ! -e stn/used/$(sed -n "s/^nonce=//p" n3.plan) ]"
+
 echo "== CLI default unchanged, no --yes path, caps =="
 run d1 "${L[@]}" parts pt.txt write-part boot_a boot.img reset; rc=$?
 check "without --confirm-plan and no tty: still the typed-confirm refusal, nothing written (rc $rc)" \
