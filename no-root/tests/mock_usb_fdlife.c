@@ -12,6 +12,12 @@
  *   reacq_wrapfail  ... the first reacquire wrap fails, the next one succeeds
  *   reacq_adoptfail ... the first reacquired fd wraps but adopt() (claim) fails
  *   scan            open by vid:pid (libusb owns that fd), reacquire, close
+ *   sock            (P0-5) fd from --usb-fd-sock MOCK_SOCK, reacquire (REACQ
+ *                   stub answers no), close; tests/usb-fd-sock.sh
+ *   sock_get        only spd_usb_sock_get_fd(MOCK_SOCK): prints `ev sock_get
+ *                   fd=<ok|-1>`. Built with -DMOCK_WRAP_GETUID and
+ *                   -Wl,--wrap=getuid, MOCK_UID=N fakes this process's uid
+ *                   so the SO_PEERCRED refusal can be seen without root.
  *
  * fd numbers are reused by the kernel, so each wrapped fd is identified by
  * the inode of the file behind it (every descriptor the test hands over is a
@@ -46,6 +52,15 @@ static void out(const char *fmt, ...)
 	putchar('\n');
 	fflush(stdout);
 }
+
+#ifdef MOCK_WRAP_GETUID
+uid_t __real_getuid(void);
+uid_t __wrap_getuid(void)
+{
+	const char *e = getenv("MOCK_UID");
+	return e && e[0] ? (uid_t)strtoul(e, NULL, 10) : __real_getuid();
+}
+#endif
 
 /* ------------------------------------------------------------- fd records */
 #define MAXREC 32
@@ -314,7 +329,22 @@ int main(int argc, char **argv)
 	}
 	build_descriptors();
 	scan = !strcmp(mode, "scan");
-	if (scan) {
+	if (!strcmp(mode, "sock_get")) {
+		int sk = -1, fd = spd_usb_sock_get_fd(getenv("MOCK_SOCK"), &sk);
+		out("ev sock_get fd=%s sock=%s", fd >= 0 ? "ok" : "-1", sk >= 0 ? "ok" : "-1");
+		return 0;
+	}
+	if (!strcmp(mode, "sock")) {
+		int sk = -1, fd = spd_usb_sock_get_fd(getenv("MOCK_SOCK"), &sk);
+		if (fd < 0) {
+			out("ev sock_get fd=-1");
+			return 1;
+		}
+		spd_usb_open(&u, fd, 0x1782, 0x4d00, 1000);
+		spd_usb_attach_sock(&u, sk);
+		out("ev opened wrapped_fd=%s sock_mode=%d cloexec=%d", u.wrapped_fd == fd ? "fd" : "WRONG",
+			u.sock_mode, (fcntl(fd, F_GETFD) & FD_CLOEXEC) ? 1 : 0);
+	} else if (scan) {
 		spd_usb_open(&u, -1, 0x1782, 0x4d00, 1000);
 	} else {
 		const char *p = getenv("MOCK_FD0");

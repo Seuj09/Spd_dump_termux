@@ -654,6 +654,7 @@ cap=parts-header
 cap=status-file
 cap=unpac
 cap=usb-fd
+cap=usb-fd-sock
 end
 ```
 
@@ -688,6 +689,7 @@ end
 | `status-file` | `SPDHOST_STATUS_FILE` gets one `key=value` line per result |
 | `unpac` | `unpac {list\|check\|extract} FILE.pac` |
 | `usb-fd` | `--usb-fd N` / `TERMUX_USB_FD` adopt an open usbfs descriptor |
+| `usb-fd-sock` | `--usb-fd-sock PATH`: take the descriptor from an app's unix socket (see "USB fd socket") |
 
 The menu decides whether the built-in image tools (`[8]` unlock) and `unpac`
 (`[16]`) are there from `caps`, not from usage text. An spdhost older than
@@ -724,7 +726,7 @@ does not know. The types:
 | `ev` | fields | when |
 |---|---|---|
 | `start` | `build_sha`, `build_dirty`, `protocol`, `pid` | first line |
-| `session` | `usb`: `fd`, `scan` or `dry` | the device is open (or dry-run) |
+| `session` | `usb`: `fd`, `sock`, `scan` or `dry` | the device is open (or dry-run) |
 | `stage` | `stage`: `brom`, `fdl1`, `fdl2` | the device reached a stage |
 | `cmd` | `name`, `state`: `start`, `ok`, `failed` | each command on the command line |
 | `hello` | `stage` (`brom`/`loader`), `try`, `of`, `result`, `ms` (BootROM only) | after each hello try |
@@ -807,6 +809,7 @@ Options go before the commands, and never in front of the device path.
 
 ```
 --usb-fd N        adopt an already-open usbfs descriptor
+--usb-fd-sock PATH take the descriptor from an app's unix socket (see "USB fd socket")
 --vid/--pid       desktop enumeration (default 1782:4d00)
 --timeout MS      bulk timeout (default 1000)
 --step N          partition chunk size, decimal or 0x hex; clamped to 0xf800
@@ -857,6 +860,37 @@ spdhost-usb /dev/bus/usb/001/002 -- \
 
 `TERMUX_USB_FD` (or `SPD_USB_FD`) is the same as `--usb-fd` when neither is
 given.
+
+### USB fd socket
+
+`--usb-fd-sock PATH` is how an app (the planned APK) hands spdhost the phone
+without Termux: the app holds the `UsbDeviceConnection`, listens on a
+filesystem-path unix stream socket in its private directory, and starts
+spdhost with this option. Termux users never need it; `spdhost-usb`,
+`--usb-fd` and `TERMUX_USB_FD` work exactly as before.
+
+```
+spdhost -> app   connect(PATH); the app's uid must equal spdhost's (SO_PEERCRED),
+                 otherwise spdhost refuses and sends nothing
+spdhost -> app   "HELLO 1\n"
+app -> spdhost   1 byte 'F' carrying the usbfs fd (SCM_RIGHTS)
+                 (a byte without an fd, EOF, or nothing within 10 s = refused, exit 1)
+... the session runs on that fd, exactly as with --usb-fd ...
+spdhost -> app   "REACQ vid=1782\n"   only if a transfer finds the device gone
+app -> spdhost   1 byte 'N', no fd = no (spdhost does not reopen; same as a
+                 failed reopen today). No answer within 5 s also means no.
+spdhost closes the socket when the session ends.
+```
+
+- PATH must be shorter than 108 bytes (`sun_path`). Use a path socket in an
+  app-private directory, not the abstract namespace, and unlink it after the
+  session.
+- In this build REACQ is a stub: the app answers `N`, and an fd sent in reply
+  is closed unused. Reconnecting through the socket comes later, after the
+  post-FDL reconnect work (P4) is approved; reacquire never runs mid-hello.
+- Cannot be combined with `--usb-fd` or `--dry-run` (exit 2). When it is
+  given, `TERMUX_USB_FD`/`SPD_USB_FD` are ignored.
+- `--events` reports `"usb":"sock"` in the `session` event.
 
 ## misc BCB images (phone data, not host ISA)
 

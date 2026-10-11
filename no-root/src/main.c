@@ -77,6 +77,8 @@ static void usage(void)
 		"Options:\n"
 		"  --usb-fd N          adopt an already-open usbfs descriptor\n"
 "  env TERMUX_USB_FD / SPD_USB_FD  same as --usb-fd when unset\n"
+		"  --usb-fd-sock PATH  take the usbfs descriptor from an app's unix socket\n"
+		"                      (same uid only; README \"USB fd socket\")\n"
 		"  --vid/--pid         desktop enumeration (default 1782:4d00)\n"
 		"  --timeout MS        bulk timeout (default 1000)\n"
 		"  --step N            partition chunk size, decimal or 0x hex; clamped to\n"
@@ -1520,6 +1522,7 @@ static const char *const spd_caps[] = {
 	"status-file",   /* SPDHOST_STATUS_FILE key=value result lines */
 	"unpac",         /* unpac {list|extract|check} FILE.pac */
 	"usb-fd",        /* --usb-fd N / TERMUX_USB_FD: wrap an open usbfs fd */
+	"usb-fd-sock",   /* --usb-fd-sock PATH: fd via SCM_RIGHTS; REACQ stub (README) */
 };
 
 static int is_sha1_hex(const char *s)
@@ -2469,6 +2472,7 @@ static int spdhost_main(int argc, char **argv)
 {
 	static const struct option opts[] = {
 		{"usb-fd", required_argument, NULL, 'f'},
+		{"usb-fd-sock", required_argument, NULL, 'U'},
 		{"vid", required_argument, NULL, 'V'},
 		{"pid", required_argument, NULL, 'P'},
 		{"timeout", required_argument, NULL, 't'},
@@ -2503,6 +2507,8 @@ static int spdhost_main(int argc, char **argv)
 	const char *part_xml_dir = NULL;
 	const char *events_spec = NULL;
 	const char *confirm_plan = NULL;
+	const char *usb_sock = NULL;
+	int usb_sock_fd = -1;
 	struct popts popts;
 
 	/* --part-xml wins, but the env var is how the menu configures it for a
@@ -2629,6 +2635,13 @@ static int spdhost_main(int argc, char **argv)
 			}
 			events_spec = optarg;
 			break;
+		case 'U':
+			if (!optarg[0]) {
+				fprintf(stderr, "bad --usb-fd-sock: empty path\n");
+				return 2;
+			}
+			usb_sock = optarg;
+			break;
 		default:
 			usage();
 			return c == 'h' ? 0 : 2;
@@ -2643,6 +2656,13 @@ static int spdhost_main(int argc, char **argv)
 	}
 	plan_self_path = self_path;
 	memset(&popts, 0, sizeof(popts));
+	/* P0-5: one descriptor source. --usb-fd-sock is explicit, so it also wins
+	 * over TERMUX_USB_FD/SPD_USB_FD (ignored below); --dry-run opens no USB. */
+	if (usb_sock && (fd >= 0 || dry)) {
+		fprintf(stderr, "spdhost: --usb-fd-sock cannot be combined with %s\n",
+			fd >= 0 ? "--usb-fd" : "--dry-run");
+		return 2;
+	}
 	popts.step = step;
 	popts.step_set = step_set;
 	popts.spd_dump_slot = spd_dump_slot;
@@ -2781,7 +2801,7 @@ static int spdhost_main(int argc, char **argv)
 	 * inside an if with an empty body, which -Wempty-body flagged.) */
 	if (!envfd || !envfd[0])
 		envfd = getenv("SPD_USB_FD");
-	if (fd < 0 && envfd && envfd[0]) {
+	if (fd < 0 && !usb_sock && envfd && envfd[0]) {
 		char *end = NULL;
 		long v;
 		errno = 0;
@@ -2819,10 +2839,17 @@ static int spdhost_main(int argc, char **argv)
 		line = 0;
 		fprintf(stderr, "dry-run: no USB; packet sequence on stdout\n");
 	} else {
+		if (usb_sock) {
+			fd = spd_usb_sock_get_fd(usb_sock, &usb_sock_fd);
+			if (fd < 0)
+				return 1;
+		}
 		spd_usb_open(&io->usb, fd, vid, pid, timeout);
 		spd_usb_enable_reacquire(&io->usb, self_path);
+		if (usb_sock)
+			spd_usb_attach_sock(&io->usb, usb_sock_fd);
 	}
-	SPD_EV("session", "\"usb\":\"%s\"", dry ? "dry" : fd >= 0 ? "fd" : "scan");
+	SPD_EV("session", "\"usb\":\"%s\"", dry ? "dry" : usb_sock ? "sock" : fd >= 0 ? "fd" : "scan");
 
 	for (i = optind; i < argc; ) {
 		const char *cmd = argv[i];

@@ -28,6 +28,8 @@ struct spd_usb {
 	int wrapped_fd;    /* fd handed to libusb_wrap_sys_device; -1 if none.
 	                    * libusb never closes it (not even in libusb_close), so
 	                    * spdhost does, after libusb_close: see drop_handle(). */
+	int sock_mode;     /* P0-5: fd came over --usb-fd-sock; sock_fd is the channel */
+	int sock_fd;       /* that connected socket (valid only when sock_mode) */
 	unsigned vid;
 	unsigned pid;
 	char self_path[512];
@@ -43,8 +45,19 @@ void spd_usb_enable_reacquire(struct spd_usb *u, const char *self_path);
 /* Called by the process termux-usb starts. Sends TERMUX_USB_FD to sock_path. */
 int spd_usb_emit_fd(const char *sock_path, const char *argv_fd);
 
+/* P0-5 --usb-fd-sock (the app's hand-off; README "USB fd socket").
+ * Connects to the filesystem-path unix socket PATH, refuses unless the
+ * server's SO_PEERCRED uid equals getuid(), sends "HELLO 1\n" and receives
+ * the usbfs descriptor via SCM_RIGHTS (recv_fd). Returns that fd and stores
+ * the connected socket in *sock_out; -1 on any failure (reason on stderr). */
+int spd_usb_sock_get_fd(const char *path, int *sock_out);
+/* After spd_usb_open() on that fd: keep the socket as the reacquire channel
+ * (REACQ is answered "no" by the P0 app stub). spd_usb_close() closes it. */
+void spd_usb_attach_sock(struct spd_usb *u, int sock);
+
 /* Close the dead handle and open the device again.
  * Desktop: scan vid:pid. Termux: ask termux-usb for a new descriptor.
+ * --usb-fd-sock: send REACQ over the socket (P0 stub: always "no").
  * Returns 0 on success. */
 int spd_usb_reacquire(struct spd_usb *u);
 

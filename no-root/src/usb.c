@@ -484,6 +484,11 @@ void spd_usb_close(struct spd_usb *u)
 	if (g_live_usb == u)
 		g_live_usb = NULL;
 	drop_handle(u);
+	if (u->sock_mode) {
+		close(u->sock_fd);
+		u->sock_mode = 0;
+		u->sock_fd = -1;
+	}
 	if (u->ctx)
 		libusb_exit(u->ctx);
 	u->handle = NULL;
@@ -681,6 +686,176 @@ int spd_usb_emit_fd(const char *sock_path, const char *argv_fd)
 	}
 	close(sock);
 	return 0;
+}
+
+/* ---- P0-5: --usb-fd-sock (README "USB fd socket") ------------------------
+ * The app (Android: a LocalServerSocket on a filesystem path in its private
+ * dir) holds the UsbDeviceConnection and passes its fd to spdhost:
+ *   spdhost -> app   "HELLO 1\n"
+ *   app -> spdhost   one byte 'F' carrying the usbfs fd (SCM_RIGHTS)
+ *                    (any reply without an fd, or EOF = refused)
+ * and later, when a transfer finds the device gone:
+ *   spdhost -> app   "REACQ vid=1782\n"
+ *   app -> spdhost   one byte 'N', no fd = no (the P0 stub's only answer)
+ * Before anything is sent the server must be this uid (SO_PEERCRED). */
+#define SOCK_HELLO_MS 10000
+#define SOCK_REACQ_MS 5000
+
+static int sock_send_line(int sock, const char *line)
+{
+	size_t len = strlen(line), off = 0;
+	while (off < len) {
+		ssize_t n = send(sock, line + off, len - off, MSG_NOSIGNAL);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+/* 1 readable, 0 timed out, -1 error. Interrupt-aware like the other loops. */
+static int sock_wait(int sock, int ms)
+{
+	struct pollfd p;
+	long long end = mono_ms() + ms;
+	for (;;) {
+		long long left = end - mono_ms();
+		int r;
+		if (spd_interrupted)
+			return -1;
+		if (left <= 0)
+			return 0;
+		p.fd = sock;
+		p.events = POLLIN;
+		p.revents = 0;
+		r = poll(&p, 1, left > 250 ? 250 : (int)left);
+		if (r > 0)
+			return 1;
+		if (r < 0 && errno != EINTR)
+			return -1;
+	}
+}
+
+int spd_usb_sock_get_fd(const char *path, int *sock_out)
+{
+	struct sockaddr_un addr;
+	struct ucred cr;
+	socklen_t crlen = sizeof(cr);
+	int sock, fd, r;
+	uid_t me;
+
+	*sock_out = -1;
+	if (!path || !path[0]) {
+		fprintf(stderr, "--usb-fd-sock: empty path\n");
+		return -1;
+	}
+	if (strlen(path) >= sizeof(addr.sun_path)) {
+		fprintf(stderr, "--usb-fd-sock: path is %zu bytes; a unix socket path must be < %zu\n",
+			strlen(path), sizeof(addr.sun_path));
+		return -1;
+	}
+	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (sock < 0) {
+		perror("--usb-fd-sock: socket");
+		return -1;
+	}
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	memcpy(addr.sun_path, path, strlen(path) + 1);
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		fprintf(stderr, "--usb-fd-sock: connect %s: %s\n", path, strerror(errno));
+		close(sock);
+		return -1;
+	}
+	/* Who is listening: only our own uid may hand us a device (P0-5 §8a). */
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) < 0 || crlen < sizeof(cr)) {
+		fprintf(stderr, "--usb-fd-sock: refused: cannot read the server's credentials (SO_PEERCRED): %s\n",
+			strerror(errno));
+		close(sock);
+		return -1;
+	}
+	me = getuid();
+	if (cr.uid != me) {
+		fprintf(stderr, "--usb-fd-sock: refused: socket server uid %u is not this process's uid %u\n",
+			(unsigned)cr.uid, (unsigned)me);
+		close(sock);
+		return -1;
+	}
+	if (sock_send_line(sock, "HELLO 1\n")) {
+		fprintf(stderr, "--usb-fd-sock: HELLO send failed: %s\n", strerror(errno));
+		close(sock);
+		return -1;
+	}
+	r = sock_wait(sock, SOCK_HELLO_MS);
+	if (r <= 0) {
+		fprintf(stderr, "--usb-fd-sock: %s\n",
+			r == 0 ? "no descriptor from the server within 10 s" : "interrupted or poll failed");
+		close(sock);
+		return -1;
+	}
+	fd = recv_fd(sock);
+	if (fd < 0) {
+		fprintf(stderr, "--usb-fd-sock: the server sent no descriptor (refused or closed)\n");
+		close(sock);
+		return -1;
+	}
+	/* Keep fds 0..2 free for stdio, and do not leak the device into children. */
+	if (fd < 3) {
+		int hi = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+		close(fd);
+		if (hi < 0) {
+			perror("--usb-fd-sock: dup");
+			close(sock);
+			return -1;
+		}
+		fd = hi;
+	} else {
+		int fl = fcntl(fd, F_GETFD);
+		if (fl >= 0)
+			fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+	}
+	*sock_out = sock;
+	return fd;
+}
+
+void spd_usb_attach_sock(struct spd_usb *u, int sock)
+{
+	if (!u || sock < 0)
+		return;
+	u->sock_mode = 1;
+	u->sock_fd = sock;
+}
+
+/* REACQ over the socket. P0 stub: the app always answers "no", and a reply
+ * that does carry an fd is not used either (the yes-path is P2-R, after P4):
+ * the result is the same as today's failed reopen. */
+static int grab_sock(struct spd_usb *u)
+{
+	char req[32];
+	int r, got;
+
+	snprintf(req, sizeof(req), "REACQ vid=%04x\n", u->vid & 0xffff);
+	if (sock_send_line(u->sock_fd, req)) {
+		fprintf(stderr, "fd socket: REACQ send failed (%s); not reopening\n", strerror(errno));
+		return -1;
+	}
+	r = sock_wait(u->sock_fd, SOCK_REACQ_MS);
+	if (r <= 0) {
+		fprintf(stderr, "fd socket: %s; not reopening\n",
+			r == 0 ? "no REACQ answer within 5 s" : "interrupted while waiting for the REACQ answer");
+		return -1;
+	}
+	got = recv_fd(u->sock_fd);
+	if (got >= 0) {
+		close(got);
+		fprintf(stderr, "fd socket: the app offered a new descriptor, but this build only has the"
+			" REACQ stub; not reopening\n");
+		return -1;
+	}
+	fprintf(stderr, "fd socket: the app answered no to REACQ; not reopening\n");
+	return -1;
 }
 
 /* Whole stdout, capped at 64 KiB. A 256-byte fgets splits one JSON line
@@ -1062,6 +1237,8 @@ int spd_usb_reacquire(struct spd_usb *u)
 	u->stalled = 0;
 	/* Give the host stack a moment to drop the old node. */
 	usleep(300000);
+	if (u->sock_mode)
+		return grab_sock(u);
 	if (u->fd_mode)
 		return grab_termux(u);
 	return grab_enum(u);
