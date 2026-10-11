@@ -136,7 +136,7 @@ PY
 TOKB=$(printf 'spdhost-set-active b none\n' | sha256sum | awk '{print $1}')
 python3 "$drive" m8.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'yes\r\n' -- "export M=8; source $tmp/menu_env.sh; set_slot_menu"; rc=$?
 check "menu [3]->[2] slot b: ONE session, token = sha256 of the patch line, set-active b reset, no --yes (rc $rc)" \
-	bash -c "grep -q 'confirm token (sha256 of the patch: slot b, BCB for reset): $TOKB' m8.pty && grep '^+ ' m8.pty | grep -q -- '--confirm-token=$TOKB' && grep '^+ ' m8.pty | grep -q 'misc-backup .* set-active b reset' && [ \$(grep -c '^+ ' m8.pty) = 1 ] && ! grep '^+ ' m8.pty | grep -q -- '--yes'"
+	bash -c "grep -q 'confirm token (sha256 of the patch: slot b, BCB for reset): $TOKB' m8.pty && grep '^+ ' m8.pty | grep -q -- '--confirm-token=$TOKB' && grep '^+ ' m8.pty | tr -d '\\r' | grep -q 'parts .* ops set-active b $tmp/mdump --ending reset\$' && [ \$(grep -c '^+ ' m8.pty) = 1 ] && ! grep '^+ ' m8.pty | grep -q -- '--yes'"
 check "menu [3]->[2] slot b: whole misc written byte-for-byte (slot_b at 0x800), read back, reset; results reported apart" \
 	bash -c "grep -q 'confirm-token matches' m8.err && grep -q 'misc-verify: OK' m8.err && tail -1 m8.seq | grep -q '^SEQ 05 ' && cmp -s m8.misc misc.slotB.exp && grep -q 'misc verify: OK' m8.pty && grep -q 'reset: acknowledged' m8.pty"
 python3 "$drive" m9.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'no\r\n' -- "export M=9; source $tmp/menu_env.sh; set_slot_menu"; rc=$?
@@ -159,7 +159,7 @@ PY
 python3 "$drive" m10.pty --raw "Choice:" '2\n' "y = continue" 'y\n' "type yes to set the active slot" 'yes\r\n' -- \
 	"export M=10 MOCK_MISC_IN=$tmp/misc.slotB.exp; source $tmp/menu_env.sh; BOOT_AFTER=reboot-fastboot; set_slot_menu"; rc=$?
 check "menu slot b + fastbootd ending: set-active b --bcb fastboot, ONE --confirm-token over slot+BCB (rc $rc)" \
-	bash -c "grep -q 'Ending is reboot-fastboot: its 2048-byte BCB is part of this one misc write' m10.pty && grep '^+ ' m10.pty | grep -q -- '--confirm-token=$TOKFB' && grep '^+ ' m10.pty | tr -d '\\r' | grep -q 'set-active b --bcb fastboot\$' && [ \$(grep -o -- '--confirm-token=[0-9a-f]\{64\}' m10.pty | sort -u | wc -l) = 1 ] && ! grep '^+ ' m10.pty | grep -q -- '--yes'"
+	bash -c "grep -q 'Ending is reboot-fastboot: its 2048-byte BCB is part of this one misc write' m10.pty && grep '^+ ' m10.pty | grep -q -- '--confirm-token=$TOKFB' && grep '^+ ' m10.pty | tr -d '\\r' | grep -q 'ops set-active b $tmp/mdump --bcb fastboot\$' && [ \$(grep -o -- '--confirm-token=[0-9a-f]\{64\}' m10.pty | sort -u | wc -l) = 1 ] && ! grep '^+ ' m10.pty | grep -q -- '--yes'"
 check "menu slot b + fastbootd: written misc = BCB at 0, live bytes (slot_b at 0x800) after it, reset" \
 	bash -c "cmp -s m10.misc misc.slotB.fb.exp && tail -1 m10.seq | grep -q '^SEQ 05 '"
 

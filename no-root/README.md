@@ -838,6 +838,69 @@ all_lite, imei, the presets) and `images list` for the restore and
 "copy dumps to the flash folder" pickers when caps list them; an older
 binary keeps the bash path.
 
+### ops misc-reboot / ops set-active (P0-8)
+
+The guarded misc writes the menu's `guarded_misc_session` did in bash, now in
+the core (one implementation for menu.sh and the app):
+
+```
+spdhost [--confirm-token SHA | --confirm-plan SHA] fdl ... fdl ... parts FILE \
+    ops misc-reboot recovery|fastboot DIR [--expect SHA256]
+spdhost [--confirm-token SHA | --confirm-plan SHA] fdl ... fdl ... parts FILE \
+    ops set-active a|b DIR [--bcb recovery|fastboot] [--ending reset|power-off] [--expect SHA256]
+```
+
+One session, **one** misc write:
+
+1. the whole misc (size from the live table, or the device's probe on an
+   unverified table: `misc-bytes=`) is read into a fresh
+   `DIR/meta/misc-before-<time>.img` (never an existing name) and read back
+   from disk; if that fails nothing is written;
+2. its sha256 goes into `DIR/meta/SHA256SUMS` (relative to DIR) **before** the
+   write;
+3. `--expect SHA256`: stop here unless the misc just read hashes to it (the
+   backup is kept);
+4. the gate: `--confirm-token` (`misc-reboot`: sha256 of the 2048-byte BCB, as
+   for `reboot-recovery`/`reboot-fastboot`; `set-active`: sha256 of the line
+   `spdhost-set-active <a|b> <BCB sha256|none>\n`), a `--confirm-plan` step, or
+   the typed confirm. **`--yes` is refused** (exit 2);
+5. the BCB and/or the 32-byte slot block at 0x800 are spliced into the misc
+   just read, the whole misc is written and read back (`misc-verify=`);
+6. the ending: `misc-reboot` and `set-active --bcb` reset; `set-active
+   --ending reset|power-off` ends that way; plain `set-active` leaves the
+   ending to the next argv. The ending's result (`reset=` / `power-off=`) is
+   reported apart from `misc-verify=` (a lost ack after a verified misc is not
+   a failed write).
+
+`set-active` refuses a table without `uboot_a`/`uboot_b` (not A/B) before it
+reads anything, and takes only an explicit `a` or `b`. `misc-reboot` follows
+the live slot (the BCB is slot-independent; the boot/vbmeta check before it
+reads the active slot's images).
+
+**Keep rule (A4, audit6 C10):** a backup that read back OK is never deleted,
+whatever happens after it (expect mismatch, refused gate, failed write or
+verify, lost reset ack). The only file removed is one that failed its own
+read-back, and then no write was reached. Status lines (and `status` events):
+`misc-backup=meta/misc-before-<time>.img`, `misc-bytes=N`,
+`misc-backup-sha256=HEX`, `misc-backup-state=kept|removed`, then
+`misc-verify=ok|failed|not-reached` and `reset=`/`power-off=`. Events:
+`misc-backup` (`op`, `dir`, `file`, `bytes`, `sha256`) and `op` (`op`
+`misc-reboot`/`set-active`, `target`, `state` `ok`/`failed`/`refused`,
+`misc_verify`, `ending` (`ack`, `left-bus`, `timeout`, ..., `not-run`, or
+`caller`), `backup`, `backup_state`, or `why`: `no-table`, `not-ab`,
+`backup-dir`, `backup`, `sha256sums`, `misc-changed`).
+
+`plan` takes both ops: the step is the same as `reboot-*` / `set-active`
+(op, slot, the BCB or patch-line sha256), plus `backup-dir` and `expect`
+lines, so a run with another DIR or digest is refused before USB. The
+reboot/BCB ops still follow the **live** active slot (Debugger P2 note).
+
+caps: `ops-misc`. menu.sh runs these ops for reboot-recovery,
+reboot-fastboot and set-slot when caps list `ops-misc` (the core picks the
+backup name, records and keeps it; the menu only reports); restore misc,
+wipe-userdata and the slot-image write, and an older binary, keep the bash
+path.
+
 ### Event channel
 
 `--events FD|PATH` makes spdhost write progress as JSON lines, one object per
@@ -876,6 +939,8 @@ does not know. The types:
 | `preflight` | `op` (`dump`), `files`, `need`, `headroom`, `avail` (-1 unknown), `slot`, `table_verified`, `ok` | `ops dump`, after the table and slot, before the first read |
 | `dump-file` | `name`, `file`, `bytes`, `state` (`ok`/`failed`/`unverified`/`missing`), `sha256` (ok only) | `ops dump`, each file after the reads |
 | `op` | `op` (`dump`), `state` (`ok`/`failed`/`refused`), `files`, `failed` or `why` | `ops dump` finished |
+| `misc-backup` | `op`, `dir`, `file` (relative to `dir`), `bytes`, `sha256` | `ops misc-reboot`/`set-active`, the backup read back and recorded |
+| `op` | `op` (`misc-reboot`/`set-active`), `target`, `state`, `misc_verify`, `ending`, `backup`, `backup_state`, or `why` | a misc op finished or refused |
 | `dropped` | `count`, `total` (no `seq`) | events were lost, see below |
 | `end` | `rc`, `dropped` | last line; `rc` -1 when the run stopped by `exit()` mid-command |
 

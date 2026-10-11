@@ -2708,11 +2708,43 @@ smoke_test() {
 # No --yes: the caller already took a typed "yes" (MISC_CONFIRM_TOKEN =
 # sha256 of the bytes to write); it is passed once as --confirm-token and
 # cleared, so it authorizes exactly this one misc write.
+# P0-8: when spdhost advertises cap=ops-misc, a reboot-recovery/-fastboot or
+# set-active session runs `ops misc-reboot` / `ops set-active` instead: the
+# core picks DUMP_DIR/meta/misc-before-<time>.img, records it in
+# meta/SHA256SUMS before the write and applies the keep rule itself (a backup
+# that read back OK is never removed). The menu only reports. Other misc
+# writes (restore, wipe, slot image) and an older spdhost keep the path below.
 MISC_EXPECT_SHA=""
+# guarded_misc_ops_argv KIND-ARGV...: prints the ops argv (one per line) for
+# a misc op the core can run, or nothing.
+guarded_misc_ops_argv() {
+	local -a o
+	case ${1:-} in
+		reboot-recovery|reboot-fastboot)
+			(( $# == 1 )) || return 0
+			o=(ops misc-reboot "${1#reboot-}" "$DUMP_DIR")
+			;;
+		set-active)
+			[[ ${2:-} == [ab] ]] || return 0
+			o=(ops set-active "$2" "$DUMP_DIR")
+			shift 2
+			if (( $# == 2 )) && [[ $1 == --bcb && ( $2 == recovery || $2 == fastboot ) ]]; then
+				o+=(--bcb "$2")
+			elif (( $# == 1 )) && [[ $1 == reset || $1 == power-off ]]; then
+				o+=(--ending "$1")
+			else
+				return 0 # a shape the core op does not take: the older path
+			fi
+			;;
+		*) return 0 ;;
+	esac
+	printf '%s\n' "${o[@]}"
+}
+
 guarded_misc_session() {
 	local kind=$1 ts backup raw rc want sz tok=$MISC_CONFIRM_TOKEN expect=$MISC_EXPECT_SHA
-	local -a backup_cmd
-	local mbytes
+	local -a backup_cmd ops_argv=()
+	local mbytes bstate brel line
 	shift
 	# MISC_EXPECT_SHA (one-shot, like the token): the sha256 misc had when the
 	# caller read it in an EARLIER session. The backup then becomes
@@ -2738,19 +2770,30 @@ guarded_misc_session() {
 	fi
 	ts=$(date +%Y%m%d-%H%M%S)
 	mkdir -p "$DUMP_DIR"
-	backup="$(dump_meta_dir)/misc-before-$ts.img"
-	raw=$(parts_cache_path)
-	echo "misc will be backed up to $backup first; the write is skipped if that fails."
-	ready || return 1
-	if [[ -n $expect ]]; then
-		if [[ ! $expect =~ ^[0-9a-f]{64}$ ]]; then
-			echo "menu: bad expected misc sha256 for $kind; nothing written" >&2
-			return 1
-		fi
-		backup_cmd=(misc-backup-expect "$backup" "$expect")
-	else
-		backup_cmd=(misc-backup "$backup")
+	if [[ -n $expect && ! $expect =~ ^[0-9a-f]{64}$ ]]; then
+		echo "menu: bad expected misc sha256 for $kind; nothing written" >&2
+		return 1
 	fi
+	if spdhost_has_cap ops-misc; then
+		while IFS= read -r line; do ops_argv+=("$line"); done < <(guarded_misc_ops_argv "$@")
+	fi
+	raw=$(parts_cache_path)
+	if (( ${#ops_argv[@]} )); then
+		backup=
+		echo "misc will be backed up to $DUMP_DIR/meta/misc-before-<time>.img first; the write is skipped if that fails."
+		[[ -n $expect ]] && ops_argv=("${ops_argv[@]:0:4}" --expect "$expect" "${ops_argv[@]:4}")
+		set -- "${ops_argv[@]}"
+		backup_cmd=()
+	else
+		backup="$(dump_meta_dir)/misc-before-$ts.img"
+		echo "misc will be backed up to $backup first; the write is skipped if that fails."
+		if [[ -n $expect ]]; then
+			backup_cmd=(misc-backup-expect "$backup" "$expect")
+		else
+			backup_cmd=(misc-backup "$backup")
+		fi
+	fi
+	ready || return 1
 	# spdhost appends misc-verify=... and reset=/power-off=... here, so the
 	# two results are reported apart (H1): a lost reset ack after a verified
 	# misc is not a failed misc write, and a verified misc is not a reset.
@@ -2764,6 +2807,8 @@ guarded_misc_session() {
 	# unverified table, not the cached row). Older spdhost: the table row.
 	mbytes=$( [[ -n $st ]] && awk -F= '$1 == "misc-bytes" { v = $2 } END { print v }' "$st" 2>/dev/null)
 	endres=$( [[ -n $st ]] && awk -F= '$1 == "reset" || $1 == "power-off" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	brel=$( [[ -n $st ]] && awk -F= '$1 == "misc-backup" { v = $2 } END { print v }' "$st" 2>/dev/null)
+	bstate=$( [[ -n $st ]] && awk -F= '$1 == "misc-backup-state" { v = $2 } END { print v }' "$st" 2>/dev/null)
 	[[ -n $st ]] && rm -f "$st"
 	case $verify in
 		ok) echo "misc verify: OK (the whole misc was read back and matches)" ;;
@@ -2779,29 +2824,50 @@ guarded_misc_session() {
 		*) [[ $verify == ok ]] && echo "$ending: not run" ;;
 	esac
 	load_parts_state >/dev/null 2>&1
-	if [[ $mbytes =~ ^[0-9]+$ ]] && (( mbytes > 0 )); then
-		want=$mbytes
+	if (( ${#ops_argv[@]} )); then
+		# The core sized, verified, recorded and kept (or removed) the backup.
+		backup=${brel:+$DUMP_DIR/$brel}
+		case $bstate in
+			kept)
+				echo "misc backup: $backup (recorded in meta/SHA256SUMS; kept)"
+				echo "To restore misc later (typed confirm, no --yes):"
+				echo "  bash scripts/spdhost-usb fdl <fdl1> $FDL1_ADDR fdl <fdl2> $FDL2_ADDR write-part misc $backup reset"
+				echo "  (or menu [2] -> [6] restore misc from a backup)"
+				;;
+			removed)
+				echo "misc backup failed its read-back: the write was NOT done (spdhost removed the incomplete file)." >&2
+				(( rc != 0 )) || rc=1
+				;;
+			*)
+				echo "misc backup: not taken (spdhost stopped before it); nothing written." >&2
+				(( rc != 0 )) || rc=1
+				;;
+		esac
 	else
-		want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
-		[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
-	fi
-	sz=$(stat -c %s "$backup" 2>/dev/null || echo -1)
-	if (( sz == want )); then
-		record_sha256 "$backup"
-		echo "To restore misc later (typed confirm, no --yes):"
-		echo "  bash scripts/spdhost-usb fdl <fdl1> $FDL1_ADDR fdl <fdl2> $FDL2_ADDR write-part misc $backup reset"
-		echo "  (or menu [2] -> [6] restore misc from a backup)"
-	elif (( rc == 0 )); then
-		echo "backup size $sz differs from the table ($want bytes). spdhost exited 0, so the write did happen. Backup kept: $backup" >&2
-	elif [[ -n $verify ]]; then
-		# C10: the misc write was reached (verified, failed or partial), so
-		# this file may be the only copy of the old misc. Never delete it.
-		echo "misc backup is $sz bytes (expected $want); the misc write WAS attempted (verify: $verify). Backup kept: $backup" >&2
-		rc=1
-	else
-		echo "misc backup missing or wrong size ($sz of $want bytes): the write was NOT done." >&2
-		rm -f "$backup"
-		rc=1
+		if [[ $mbytes =~ ^[0-9]+$ ]] && (( mbytes > 0 )); then
+			want=$mbytes
+		else
+			want=$(awk '$1 == "misc" { print $2; exit }' "$(parts_bytes_path)" 2>/dev/null)
+			[[ $want =~ ^[0-9]+$ ]] || want=$SPD_MISC_READ_BYTES
+		fi
+		sz=$(stat -c %s "$backup" 2>/dev/null || echo -1)
+		if (( sz == want )); then
+			record_sha256 "$backup"
+			echo "To restore misc later (typed confirm, no --yes):"
+			echo "  bash scripts/spdhost-usb fdl <fdl1> $FDL1_ADDR fdl <fdl2> $FDL2_ADDR write-part misc $backup reset"
+			echo "  (or menu [2] -> [6] restore misc from a backup)"
+		elif (( rc == 0 )); then
+			echo "backup size $sz differs from the table ($want bytes). spdhost exited 0, so the write did happen. Backup kept: $backup" >&2
+		elif [[ -n $verify ]]; then
+			# C10: the misc write was reached (verified, failed or partial), so
+			# this file may be the only copy of the old misc. Never delete it.
+			echo "misc backup is $sz bytes (expected $want); the misc write WAS attempted (verify: $verify). Backup kept: $backup" >&2
+			rc=1
+		else
+			echo "misc backup missing or wrong size ($sz of $want bytes): the write was NOT done." >&2
+			rm -f "$backup"
+			rc=1
+		fi
 	fi
 	if (( rc != 0 )); then
 		if [[ -n $expect ]]; then

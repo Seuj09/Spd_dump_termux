@@ -872,10 +872,15 @@ static int have_part(struct spd *io, const char *name)
  * on its own (misc-verify, then the ending), appended as they happen, so a
  * misc that verified is not reported as failed when only the reset ack was
  * lost, and the other way round. */
+static char last_misc_verify[16], last_ending[16]; /* P0-8: for the ops result */
 static void status_note(const char *key, const char *val)
 {
 	const char *p = getenv("SPDHOST_STATUS_FILE");
 	FILE *f;
+	if (!strcmp(key, "misc-verify"))
+		snprintf(last_misc_verify, sizeof(last_misc_verify), "%s", val);
+	else if (!strcmp(key, "reset") || !strcmp(key, "power-off"))
+		snprintf(last_ending, sizeof(last_ending), "%s", val);
 	/* P0-3: every status line is also an event (the channel is a superset
 	 * of this file, which is written exactly as before). */
 	if (spd_ev_fd >= 0) {
@@ -1197,6 +1202,125 @@ static int set_active_slot(struct spd *io, int yes, char which, int gate, int bc
 	 * say so rather than spending three frames re-reading misc. */
 	spd_slot_set(io, slot);
 	return 0;
+}
+
+/* misc-backup OUT, then 1 (stop before any write) unless the misc just read
+ * hashes to WANT. 0 = unchanged, -1 = the backup itself failed. The menu's
+ * set-slot builds its image from a misc read in an earlier session; this is
+ * how the write session proves misc has not changed since (a boot, slot
+ * counters, a BCB), so the write never reverts bytes nobody looked at. */
+static int misc_backup_expect(struct spd *io, const char *out, const char *want)
+{
+	char got[65];
+	size_t n = 0;
+	uint8_t *b;
+	if (strlen(want) != 64 || strspn(want, "0123456789abcdef") != 64) {
+		fprintf(stderr, "misc-backup-expect: want a 64-digit lowercase sha256\n");
+		return 1;
+	}
+	if (spd_misc_backup(io, out))
+		return -1;
+	status_misc_bytes();
+	b = load_small_file(out, &n, (size_t)spd_misc_size(io));
+	if (!b)
+		return 1;
+	sha256_hex(b, n, got);
+	free(b);
+	if (strcmp(got, want)) {
+		fprintf(stderr, "misc-backup-expect: misc CHANGED since it was read (now sha256 %s,"
+			" expected %s). Stopping before any write; the backup of the current misc"
+			" is %s.\n", got, want, out);
+		return 1;
+	}
+	fprintf(stderr, "misc-backup-expect: misc is unchanged (sha256 %s)\n", got);
+	return 0;
+}
+
+/* P0-8 `ops misc-reboot` / `ops set-active` (ops.h). One session, one misc
+ * write, the backup in DIR/meta/ and SHA256SUMS before the write. Keep rule
+ * (A4, audit6 C10): a backup that was read back OK is never deleted, whatever
+ * happens after it (expect mismatch, refused gate, failed write or verify, a
+ * lost reset ack); only a file that failed its own read-back is removed, and
+ * then nothing was written. Returns 0 when misc verified (and, for an op that
+ * resets, the reset counted as done). */
+static int run_ops_misc(struct spd *io, const struct spd_ops_misc_args *a, int yes)
+{
+	const char *op = a->set_active ? "set-active" : "misc-reboot";
+	const char *target = a->set_active ? (a->which == 'a' ? "a" : "b") : a->bcb ? "fastboot" : "recovery";
+	char path[1200], rel[256], hex[65] = "", qd[1100], qr[300];
+	uint64_t bytes = 0;
+	int rc;
+	last_misc_verify[0] = last_ending[0] = 0;
+	if (io->nparts <= 0 || !have_part(io, "misc")) {
+		fprintf(stderr, "ops %s: run parts first (misc must be in the live table); nothing written\n", op);
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"refused\",\"why\":\"no-table\"", op, target);
+		return 1;
+	}
+	if (a->set_active && (!have_part(io, "uboot_a") || !have_part(io, "uboot_b"))) {
+		fprintf(stderr, "ops set-active: refusing: the table has no uboot_a/uboot_b, so this phone is not"
+			" A/B; nothing read or written\n");
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"refused\",\"why\":\"not-ab\"", op, target);
+		return 1;
+	}
+	if (spd_ops_backup_path(a->dir, path, sizeof(path), rel, sizeof(rel))) {
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"refused\",\"why\":\"backup-dir\"", op, target);
+		return 1;
+	}
+	fprintf(stderr, "ops %s %s: misc backup -> %s (the write is skipped if it fails)\n", op, target, path);
+	status_note("misc-backup", rel);
+	rc = a->expect ? misc_backup_expect(io, path, a->expect) : spd_misc_backup(io, path);
+	if (!a->expect && !rc)
+		status_misc_bytes();
+	if (rc < 0) {
+		/* The read-back of this run's own new file failed: no write was
+		 * reached, and this file is not a copy of anything. */
+		unlink(path);
+		status_note("misc-backup-state", "removed");
+		fprintf(stderr, "ops %s: misc backup FAILED; nothing written (the incomplete %s was removed)\n",
+			op, rel);
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"failed\",\"why\":\"backup\","
+			"\"backup\":%s,\"backup_state\":\"removed\"", op, target, spd_ev_q(rel, qr, sizeof(qr)));
+		return 1;
+	}
+	if (spd_ops_sums_record(a->dir, rel, hex, &bytes)) {
+		/* The backup is good (read back above); only the bookkeeping failed. */
+		fprintf(stderr, "ops %s: could not record %s in %s/meta/SHA256SUMS; stopping before the write"
+			" (backup kept)\n", op, rel, a->dir);
+		status_note("misc-backup-state", "kept");
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"failed\",\"why\":\"sha256sums\","
+			"\"backup\":%s,\"backup_state\":\"kept\"", op, target, spd_ev_q(rel, qr, sizeof(qr)));
+		return 1;
+	}
+	status_note("misc-backup-sha256", hex);
+	status_note("misc-backup-state", "kept");
+	fprintf(stderr, "ops %s: backup %s, %llu bytes, sha256 %s (recorded in meta/SHA256SUMS; kept)\n",
+		op, rel, (unsigned long long)bytes, hex);
+	SPD_EV("misc-backup", "\"op\":\"%s\",\"dir\":%s,\"file\":%s,\"bytes\":%llu,\"sha256\":\"%s\"",
+		op, spd_ev_q(a->dir, qd, sizeof(qd)), spd_ev_q(rel, qr, sizeof(qr)), (unsigned long long)bytes, hex);
+	if (rc > 0) {
+		SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"refused\",\"why\":\"misc-changed\","
+			"\"backup\":%s,\"backup_state\":\"kept\"", op, target, spd_ev_q(rel, qr, sizeof(qr)));
+		return 1;
+	}
+	if (a->set_active) {
+		rc = set_active_slot(io, yes, a->which, 1, a->bcb);
+		if (!rc && a->ending)
+			rc = end_session(io, a->ending);
+	} else {
+		rc = do_reboot_bcb(io, yes, a->bcb);
+	}
+	fprintf(stderr, "ops %s %s: %s. misc backup kept: %s/%s\n"
+		"  restore (typed confirm): write-part misc %s/%s reset\n", op, target,
+		rc ? (strcmp(last_misc_verify, "ok") ? "FAILED" : "misc written and verified; the reset did not complete")
+		   : a->ending == 0x05 ? "misc written, verified, reset" : a->ending == 0x17 ?
+		   "misc written, verified, powered off" : "misc written and verified",
+		a->dir, rel, a->dir, rel);
+	SPD_EV("op", "\"op\":\"%s\",\"target\":\"%s\",\"state\":\"%s\",\"misc_verify\":\"%s\",\"ending\":\"%s\","
+		"\"backup\":%s,\"backup_state\":\"kept\"", op, target, rc ? "failed" : "ok",
+		last_misc_verify[0] ? last_misc_verify : "not-reached",
+		a->ending ? (last_ending[0] ? last_ending : "not-run") : "caller",
+		spd_ev_q(rel, qr, sizeof(qr)));
+	return rc ? 1 : 0;
 }
 
 static int erase_refused(const char *name)
@@ -1537,6 +1661,7 @@ static const char *const spd_caps[] = {
 	"loaders-check", /* loaders check|list|verify + fdl/index (P0-6, README) */
 	"misc-bytes",    /* status file: misc-bytes=N after misc-backup[-expect] */
 	"ops-dump",      /* ops dump DIR --preset P: preflight + meta/SHA256SUMS (P0-7) */
+	"ops-misc",      /* ops misc-reboot recovery|fastboot DIR / ops set-active a|b DIR (P0-8) */
 	"pack-slot",     /* pack-slot a|b IN OUT */
 	"parts-header",  /* parts FILE starts "# spdhost-parts shift S verified V" */
 	"status-file",   /* SPDHOST_STATUS_FILE key=value result lines */
@@ -2137,6 +2262,39 @@ static void plan_walk(struct pctx *P, int argc, char **argv, int first)
 			add_step(P, a, PLAN_YES, kind ? "reboot-fastboot+reset" : "reboot-recovery+reset", "misc",
 				"active", "0", "2048", sha, kind ? "reboot-fastboot via" : "reboot-recovery via");
 			stop = 1;
+		} else if (!strcmp(cmd, "ops") && spd_ops_is_misc(argc, argv, i)) {
+			/* P0-8: the same step as reboot-* / set-active, at the `ops`
+			 * argv index (the gate runs there). The backup folder and an
+			 * --expect digest are argv, so the plan binds them too. */
+			struct spd_ops_misc_args m;
+			char desc[128];
+			int nx = spd_ops_misc_args(argc, argv, i, &m);
+			if (nx < 0)
+				plan_refuse("bad ops %s arguments", argv[i + 1]);
+			if (m.set_active) {
+				set_active_desc(m.which, m.bcb, desc, sizeof(desc));
+				sha256_hex((const uint8_t *)desc, strlen(desc), sha);
+				add_step(P, a, PLAN_YES, m.bcb < 0 ? "set-active" : m.bcb ? "set-active+bcb-fastboot+reset" :
+					"set-active+bcb-recovery+reset", "misc", m.which == 'a' ? "a" : "b", "0x800", "32", sha,
+					"set-active");
+			} else {
+				uint8_t bcb[SPD_MISC_BCB_LEN];
+				build_bcb(bcb, m.bcb);
+				sha256_hex(bcb, sizeof(bcb), sha);
+				add_step(P, a, PLAN_YES, m.bcb ? "reboot-fastboot+reset" : "reboot-recovery+reset", "misc",
+					"active", "0", "2048", sha, m.bcb ? "reboot-fastboot via" : "reboot-recovery via");
+			}
+			fprintf(P->f, "backup-dir arg=%d ", m.dir_at - P->first);
+			spd_plan_q(P->f, m.dir);
+			fputc('\n', P->f);
+			if (m.expect)
+				fprintf(P->f, "expect arg=%d sha256=%s\n", m.expect_at - P->first, m.expect);
+			if (m.ending)
+				stop = 1;
+			i = nx;
+		} else if (!strcmp(cmd, "ops")) {
+			plan_refuse("unknown or unplannable command: ops %s (ops dump writes nothing to the phone;"
+				" run it without a plan)", i + 1 < argc ? argv[i + 1] : "");
 		} else if (!strcmp(cmd, "reset") || !strcmp(cmd, "power-off") || !strcmp(cmd, "poweroff")) {
 			stop = 1;
 		} else {
@@ -3268,6 +3426,24 @@ static int spdhost_main(int argc, char **argv)
 				}
 			}
 			i += 3;
+		} else if (strcmp(cmd, "ops") == 0 && spd_ops_is_misc(argc, argv, i)) {
+			struct spd_ops_misc_args ma;
+			int nx = spd_ops_misc_args(argc, argv, i, &ma);
+			if (nx < 0)
+				return 2;
+			if (yes) {
+				/* P0-8: a misc op is authorized by --confirm-token, a
+				 * --confirm-plan step or the typed confirm; never --yes. */
+				fprintf(stderr, "ops %s: refusing --yes (use --confirm-token, --confirm-plan or the"
+					" typed confirm); nothing sent\n", argv[i + 1]);
+				return 2;
+			}
+			need_fdl2(io, ma.set_active ? "ops set-active" : "ops misc-reboot");
+			if (run_ops_misc(io, &ma, yes))
+				return 1; /* never --keep-going past a misc op */
+			i = nx;
+			if (ma.ending)
+				break; /* it reset / powered off: the session is over */
 		} else if (strcmp(cmd, "ops") == 0) {
 			struct spd_ops_dump_args oa;
 			int nx = spd_ops_dump_args(argc, argv, i, &oa);
@@ -3290,38 +3466,12 @@ static int spdhost_main(int argc, char **argv)
 			status_misc_bytes();
 			i += 2;
 		} else if (strcmp(cmd, "misc-backup-expect") == 0) {
-			/* misc-backup, then refuse to go on unless the misc just read
-			 * hashes to SHA256. The menu's set-slot builds its image from a
-			 * misc read in an earlier session; this is how the write session
-			 * proves misc has not changed since (a boot, slot counters, a
-			 * BCB), so the write never reverts bytes nobody looked at. A
-			 * mismatch ends the session before any write. */
-			char got[65];
-			size_t n = 0;
-			uint8_t *b;
-			const char *want;
+			/* misc-backup, then stop before any write unless misc still
+			 * hashes to SHA256 (misc_backup_expect). */
 			need(argc, i, 2, "misc-backup-expect");
 			need_fdl2(io, "misc-backup-expect");
-			want = argv[i + 2];
-			if (strlen(want) != 64 || strspn(want, "0123456789abcdef") != 64) {
-				fprintf(stderr, "misc-backup-expect: want a 64-digit lowercase sha256\n");
+			if (misc_backup_expect(io, argv[i + 1], argv[i + 2]))
 				return 1;
-			}
-			if (spd_misc_backup(io, argv[i + 1]))
-				return 1;
-			status_misc_bytes();
-			b = load_small_file(argv[i + 1], &n, (size_t)spd_misc_size(io));
-			if (!b)
-				return 1;
-			sha256_hex(b, n, got);
-			free(b);
-			if (strcmp(got, want)) {
-				fprintf(stderr, "misc-backup-expect: misc CHANGED since it was read (now sha256 %s,"
-					" expected %s). Stopping before any write; the backup of the current misc"
-					" is %s.\n", got, want, argv[i + 1]);
-				return 1;
-			}
-			fprintf(stderr, "misc-backup-expect: misc is unchanged (sha256 %s)\n", got);
 			i += 3;
 		} else if (strcmp(cmd, "write-part") == 0 || strcmp(cmd, "write-part-plain") == 0) {
 			/* G2: write-part-plain is write-part without the NAME_bak twin

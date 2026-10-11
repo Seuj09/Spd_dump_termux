@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <time.h>
 #include <unistd.h>
 
 #define OPS_HEADROOM_MIB 64ul /* menu.sh require_free_space's default */
@@ -52,7 +53,8 @@ int spd_ops_dump_args(int argc, char **argv, int i, struct spd_ops_dump_args *a)
 	memset(a, 0, sizeof(*a));
 	a->headroom_mib = OPS_HEADROOM_MIB;
 	if (i + 1 >= argc || strcmp(argv[i + 1], "dump")) {
-		fprintf(stderr, "ops: need `ops dump DIR --preset P` (the only op in this build)\n");
+		fprintf(stderr, "ops: need `ops dump DIR --preset P`, `ops misc-reboot recovery|fastboot DIR`"
+			" or `ops set-active a|b DIR`\n");
 		return -1;
 	}
 	if (i + 2 >= argc || !argv[i + 2][0] || argv[i + 2][0] == '-') {
@@ -666,4 +668,140 @@ int spd_images_main(int argc, char **argv)
 	}
 	free(v);
 	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
+}
+
+/* ---- P0-8: misc ops (argument side; the session side is in main.c) ---- */
+
+int spd_ops_is_misc(int argc, char **argv, int i)
+{
+	return i + 1 < argc && (!strcmp(argv[i + 1], "misc-reboot") || !strcmp(argv[i + 1], "set-active"));
+}
+
+static int hex64(const char *s)
+{
+	return strlen(s) == 64 && strspn(s, "0123456789abcdef") == 64;
+}
+
+int spd_ops_misc_args(int argc, char **argv, int i, struct spd_ops_misc_args *a)
+{
+	const char *op;
+	memset(a, 0, sizeof(*a));
+	a->bcb = -1;
+	a->dir_at = a->expect_at = -1;
+	if (!spd_ops_is_misc(argc, argv, i)) {
+		fprintf(stderr, "ops: not a misc op\n");
+		return -1;
+	}
+	op = argv[i + 1];
+	a->set_active = !strcmp(op, "set-active");
+	if (i + 2 >= argc) {
+		fprintf(stderr, "ops %s: missing %s\n", op, a->set_active ? "a|b" : "recovery|fastboot");
+		return -1;
+	}
+	if (a->set_active) {
+		if ((argv[i + 2][0] != 'a' && argv[i + 2][0] != 'b') || argv[i + 2][1]) {
+			fprintf(stderr, "ops set-active: want a or b, not '%s'\n", argv[i + 2]);
+			return -1;
+		}
+		a->which = argv[i + 2][0];
+	} else {
+		if (strcmp(argv[i + 2], "recovery") && strcmp(argv[i + 2], "fastboot")) {
+			fprintf(stderr, "ops misc-reboot: want recovery or fastboot, not '%s'\n", argv[i + 2]);
+			return -1;
+		}
+		a->bcb = !strcmp(argv[i + 2], "fastboot");
+	}
+	if (i + 3 >= argc || !argv[i + 3][0] || argv[i + 3][0] == '-') {
+		fprintf(stderr, "ops %s: missing DIR (the misc backup goes to DIR/meta/)\n", op);
+		return -1;
+	}
+	a->dir = argv[i + 3];
+	a->dir_at = i + 3;
+	i += 4;
+	while (i < argc && !strncmp(argv[i], "--", 2)) {
+		if (!strcmp(argv[i], "--expect")) {
+			if (i + 1 >= argc || !hex64(argv[i + 1])) {
+				fprintf(stderr, "ops %s: --expect wants a 64-digit lowercase sha256\n", op);
+				return -1;
+			}
+			a->expect = argv[i + 1];
+			a->expect_at = i + 1;
+			i += 2;
+		} else if (!strcmp(argv[i], "--ending") && a->set_active) {
+			if (i + 1 >= argc || (strcmp(argv[i + 1], "reset") && strcmp(argv[i + 1], "power-off"))) {
+				fprintf(stderr, "ops set-active: --ending wants reset or power-off\n");
+				return -1;
+			}
+			a->ending = !strcmp(argv[i + 1], "reset") ? 0x05 : 0x17;
+			i += 2;
+		} else if (!strcmp(argv[i], "--bcb") && a->set_active) {
+			if (i + 1 >= argc || (strcmp(argv[i + 1], "recovery") && strcmp(argv[i + 1], "fastboot"))) {
+				fprintf(stderr, "ops set-active: --bcb wants recovery or fastboot\n");
+				return -1;
+			}
+			a->bcb = !strcmp(argv[i + 1], "fastboot");
+			i += 2;
+		} else {
+			fprintf(stderr, "ops %s: unknown option %s\n", op, argv[i]);
+			return -1;
+		}
+	}
+	if (a->bcb >= 0) {
+		/* a BCB is only read on the way up: the ending is a reset */
+		if (a->ending == 0x17) {
+			fprintf(stderr, "ops %s: a %s BCB needs a reset, not --ending power-off\n", op,
+				a->bcb ? "fastboot" : "recovery");
+			return -1;
+		}
+		a->ending = 0x05;
+	}
+	return i;
+}
+
+int spd_ops_backup_path(const char *dir, char *abs, size_t acap, char *rel, size_t rcap)
+{
+	char meta[1100], ts[32];
+	struct stat st;
+	time_t now = time(NULL);
+	struct tm tmv;
+	int k;
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+		fprintf(stderr, "ops: mkdir %s: %s\n", dir, strerror(errno));
+		return -1;
+	}
+	if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "ops: %s is not a folder\n", dir);
+		return -1;
+	}
+	if (path_join(meta, sizeof(meta), dir, "meta")) {
+		fprintf(stderr, "ops: path too long\n");
+		return -1;
+	}
+	if (mkdir(meta, 0755) != 0 && errno != EEXIST) {
+		fprintf(stderr, "ops: mkdir %s: %s\n", meta, strerror(errno));
+		return -1;
+	}
+	if (!localtime_r(&now, &tmv) || !strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tmv))
+		snprintf(ts, sizeof(ts), "%lld", (long long)now);
+	/* Never reuse a name: an older backup is never overwritten. */
+	for (k = 0; k < 100; k++) {
+		int n = k ? snprintf(rel, rcap, "meta/misc-before-%s-%d.img", ts, k)
+			  : snprintf(rel, rcap, "meta/misc-before-%s.img", ts);
+		if (n <= 0 || (size_t)n >= rcap || path_join(abs, acap, dir, rel)) {
+			fprintf(stderr, "ops: path too long\n");
+			return -1;
+		}
+		if (lstat(abs, &st) != 0 && errno == ENOENT)
+			return 0;
+	}
+	fprintf(stderr, "ops: no free misc-before-%s name in %s\n", ts, meta);
+	return -1;
+}
+
+int spd_ops_sums_record(const char *dir, const char *rel, char hex[65], uint64_t *bytes)
+{
+	char path[1200];
+	if (path_join(path, sizeof(path), dir, rel) || hash_file(path, hex, bytes))
+		return -1;
+	return sums_set(dir, rel, hex);
 }
