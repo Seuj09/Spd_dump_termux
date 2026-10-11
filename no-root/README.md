@@ -791,7 +791,10 @@ only preset; names can be repeated. In order it:
    `all`/`all_lite` skip blackbox/cache/userdata, `all_lite` also the inactive
    slot (super, system, vendor... are read), `super` adds its metadata, nv1 is
    512 bytes shorter (audit6 C4: the old menu estimate skipped super and kept
-   both slots);
+   both slots). When the active slot is unknown (`slot=0`, e.g. the misc slot info
+   could not be read), `dump` reads **both** `_a` and `_b` twins, so `all_lite` plans
+   both, matching what lands on disk (the old bash "larger of the pair" was
+   an underestimate);
 3. **refuses before the first read** when `statvfs(DIR)` has less than the plan
    + `--headroom` MiB (default 64) available: `ops dump: REFUSED: not enough free
    space ...`, a `refused space NEED AVAIL` manifest line, exit nonzero (with
