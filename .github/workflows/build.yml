@@ -123,6 +123,9 @@ jobs:
       tag: ${{ steps.publish.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the release gate below can diff the push range.
+          fetch-depth: 0
 
       - name: Install dependencies
         run: |
@@ -177,10 +180,41 @@ jobs:
             no-root/dist/SHA256SUMS
           if-no-files-found: error
 
+      - name: Release gate (no release for android/-only pushes until P1-8)
+        id: gate
+        # Plan: no APK release until slice P1-8. A push whose changes are all
+        # under android/ builds, tests and uploads artifacts as usual, but
+        # publishes no pre-release and posts no Telegram release message (the
+        # PASS/FAIL notice still goes out). A push that touches anything else
+        # (native core, CI, scripts), a workflow_dispatch, or a push whose
+        # range cannot be diffed (new branch, force push) still releases.
+        # Remove this gate (or flip RELEASE_ANDROID_ONLY) at P1-8.
+        if: github.event_name != 'pull_request'
+        env:
+          BEFORE: ${{ github.event.before }}
+          RELEASE_ANDROID_ONLY: 'false'
+        run: |
+          set -euo pipefail
+          release=true
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$RELEASE_ANDROID_ONLY" != true ]; then
+            if [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qx '0*' \
+               && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              changed=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+              echo "--- changed in $BEFORE..$GITHUB_SHA"; printf '%s\n' "$changed"
+              if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qv '^android/'; then
+                release=false
+                echo "::notice title=Release::android/-only push; no pre-release or Telegram release post until P1-8."
+              fi
+            else
+              echo "push range not diffable (before=${BEFORE:-none}); releasing as before"
+            fi
+          fi
+          echo "release=$release" | tee -a "$GITHUB_OUTPUT"
+
       - name: Publish the release
         id: publish
         # Never from a pull request: a PR build is checked, not released.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.gate.outputs.release == 'true'
         working-directory: no-root
         env:
           GH_TOKEN: ${{ github.token }}
