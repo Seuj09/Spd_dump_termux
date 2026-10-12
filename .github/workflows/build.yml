@@ -182,12 +182,13 @@ jobs:
 
       - name: Release gate (no release for android/-only pushes until P1-8)
         id: gate
-        # Plan: no APK release until slice P1-8. A push whose changes are all
-        # under android/ builds, tests and uploads artifacts as usual, but
-        # publishes no pre-release and posts no Telegram release message (the
-        # PASS/FAIL notice still goes out). A push that touches anything else
-        # (native core, CI, scripts), a workflow_dispatch, or a push whose
-        # range cannot be diffed (new branch, force push) still releases.
+        # Plan: no APK release until slice P1-8. A push that changes nothing
+        # under no-root/ (android/, CI or scripts only) builds, tests and
+        # uploads artifacts as usual, but publishes no pre-release and posts no
+        # Telegram release message (the PASS/FAIL notice still goes out). A
+        # push that changes the native core (no-root/), a workflow_dispatch,
+        # or a push whose range cannot be diffed (new branch, force push)
+        # still releases.
         # Remove this gate (or flip RELEASE_ANDROID_ONLY) at P1-8.
         if: github.event_name != 'pull_request'
         env:
@@ -201,9 +202,9 @@ jobs:
                && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
               changed=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
               echo "--- changed in $BEFORE..$GITHUB_SHA"; printf '%s\n' "$changed"
-              if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qv '^android/'; then
+              if ! printf '%s\n' "$changed" | grep -q '^no-root/'; then
                 release=false
-                echo "::notice title=Release::android/-only push; no pre-release or Telegram release post until P1-8."
+                echo "::notice title=Release::no native-core (no-root/) change in this push; no pre-release or Telegram release post until P1-8."
               fi
             else
               echo "push range not diffable (before=${BEFORE:-none}); releasing as before"
