@@ -37,7 +37,7 @@ class EngineSession(
         val events = File(runDir, "e$n.jsonl")
         events.delete()
         val argv = EngineArgv.session(core.path, sock.path, events.path, commands)
-        val server = FdSocketServer(sock, myUid, onLog)
+        val server = FdSocketServer(sock, myUid, { pid }, onLog)
         val p = try {
             val pb = ProcessBuilder(argv).directory(runDir)
             CoreEnv.sanitize(pb.environment())
@@ -58,15 +58,21 @@ class EngineSession(
         }
         val tail = thread("core-events") { tailEvents(events) }
         thread("core-wait") {
-            val rc = runCatching { p.waitFor() }.getOrNull()
-            finished = true
-            readers.forEach { it.join(2_000) }
-            tail.join(2_000)
-            server.close() // unlinks the socket path
-            socketThread.join(2_000)
-            events.delete()
-            onLog("core exited rc=${rc ?: "?"}")
-            onExit(rc)
+            var rc: Int? = null
+            try {
+                rc = runCatching { p.waitFor() }.getOrNull()
+                finished = true
+                readers.forEach { it.join(2_000) }
+                tail.join(2_000)
+                server.close() // unlinks the socket path
+                socketThread.join(2_000)
+                events.delete()
+                onLog("core exited rc=${rc ?: "?"}")
+            } finally {
+                finished = true
+                runCatching { server.close() }
+                onExit(rc) // releases the connection + wake lock first
+            }
         }
     }
 
@@ -79,6 +85,8 @@ class EngineSession(
         if (id != null) {
             onLog("stop: SIGINT to pid $id")
             runCatching { Os.kill(id, OsConstants.SIGINT) }.onFailure { onLog("SIGINT failed: ${it.message}") }
+        } else {
+            onLog("stop: core pid unknown (no pid= and no start event yet); SIGINT skipped, destroying after ${KILL_AFTER_MS} ms")
         }
         thread("core-kill") {
             val t0 = System.currentTimeMillis()

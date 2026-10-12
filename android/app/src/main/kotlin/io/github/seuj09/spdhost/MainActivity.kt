@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
 
     /** From the UI: start a core session through the foreground service. */
     fun startEngine(commands: List<String>) {
+        // D1: start the FGS only once the broker has the device open.
+        io.github.seuj09.spdhost.engine.EngineLaunchPolicy.startRefusal(app.broker.state.value)?.let {
+            app.engine.refused(it); return
+        }
         if (ApiGates.needsNotificationPermission(Build.VERSION.SDK_INT) &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {

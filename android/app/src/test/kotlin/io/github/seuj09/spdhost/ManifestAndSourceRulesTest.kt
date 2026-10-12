@@ -68,6 +68,13 @@ class ManifestAndSourceRulesTest {
         }
     }
 
+    @Test fun onlyFdSocketServerUsesLocalServerSocket() {
+        // Type-based, not just the String-literal ctor: a String variable
+        // would slip past that rule (#36 soft note 3).
+        val users = sources.filter { code(it).contains("LocalServerSocket") }.map { it.name }
+        assertEquals(listOf("FdSocketServer.kt"), users)
+    }
+
     @Test fun usbFdReachesTheCoreOnlyThroughThePathSocket() {
         val all = sources.associate { it.name to code(it) }
         // No --usb-fd N (an fd number in argv) anywhere; --usb-fd-sock only in EngineArgv.

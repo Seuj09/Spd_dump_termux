@@ -24,7 +24,13 @@ import java.io.IOException
  * "REACQ ..." line gets 'N' with no fd (P1: REACQ=0). The peer must be our
  * uid; the core checks ours the same way (SO_PEERCRED).
  */
-class FdSocketServer(val path: File, private val myUid: Int, private val log: (String) -> Unit) : Closeable {
+class FdSocketServer(
+    val path: File,
+    private val myUid: Int,
+    /** The child's pid when known; then the peer pid must match it too. */
+    private val expectedPid: () -> Int? = { null },
+    private val log: (String) -> Unit,
+) : Closeable {
     private val bound = LocalSocket(LocalSocket.SOCKET_STREAM)
     private val server: LocalServerSocket
     @Volatile private var closed = false
@@ -50,6 +56,9 @@ class FdSocketServer(val path: File, private val myUid: Int, private val log: (S
         try {
             val uid = runCatching { s.peerCredentials.uid }.getOrNull()
             if (uid != myUid) { log("socket: refused peer uid $uid (want $myUid)"); return }
+            val want = expectedPid()
+            val got = runCatching { s.peerCredentials.pid }.getOrNull()
+            if (!peerPidOk(want, got)) { log("socket: refused peer pid $got (want $want)"); return }
             s.soTimeout = 10_000
             val input = s.inputStream
             val hello = readLine(input) ?: run { log("socket: core closed before HELLO"); return }
@@ -105,5 +114,10 @@ class FdSocketServer(val path: File, private val myUid: Int, private val log: (S
         runCatching { server.close() }
         runCatching { bound.close() }
         path.delete()
+    }
+
+    companion object {
+        /** Unknown child pid: uid check only. Known: the peer must be it. */
+        fun peerPidOk(expected: Int?, peer: Int?): Boolean = expected == null || expected == peer
     }
 }

@@ -37,11 +37,25 @@ class EngineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        goForeground()
-        when (intent?.action) {
-            ACTION_STOP -> { app.engine.session?.let { app.engine.stopping(); it.stop() } ?: finish() }
-            ACTION_START -> startSession(intent.getStringArrayListExtra(EXTRA_COMMANDS).orEmpty())
-            else -> if (app.engine.session == null) finish()
+        val action = intent?.action
+        if (EngineLaunchPolicy.goesForeground(action)) {
+            // D1: never startForeground(connectedDevice) without an open
+            // device (34+ throws SecurityException without USB permission).
+            val why = EngineLaunchPolicy.startRefusal(app.broker.state.value)
+            if (why != null) { app.engine.refused(why); stopSelf(); return START_NOT_STICKY }
+            try {
+                goForeground()
+            } catch (e: SecurityException) {
+                app.engine.refused("foreground service refused: ${e.message}")
+                stopSelf(); return START_NOT_STICKY
+            }
+            startSession(intent!!.getStringArrayListExtra(EXTRA_COMMANDS).orEmpty())
+            return START_NOT_STICKY
+        }
+        // STOP / null / unknown: no startForeground.
+        when (action) {
+            ACTION_STOP -> app.engine.session?.let { app.engine.stopping(); it.stop() } ?: stopSelf()
+            else -> if (app.engine.session == null) stopSelf()
         }
         return START_NOT_STICKY
     }
@@ -68,11 +82,16 @@ class EngineService : Service() {
                     onLog = ctl::log,
                     onEvent = ctl::event,
                     onExit = { rc ->
-                        ctl.session = null
-                        ctl.exited(rc)
-                        app.broker.releaseFromEngine()
-                        releaseWake()
-                        finish()
+                        // Release first, each guarded, so a throw in the UI
+                        // callbacks can never skip them.
+                        try {
+                            runCatching { app.broker.releaseFromEngine() }
+                            runCatching { releaseWake() }
+                        } finally {
+                            ctl.session = null
+                            ctl.exited(rc)
+                            finish()
+                        }
                     },
                 )
             } catch (e: Exception) {
@@ -150,7 +169,14 @@ class EngineService : Service() {
             launch(ctx, i)
         }
 
-        fun stop(ctx: Context) = launch(ctx, Intent(ctx, EngineService::class.java).setAction(ACTION_STOP))
+        /**
+         * Stop the running session in-process (SIGINT). No service intent:
+         * startForegroundService(STOP) would oblige a startForeground (D1).
+         */
+        fun stop(ctx: Context) {
+            val ctl = (ctx.applicationContext as SpdhostApp).engine
+            ctl.session?.let { ctl.stopping(); it.stop() }
+        }
 
         private fun launch(ctx: Context, i: Intent) {
             if (ApiGates.useStartForegroundService(Build.VERSION.SDK_INT)) ContextCompat.startForegroundService(ctx, i)
