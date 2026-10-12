@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The app is useless without USB host mode (OTG). -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+
+    <!-- Foreground-service permissions for the engine service (P1-3), per
+         plan §7. Declaring them is harmless on older releases; each only
+         takes effect from the API level noted:
+           FOREGROUND_SERVICE                   28+
+           FOREGROUND_SERVICE_CONNECTED_DEVICE  34+
+           POST_NOTIFICATIONS                   33+ (runtime request, 33+ only)
+         WAKE_LOCK: partial wake lock for a whole session, every version. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:name=".SpdhostApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Spdhost"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Plugging a phone in BROM mode (1782:4d00) offers to open the
+                 app; a running instance gets it in onNewIntent (singleTop). -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+    </application>
+</manifest>

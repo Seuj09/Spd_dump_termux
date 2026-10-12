@@ -1,0 +1,8 @@
+.gradle/
+build/
+/local.properties
+/.idea/
+*.iml
+.kotlin/
+# Filled by CI from the `make cross` output (plan §2); never committed.
+/app/src/main/jniLibs/

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spreadtrum/Unisoc BROM download mode: 1782:4d00 (decimal 6018:19712).
+     Keep in sync with UsbIds in usb/DeviceFilter.kt (a unit test checks). -->
+<resources>
+    <usb-device vendor-id="6018" product-id="19712" />
+</resources>

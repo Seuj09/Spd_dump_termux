@@ -1,0 +1,49 @@
+spdhost for Android — notices
+=============================
+
+This app is a front-end to the spdhost core from
+https://github.com/Seuj09/Spd_dump_termux (no-root/). The app and the core
+are released under the MIT License below.
+
+The core binary shipped inside this APK (lib/<abi>/libspdhost.so) is a
+static executable built with zig cc against musl libc and libusb:
+
+  * libusb 1.0 (v1.0.27, https://github.com/libusb/libusb)
+    GNU Lesser General Public License v2.1 or later.
+    libusb is statically linked into libspdhost.so. The complete source of
+    spdhost, the exact libusb tag and the build scripts that link them
+    (no-root/Makefile, no-root/scripts/cross-arm32.sh) are published at
+    https://github.com/Seuj09/Spd_dump_termux, so you can rebuild and relink
+    the core with a modified libusb and drop it into the APK's jniLibs.
+    The LGPL-2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+
+  * musl libc (https://musl.libc.org) — MIT License.
+
+The app itself uses AndroidX (core, activity, lifecycle) and Jetpack Compose
+(ui, material3), Apache License 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+
+FDL loaders, stub binaries and firmware images are NOT shipped in this APK.
+
+-----------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2026 spdhost contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
