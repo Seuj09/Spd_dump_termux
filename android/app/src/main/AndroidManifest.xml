@@ -43,5 +43,14 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!-- P1-3: owns one core session. Not exported; connectedDevice is
+             honoured from 29 (ignored below), and on 34+ it needs
+             FOREGROUND_SERVICE_CONNECTED_DEVICE plus the USB permission the
+             broker already holds. -->
+        <service
+            android:name=".engine.EngineService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

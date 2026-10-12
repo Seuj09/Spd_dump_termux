@@ -1,8 +1,14 @@
 package io.github.seuj09.spdhost
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import io.github.seuj09.spdhost.engine.EngineService
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import io.github.seuj09.spdhost.ui.AppRoot
@@ -16,6 +22,30 @@ import io.github.seuj09.spdhost.ui.SpdhostTheme
 class MainActivity : ComponentActivity() {
     private val app get() = application as SpdhostApp
 
+    private var pendingCommands: List<String>? = null
+
+    // POST_NOTIFICATIONS is a runtime permission on 33+ only (ApiGates). A
+    // denial does not block the session: the FGS still runs, its
+    // notification is just hidden.
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+        pendingCommands?.let { EngineService.start(this, it) }
+        pendingCommands = null
+    }
+
+    /** From the UI: start a core session through the foreground service. */
+    fun startEngine(commands: List<String>) {
+        if (ApiGates.needsNotificationPermission(Build.VERSION.SDK_INT) &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingCommands = commands
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        EngineService.start(this, commands)
+    }
+
+    fun stopEngine() = EngineService.stop(this)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -23,7 +53,7 @@ class MainActivity : ComponentActivity() {
         // (rotation) replays the old one, which the broker would just rescan.
         if (savedInstanceState == null) app.broker.handleIntent(intent)
         setContent {
-            SpdhostTheme { AppRoot(app) }
+            SpdhostTheme { AppRoot(app, ::startEngine, ::stopEngine) }
         }
     }
 

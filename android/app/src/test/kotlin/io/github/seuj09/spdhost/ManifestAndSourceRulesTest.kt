@@ -41,22 +41,54 @@ class ManifestAndSourceRulesTest {
 
     private val sources = File("src/main/kotlin").walkTopDown().filter { it.extension == "kt" }.toList()
 
+    private fun code(f: File): String =
+        // Code only: comments may explain why these are absent.
+        f.readLines().filterNot { it.trimStart().let { l -> l.startsWith("*") || l.startsWith("//") || l.startsWith("/*") } }
+            .joinToString("\n")
+
     @Test fun noJavaClaimInterfaceAndNoYes() {
         assertTrue(sources.size >= 5)
+        // Any spelling of --yes in code: a string literal, a list element,
+        // a concatenation ("--" + "yes" is caught by the second pattern).
+        val yes = Regex("""--yes\b""")
+        val yesSplit = Regex(""""--"\s*\+\s*"yes"""")
         for (f in sources) {
-            // Code only: comments may explain why these are absent.
-            val code = f.readLines().filterNot { it.trimStart().let { l -> l.startsWith("*") || l.startsWith("//") || l.startsWith("/*") } }
-                .joinToString("\n")
+            val code = code(f)
             assertFalse("${f.name} calls claimInterface", code.contains("claimInterface("))
-            assertFalse("${f.name} passes --yes", code.contains("\"--yes\""))
+            assertFalse("${f.name} passes --yes", yes.containsMatchIn(code) || yesSplit.containsMatchIn(code))
             assertFalse("${f.name} uses bulkTransfer", code.contains("bulkTransfer("))
+            // Storage is app dir + SAF (decision 5): no MediaStore in P1.
+            assertFalse("${f.name} uses MediaStore", code.contains("MediaStore"))
+            // No SPDHOST_* knob is ever set for the core. CoreEnv strips them
+            // and is the only file allowed to name the prefix.
+            if (f.name != "CoreEnv.kt") assertFalse("${f.name} names SPDHOST_", code.contains("SPDHOST_"))
+            // Never the abstract namespace for the fd socket.
+            assertFalse("${f.name} uses LocalServerSocket(String)", Regex("""LocalServerSocket\(\s*"""").containsMatchIn(code))
+            assertFalse("${f.name} uses Namespace.ABSTRACT", code.contains("Namespace.ABSTRACT"))
         }
     }
 
-    @Test fun deviceFdNeverReachesTheCoreYet() {
-        // P1-2 detects only; the fd hand-off is P0-5/P1-3. The runner's only argv is "caps".
-        val runner = File("src/main/kotlin/io/github/seuj09/spdhost/engine/CoreRunner.kt").readText()
-        assertTrue(runner.contains("ProcessBuilder(bin.path, \"caps\")"))
-        assertFalse(runner.contains("--usb-fd"))
+    @Test fun usbFdReachesTheCoreOnlyThroughThePathSocket() {
+        val all = sources.associate { it.name to code(it) }
+        // No --usb-fd N (an fd number in argv) anywhere; --usb-fd-sock only in EngineArgv.
+        for ((name, code) in all) {
+            assertFalse("$name passes --usb-fd N", code.contains("\"--usb-fd\""))
+            if (name != "EngineArgv.kt") assertFalse("$name builds --usb-fd-sock argv", code.contains("--usb-fd-sock"))
+        }
+        val srv = all.getValue("FdSocketServer.kt")
+        assertTrue(srv.contains("Namespace.FILESYSTEM"))
+        assertTrue(srv.contains("LocalServerSocket(bound.fileDescriptor)"))
+        assertTrue(srv.contains("setFileDescriptorsForSend"))
+        assertTrue(srv.contains("path.delete()"))
+        // caps stays caps-only.
+        assertTrue(all.getValue("CoreRunner.kt").contains("ProcessBuilder(bin.path, \"caps\")"))
+        // The session exec goes through the sanitized env.
+        assertTrue(all.getValue("EngineSession.kt").contains("CoreEnv.sanitize(pb.environment())"))
+    }
+
+    @Test fun engineServiceIsPrivateConnectedDevice() {
+        val svc = elements("service").single { it.getAttributeNS(ns, "name") == ".engine.EngineService" }
+        assertEquals("false", svc.getAttributeNS(ns, "exported"))
+        assertEquals("connectedDevice", svc.getAttributeNS(ns, "foregroundServiceType"))
     }
 }
