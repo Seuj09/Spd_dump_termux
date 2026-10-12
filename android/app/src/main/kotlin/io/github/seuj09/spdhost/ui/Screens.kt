@@ -3,6 +3,7 @@ package io.github.seuj09.spdhost.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,6 +39,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.seuj09.spdhost.BuildConfig
 import io.github.seuj09.spdhost.SpdhostApp
 import io.github.seuj09.spdhost.engine.CoreProbe
+import io.github.seuj09.spdhost.usb.DeviceInfo
+import io.github.seuj09.spdhost.usb.UsbBroker
+import io.github.seuj09.spdhost.usb.UsbState
+import io.github.seuj09.spdhost.usb.device
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,22 +68,80 @@ fun AppRoot(app: SpdhostApp) {
 
 @Composable
 private fun StatusScreen(app: SpdhostApp, modifier: Modifier) {
+    val usb by app.broker.state.collectAsStateWithLifecycle()
+    val log by app.broker.log.collectAsStateWithLifecycle()
     val core by app.core.collectAsStateWithLifecycle()
     Column(
         modifier.verticalScroll(rememberScrollState()).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        UsbCard(usb, app.broker)
         CoreCard(core, onRetry = app::probeCore)
+        Section("Events") {
+            if (log.isEmpty()) Text("—") else Mono(log.joinToString("\n"))
+        }
         Text(
-            "Skeleton (P1-1): runs only `libspdhost.so caps`. USB detection comes in P1-2; " +
-                "the engine service (fd hand-off, hello, dump) in P1-3. No writes in P1.",
+            "Detection only. This build does not hand the USB fd to the core and runs no " +
+                "hello, dump or write: those come with the engine service (plan P0-5/P1-3).",
             style = MaterialTheme.typography.bodySmall,
         )
     }
 }
 
+private fun headline(s: UsbState): Pair<String, Color> = when (s) {
+    UsbState.NoDevice -> "No device. Plug the phone in BROM mode (1782:4d00)." to Color.Gray
+    is UsbState.Multiple -> "Refused: ${s.devices.size} Spreadtrum (1782) devices attached. Unplug all but one." to Color(0xFFC62828)
+    is UsbState.Unsupported -> "Spreadtrum device ${s.device.vidPid} is not in BROM mode (4d00). Not opened." to Color(0xFFEF6C00)
+    is UsbState.Found -> "Device found" to Color(0xFF1565C0)
+    is UsbState.PermissionRequested -> "Permission requested. Answer the system dialog." to Color(0xFF1565C0)
+    is UsbState.Granted -> "Permission granted" to Color(0xFF2E7D32)
+    is UsbState.Denied -> "Permission denied" to Color(0xFFC62828)
+    is UsbState.Opened -> "Opened: fd ${s.fd}" to Color(0xFF2E7D32)
+    is UsbState.OpenFailed -> "Open failed: ${s.reason}" to Color(0xFFC62828)
+    is UsbState.Detached -> "Detached" to Color(0xFFEF6C00)
+}
 
+@Composable
+private fun UsbCard(s: UsbState, broker: UsbBroker) {
+    Section("USB") {
+        val (text, color) = headline(s)
+        Text(text, color = color, fontWeight = FontWeight.Bold)
+        when (s) {
+            is UsbState.Multiple -> s.devices.forEach { DeviceDetails(it) }
+            else -> s.device?.let { DeviceDetails(it) }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (s) {
+                is UsbState.Found, is UsbState.Denied ->
+                    Button(onClick = broker::requestPermission) { Text("Request permission") }
+                is UsbState.Granted, is UsbState.OpenFailed ->
+                    Button(onClick = broker::open) { Text("Open") }
+                is UsbState.Opened ->
+                    OutlinedButton(onClick = broker::close) { Text("Close") }
+                else -> Unit
+            }
+            OutlinedButton(onClick = broker::rescan) { Text("Rescan") }
+        }
+    }
+}
 
+@Composable
+private fun DeviceDetails(d: DeviceInfo) {
+    val lines = buildList {
+        add("vid:pid   ${d.vidPid}  (${d.vendorId}:${d.productId})")
+        add("path      ${d.name}")
+        d.manufacturer?.let { add("maker     $it") }
+        d.product?.let { add("product   $it") }
+        add("serial    ${d.serial ?: "(needs permission)"}")
+        if (d.interfaces.isEmpty()) add("interfaces: none reported")
+        d.interfaces.forEach { f ->
+            add("iface %d class %02x/%02x/%02x".format(f.id, f.interfaceClass, f.subclass, f.protocol))
+            f.endpoints.forEach { add("  $it") }
+        }
+    }
+    Mono(lines.joinToString("\n"))
+}
 
 @Composable
 private fun CoreCard(p: CoreProbe?, onRetry: () -> Unit) {
