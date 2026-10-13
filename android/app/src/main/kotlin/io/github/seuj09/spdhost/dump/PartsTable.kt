@@ -32,7 +32,8 @@ data class PartsTable(val shift: Int?, val verified: Boolean, val rows: List<Par
             for (raw in text.lineSequence()) {
                 val line = raw.trim()
                 if (line.isEmpty()) continue
-                HEADER.matchEntire(line)?.let { shift = it.groupValues[1].toInt(); verified = it.groupValues[2] == "1"; continue }
+                val h = HEADER.matchEntire(line)
+                if (h != null) { shift = h.groupValues[1].toInt(); verified = h.groupValues[2] == "1"; continue }
                 if (line.startsWith("#")) continue
                 val t = line.split(Regex("""\s+"""))
                 if (t.size != 3) continue
