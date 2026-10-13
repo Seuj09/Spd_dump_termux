@@ -22,7 +22,7 @@ class EngineController {
     private val _state = MutableStateFlow(EngineState())
     val state: StateFlow<EngineState> = _state.asStateFlow()
 
-    @Volatile var session: EngineSession? = null
+    @Volatile var session: EngineChild? = null
 
     fun log(msg: String) = _state.update { it.copy(log = (it.log + stamp(msg)).takeLast(200)) }
     fun event(e: EngineEvent) = _state.update { it.copy(events = (it.events + stamp(e.summary())).takeLast(200), view = it.view.reduce(e)) }

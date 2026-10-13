@@ -51,6 +51,8 @@ class UsbBroker(context: Context) {
     val log: StateFlow<List<String>> = _log.asStateFlow()
 
     private var connection: UsbDeviceConnection? = null
+    /** E8 tests only (Robolectric has no USB host): an "open" fd with no connection. */
+    private var testFd: Int? = null
     private var started = false
 
     /**
@@ -147,12 +149,19 @@ class UsbBroker(context: Context) {
      * null when nothing is open. Any thread; runs on the main thread.
      */
     fun holdForEngine(): Int? = onMain {
-        val c = connection
-        if (c == null || engineHeld) null else {
+        val fd = connection?.fileDescriptor ?: testFd
+        if (fd == null || engineHeld) null else {
             engineHeld = true
             note("connection pinned for the core session")
-            c.fileDescriptor
+            fd
         }
+    }
+
+    /** E8 tests: stand in for openNow with no UsbDeviceConnection behind [fd]. */
+    @androidx.annotation.VisibleForTesting
+    fun openForTest(info: DeviceInfo, fd: Int) = onMain {
+        testFd = fd
+        _state.value = UsbState.Opened(info, fd)
     }
 
     /** The child exited: unpin, and carry out a close that was deferred. */
@@ -208,6 +217,7 @@ class UsbBroker(context: Context) {
             note("close deferred until the core session ends")
             return
         }
+        testFd = null
         val c = connection ?: return
         connection = null
         c.close()

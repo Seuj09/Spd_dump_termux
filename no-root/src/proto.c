@@ -339,6 +339,50 @@ int spd_send(struct spd *io)
 	return io->enc_len;
 }
 
+/* Dry-run test hook: SPDHOST_DRY_PTABLE=FILE ("name KiB" per line) makes the
+ * fake loader answer READ_PARTITION with that table and READ_MIDST with that
+ * many zero bytes (READ_FLASH), so --dry-run walks ops dump's real reads
+ * instead of stopping at the table. Unset: plain ACKs, as before. */
+static int dry_table_reply(struct spd *io)
+{
+	const char *f = getenv("SPDHOST_DRY_PTABLE");
+	if (!f || !*f)
+		return 0;
+	if (io->last_type == BSL_CMD_READ_PARTITION) {
+		FILE *fp = fopen(f, "r");
+		char name[40];
+		unsigned long kb;
+		unsigned n = 0, j;
+		if (!fp)
+			return 0;
+		while (n < 64 && fscanf(fp, "%35s %lu", name, &kb) == 2) {
+			uint8_t *r = io->raw + 4 + n * 0x4c;
+			memset(r, 0, 0x4c);
+			for (j = 0; name[j]; j++)
+				r[2 * j] = (uint8_t)name[j];
+			r[0x48] = (uint8_t)kb; r[0x49] = (uint8_t)(kb >> 8);
+			r[0x4a] = (uint8_t)(kb >> 16); r[0x4b] = (uint8_t)(kb >> 24);
+			n++;
+		}
+		fclose(fp);
+		wr16be(io->raw, BSL_REP_READ_PARTITION);
+		wr16be(io->raw + 2, n * 0x4c);
+		io->raw_len = 4 + (int)(n * 0x4c) + 2;
+		return 1;
+	}
+	if (io->last_type == BSL_CMD_READ_MIDST && io->raw_len >= 4 + 4) {
+		uint32_t want = rd32le(io->raw + 4);
+		if (want > 0xffff - 6)
+			return 0;
+		memset(io->raw + 4, 0, want);
+		wr16be(io->raw, BSL_REP_READ_FLASH);
+		wr16be(io->raw + 2, want);
+		io->raw_len = 4 + (int)want + 2;
+		return 1;
+	}
+	return 0;
+}
+
 int spd_recv(struct spd *io, int timeout_ms)
 {
 	int esc, n, head, need, pos, len;
@@ -350,6 +394,8 @@ int spd_recv(struct spd *io, int timeout_ms)
 		fflush(stdout);
 		return 0; /* simulated timeout */
 	}
+	if (io->dry && dry_table_reply(io))
+		return io->raw_len;
 	if (io->dry) {
 		/* Synthesize the reply the real BootROM/FDL would send, so the
 		 * dry-run walks the same control flow: CHECK_BAUD -> VER, else ACK. */
