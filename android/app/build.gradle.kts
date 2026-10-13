@@ -69,6 +69,8 @@ android {
         buildConfig = true
     }
     testOptions {
+        // E8: Robolectric needs the merged manifest and resources.
+        unitTests.isIncludeAndroidResources = true
         unitTests.all {
             // Tests read src/main files (manifest, device_filter.xml,
             // sources) relative to the module dir.
@@ -88,4 +90,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

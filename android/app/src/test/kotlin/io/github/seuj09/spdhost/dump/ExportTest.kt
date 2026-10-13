@@ -90,7 +90,8 @@ class ExportTest {
     }
 
     @Test fun exportRepoFailurePaths() {
-        val src = File("src/main/kotlin/io/github/seuj09/spdhost/dump/ExportRepo.kt").readText()
+        val src = File("src/main/kotlin/io/github/seuj09/spdhost/dump/ExportRepo.kt").readText() +
+            File("src/main/kotlin/io/github/seuj09/spdhost/dump/ExportJob.kt").readText()
         assertFalse("no 'w' fallback", Regex("openOutputStream\\([^)]*\"w\"\\)").containsMatchIn(src))
         assertTrue(src.contains("target could NOT be deleted"))
         assertTrue(src.contains("fun cancel()"))

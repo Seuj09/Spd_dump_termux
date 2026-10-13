@@ -1,0 +1,4 @@
+env SPDHOST_PART_XML_DIR=/D/meta
+arg --timeout
+arg 3000
+arg ping
