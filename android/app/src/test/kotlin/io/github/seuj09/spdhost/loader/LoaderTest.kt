@@ -85,6 +85,46 @@ class LoaderTest {
         assertFalse(File(root.parentFile, "x").exists())
     }
 
+    @Test fun wrongPinNeverParsesOrStages() {
+        val root = tmp.newFolder()
+        // Not even a zip: a wrong pin must refuse on the hash alone.
+        assertTrue(refused { LoaderPack.import(ByteArrayInputStream(byteArrayOf(1, 2, 3)), root, "0".repeat(64), "0".repeat(64)) }.contains("pack sha256"))
+        assertTrue(refused { imp(pack(), root, packPin = "0".repeat(64)) }.contains("pack sha256"))
+        assertFalse(File(root, ".staging").exists())
+        assertFalse(File(root, ".incoming.zip.tmp").exists())
+        assertFalse(File(root, "fdl").exists())
+    }
+
+    @Test fun oversizePackRefused() {
+        val root = tmp.newFolder()
+        val big = object : java.io.InputStream() {
+            var n = 0L
+            override fun read() = if (n++ > LoaderPack.MAX_PACK_BYTES) -1 else 0
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (n > LoaderPack.MAX_PACK_BYTES) return -1
+                n += len; return len
+            }
+        }
+        assertTrue(refused { LoaderPack.import(big, root, "0".repeat(64), "0".repeat(64)) }.contains("larger than"))
+        assertFalse(File(root, ".staging").exists())
+        assertFalse(File(root, ".incoming.zip.tmp").exists())
+    }
+
+    @Test fun directoryEntriesCountTowardTheLimit() {
+        val dirs = ByteArrayOutputStream().also { bo ->
+            ZipOutputStream(bo).use { z -> repeat(LoaderPack.MAX_ENTRIES + 1) { z.putNextEntry(ZipEntry("fdl/d$it/")); z.closeEntry() } }
+        }.toByteArray()
+        assertTrue(refused { imp(dirs, tmp.newFolder()) }.contains("more than"))
+    }
+
+    @Test fun leftoverOldIsRestored() {
+        val root = tmp.newFolder()
+        imp(pack(), root)
+        assertTrue(File(root, "fdl").renameTo(File(root, ".old")))
+        assertEquals(sha(index(good)).let { LoaderPack.installed(root, it) }?.pairs?.size, 1)
+        assertTrue(File(root, "fdl/a/fdl1.bin").isFile)
+    }
+
     private val pair = LoaderPair("ums9230", "infinix", "ums9230/infinix/fdl1-dl.bin", "ums9230/infinix/fdl2-dl.bin")
     private val okOut = listOf(
         "loaders_format=1", "index=/data/user/0/x/files/loaders/fdl/index", "fdl1_id=index", "fdl2_id=index",

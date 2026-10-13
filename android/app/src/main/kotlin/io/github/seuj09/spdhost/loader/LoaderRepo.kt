@@ -52,8 +52,10 @@ class LoaderRepo(private val ctx: Context) {
         _state.value = _state.value.copy(busy = true, selected = null, lastCheck = null, message = "Checking ${pair.id}…", error = false)
         val v = try {
             val argv = LoadersCheck.argvFor(CoreRunner.corePath(ctx).path, root.absolutePath, ix, pair)
-            val (rc, out) = run(argv)
-            LoadersCheck.judge(rc, out, pair)
+            val (rc, out, err) = run(argv)
+            val v0 = LoadersCheck.judge(rc, out, pair)
+            // Soft 4: keep the core's last stderr line in the refusal reasons.
+            if (!v0.ok && err.isNotBlank()) v0.copy(reasons = v0.reasons + "core: ${err.trim().lines().last()}") else v0
         } catch (e: Exception) {
             LoadersCheck.Verdict(false, listOf("${e.javaClass.simpleName}: ${e.message}"), emptyMap())
         }
@@ -61,20 +63,21 @@ class LoaderRepo(private val ctx: Context) {
             message = if (v.ok) "Selected ${pair.id}" else "Refused ${pair.id}", error = !v.ok)
     }
 
-    private fun run(argv: List<String>): Pair<Int?, String> {
+    private fun run(argv: List<String>): Triple<Int?, String, String> {
         val pb = ProcessBuilder(argv).directory(root).redirectErrorStream(false)
         CoreEnv.sanitize(pb.environment())
         val p = pb.start()
         p.outputStream.close()
         val out = StringBuffer()
         val r = Thread { runCatching { p.inputStream.bufferedReader().use { out.append(it.readText()) } } }.apply { isDaemon = true; start() }
-        Thread { runCatching { p.errorStream.readBytes() } }.apply { isDaemon = true; start() }
+        val err = StringBuffer()
+        val e = Thread { runCatching { p.errorStream.bufferedReader().use { err.append(it.readText().takeLast(4096)) } } }.apply { isDaemon = true; start() }
         var rc: Int? = null
         val w = Thread { rc = runCatching { p.waitFor() }.getOrNull() }.apply { isDaemon = true; start() }
         w.join(10_000)
         if (w.isAlive) p.destroy()
-        r.join(1_000)
-        return rc to out.toString()
+        r.join(1_000); e.join(1_000)
+        return Triple(rc, out.toString(), err.toString())
     }
 
     private fun bg(f: () -> Unit) { Thread { f() }.apply { name = "loaders"; isDaemon = true; start() } }

@@ -2,7 +2,6 @@ package io.github.seuj09.spdhost.loader
 
 import java.io.File
 import java.io.InputStream
-import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
@@ -33,6 +32,17 @@ object LoaderPack {
     const val MAX_FILE_BYTES = 16L shl 20 // the core's LOADER_MAX_BYTES
     const val MAX_TOTAL_BYTES = 64L shl 20
     const val MAX_ENTRIES = 512
+    /** Cap on the raw SAF file copied to .incoming.zip.tmp before the pin check. */
+    const val MAX_PACK_BYTES = 64L shl 20
+
+    /**
+     * Soft 2: a crash between "fdl -> .old" and ".staging -> fdl" leaves no
+     * installed pack; put the previous one back.
+     */
+    fun restoreOld(root: File) {
+        val dest = File(root, "fdl"); val old = File(root, ".old")
+        if (!dest.exists() && old.isDirectory) old.renameTo(dest)
+    }
 
     private val SAFE_REL = Regex("""[A-Za-z0-9._+\-]+(/[A-Za-z0-9._+\-]+)*""")
 
@@ -40,25 +50,44 @@ object LoaderPack {
 
     /**
      * Imports [zip] into `[root]/fdl`. Returns the parsed index. The zip
-     * stream's own sha256 must equal [packPin]; the extracted fdl/index must
+     * file's own sha256 (hashed while copying, before any parsing) must equal [packPin]; the extracted fdl/index must
      * equal [indexPin]; every indexed file must be present with its sha256 and
      * nothing else may be in the pack.
      */
     fun import(zip: InputStream, root: File, packPin: String = LoaderPin.PACK_SHA256,
                indexPin: String = LoaderPin.INDEX_SHA256): LoaderIndex {
         root.mkdirs()
+        restoreOld(root)
+        val incoming = File(root, ".incoming.zip.tmp")
         val staging = File(root, ".staging")
-        staging.deleteRecursively()
-        if (!staging.mkdirs()) throw Refused("cannot create ${staging.path}")
         try {
+            // #37 D1: copy + hash the SAF stream first (capped); no zip parsing
+            // and no .staging until the whole file matches the pin.
+            incoming.delete()
             val zipMd = MessageDigest.getInstance("SHA-256")
+            var size = 0L
+            incoming.outputStream().use { o ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val r = zip.read(buf)
+                    if (r < 0) break
+                    size += r
+                    if (size > MAX_PACK_BYTES) throw Refused("pack file is larger than ${MAX_PACK_BYTES shr 20} MiB")
+                    zipMd.update(buf, 0, r); o.write(buf, 0, r)
+                }
+            }
+            val packSha = sha256Hex(zipMd.digest())
+            if (packSha != packPin) throw Refused("pack sha256 $packSha is not the pinned $packPin")
+            staging.deleteRecursively()
+            if (!staging.mkdirs()) throw Refused("cannot create ${staging.path}")
             val shas = HashMap<String, String>()
             var total = 0L
-            val dz = DigestInputStream(zip, zipMd)
-            ZipInputStream(dz).use { z ->
+            var entries = 0
+            ZipInputStream(incoming.inputStream().buffered()).use { z ->
                 while (true) {
                     val e = z.nextEntry ?: break
-                    if (shas.size >= MAX_ENTRIES) throw Refused("more than $MAX_ENTRIES entries")
+                    // Soft 1: directory entries count toward the limit too.
+                    if (++entries > MAX_ENTRIES) throw Refused("more than $MAX_ENTRIES entries")
                     val name = e.name
                     if (e.isDirectory) continue
                     if (!name.startsWith("fdl/")) throw Refused("entry outside fdl/: $name")
@@ -83,13 +112,7 @@ object LoaderPack {
                     }
                     shas[rel] = sha256Hex(md.digest())
                 }
-                // Drain so the digest covers the whole file (central directory too).
-                val buf = ByteArray(8192)
-                @Suppress("ControlFlowWithEmptyBody")
-                while (dz.read(buf) >= 0) {}
             }
-            val packSha = sha256Hex(zipMd.digest())
-            if (packSha != packPin) throw Refused("pack sha256 $packSha is not the pinned $packPin")
             val idxSha = shas["index"] ?: throw Refused("no fdl/index in the pack")
             if (idxSha != indexPin) throw Refused("fdl/index sha256 $idxSha is not the pinned $indexPin")
             val index = parseIndex(File(staging, "index").readText())
@@ -109,11 +132,15 @@ object LoaderPack {
             return index
         } finally {
             staging.deleteRecursively()
+            incoming.delete()
         }
     }
 
     /** The installed pack's index, re-verified against the pin; null if absent or not pinned. */
     fun installed(root: File, indexPin: String = LoaderPin.INDEX_SHA256): LoaderIndex? {
+        // Soft 3: index-only recheck is enough here; `loaders check` re-hashes
+        // FDL1/FDL2/stub against this index before any model is selected.
+        restoreOld(root)
         val f = File(root, "fdl/index")
         if (!f.isFile) return null
         val b = f.readBytes()
