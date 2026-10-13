@@ -21,6 +21,9 @@ class SpdhostApp : Application() {
     /** Imported loader pack + picked model (P1-4). */
     val loaders by lazy { LoaderRepo(this) }
 
+    /** Dump folder, saved table, images list (P1-5). */
+    val dumps by lazy { io.github.seuj09.spdhost.dump.DumpRepo(this) }
+
     private val _core = MutableStateFlow<CoreProbe?>(null)
     val core: StateFlow<CoreProbe?> = _core.asStateFlow()
     @Volatile private var probing = false

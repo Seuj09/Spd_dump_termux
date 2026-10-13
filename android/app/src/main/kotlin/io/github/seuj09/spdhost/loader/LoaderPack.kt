@@ -12,12 +12,14 @@ data class LoaderPair(val soc: String, val model: String, val fdl1: String, val 
 }
 
 /** A `soc NAME fdl1=… fdl2=…` line: the load addresses for that chip. */
-data class SocAddrs(val name: String, val fdl1: String, val fdl2: String)
+data class SocAddrs(val name: String, val fdl1: String, val fdl2: String, val stub: String? = null)
 
 data class LoaderIndex(
     val socs: Map<String, SocAddrs>,
     val files: Map<String, String>, // rel path -> sha256
     val pairs: List<LoaderPair>,
+    /** soc -> the `file … stub SOC ADDR PATH` whose ADDR is that soc's stub= (P1-5 exec_addr). */
+    val stubs: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -152,6 +154,7 @@ object LoaderPack {
         val socs = LinkedHashMap<String, SocAddrs>()
         val files = LinkedHashMap<String, String>()
         val pairs = ArrayList<LoaderPair>()
+        val stubFiles = ArrayList<Triple<String, String, String>>()
         var header = false
         var ended = false
         for (raw in text.lineSequence()) {
@@ -163,9 +166,9 @@ object LoaderPack {
                 "spdhost-fdl-index" -> { if (t.getOrNull(1) != "1") throw Refused("fdl/index: unknown format ${t.getOrNull(1)}"); header = true }
                 "soc" -> {
                     val kv = t.drop(2).mapNotNull { it.split('=', limit = 2).takeIf { p -> p.size == 2 } }.associate { it[0] to it[1] }
-                    socs[t[1]] = SocAddrs(t[1], kv["fdl1"] ?: throw Refused("soc ${t[1]}: no fdl1"), kv["fdl2"] ?: throw Refused("soc ${t[1]}: no fdl2"))
+                    socs[t[1]] = SocAddrs(t[1], kv["fdl1"] ?: throw Refused("soc ${t[1]}: no fdl1"), kv["fdl2"] ?: throw Refused("soc ${t[1]}: no fdl2"), kv["stub"])
                 }
-                "file" -> { if (t.size != 6) throw Refused("fdl/index: bad file line"); files[t[5]] = t[1] }
+                "file" -> { if (t.size != 6) throw Refused("fdl/index: bad file line"); files[t[5]] = t[1]; if (t[2] == "stub") stubFiles += Triple(t[3], t[4], t[5]) }
                 "pair" -> { if (t.size != 5) throw Refused("fdl/index: bad pair line"); pairs += LoaderPair(t[1], t[2], t[3], t[4]) }
                 "end" -> ended = true
                 else -> throw Refused("fdl/index: unknown line ${t[0]}")
@@ -176,6 +179,10 @@ object LoaderPack {
             if (p.soc !in socs) throw Refused("pair ${p.id}: unknown soc")
             if (p.fdl1 !in files || p.fdl2 !in files) throw Refused("pair ${p.id}: file not indexed")
         }
-        return LoaderIndex(socs, files, pairs)
+        val stubs = socs.values.mapNotNull { sa ->
+            val a = sa.stub?.lowercase() ?: return@mapNotNull null
+            stubFiles.firstOrNull { it.first == sa.name && it.second.lowercase() == a }?.let { sa.name to it.third }
+        }.toMap()
+        return LoaderIndex(socs, files, pairs, stubs)
     }
 }

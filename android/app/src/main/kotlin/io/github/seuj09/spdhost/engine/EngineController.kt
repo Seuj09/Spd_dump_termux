@@ -14,6 +14,8 @@ data class EngineState(
     val refusal: String? = null,
     val log: List<String> = emptyList(),
     val events: List<String> = emptyList(),
+    /** P1-5: hello / preflight / dump files / op result, folded from events. */
+    val view: SessionView = SessionView(),
 )
 
 class EngineController {
@@ -23,7 +25,7 @@ class EngineController {
     @Volatile var session: EngineSession? = null
 
     fun log(msg: String) = _state.update { it.copy(log = (it.log + stamp(msg)).takeLast(200)) }
-    fun event(e: EngineEvent) = _state.update { it.copy(events = (it.events + stamp(e.summary())).takeLast(200)) }
+    fun event(e: EngineEvent) = _state.update { it.copy(events = (it.events + stamp(e.summary())).takeLast(200), view = it.view.reduce(e)) }
     fun refused(why: String) = _state.update { it.copy(running = false, refusal = why, log = (it.log + stamp("refused: $why")).takeLast(200)) }
     fun started(cmds: List<String>) = _state.update { EngineState(running = true, commands = cmds, log = it.log.takeLast(50)) }
     fun stopping() = _state.update { it.copy(stopping = true) }

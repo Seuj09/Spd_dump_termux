@@ -68,6 +68,15 @@ class EngineService : Service() {
             val probe = CoreRunner.probeCaps(this)
             val why = EngineGate.refusal(probe.caps, BuildConfig.GIT_SHA)
             if (why != null) { ctl.refused(why); finish(); return@Thread }
+            // P1-5: only the read-only grammar, and the --part-xml folder
+            // (DIR/meta) must exist before the session: the core does not
+            // create it.
+            val bad = runCatching { EngineArgv.validate(commands) }.exceptionOrNull()
+            if (bad != null) { ctl.refused(bad.message ?: "refused"); finish(); return@Thread }
+            for (d in SessionArgs.dirsToCreate(commands)) {
+                val f = java.io.File(d)
+                if (!f.isDirectory && !f.mkdirs()) { ctl.refused("cannot create $d"); finish(); return@Thread }
+            }
             val fd = app.broker.holdForEngine()
             if (fd == null) { ctl.refused("the USB device is not open"); finish(); return@Thread }
             acquireWake()
