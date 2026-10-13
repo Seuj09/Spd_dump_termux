@@ -54,7 +54,8 @@ object LoaderPack {
             val zipMd = MessageDigest.getInstance("SHA-256")
             val shas = HashMap<String, String>()
             var total = 0L
-            ZipInputStream(DigestInputStream(zip, zipMd)).use { z ->
+            val dz = DigestInputStream(zip, zipMd)
+            ZipInputStream(dz).use { z ->
                 while (true) {
                     val e = z.nextEntry ?: break
                     if (shas.size >= MAX_ENTRIES) throw Refused("more than $MAX_ENTRIES entries")
@@ -85,7 +86,7 @@ object LoaderPack {
                 // Drain so the digest covers the whole file (central directory too).
                 val buf = ByteArray(8192)
                 @Suppress("ControlFlowWithEmptyBody")
-                while (zip.read(buf) >= 0) {}
+                while (dz.read(buf) >= 0) {}
             }
             val packSha = sha256Hex(zipMd.digest())
             if (packSha != packPin) throw Refused("pack sha256 $packSha is not the pinned $packPin")
