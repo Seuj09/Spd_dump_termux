@@ -42,7 +42,7 @@ object EngineArgv {
         if (c.isEmpty()) throw Refused("no command")
         var i = 0
         fun at(k: Int, what: String): String = c.getOrNull(k) ?: throw Refused("missing $what after '${c[k - 1]}'")
-        fun abs(k: Int, what: String) = at(k, what).also { if (!it.startsWith("/") || it.contains("/../")) throw Refused("$what must be an absolute path: $it") }
+        fun abs(k: Int, what: String) = at(k, what).also { if (!isCleanAbsPath(it)) throw Refused("$what must be an absolute path without . or .. segments: $it") }
         fun hex(k: Int, what: String) = at(k, what).also { if (!HEX.matches(it)) throw Refused("$what must be 0x hex: $it") }
         while (i < c.size && c[i].startsWith("--")) {
             when (c[i]) {
@@ -87,6 +87,13 @@ object EngineArgv {
             if (x.startsWith("userdata")) throw Refused("userdata is not offered by the app")
         }
     }
+
+    /** Absolute, and no "." or ".." segment anywhere (P1-5 review note 1). */
+    fun isCleanAbsPath(p: String): Boolean =
+        p.startsWith("/") && p.split('/').none { it == "." || it == ".." }
+
+    /** The app's partition-name rule (stricter than the core's name_ok; fails closed). */
+    fun partNameOk(name: String): Boolean = PART_NAME.matches(name) && !name.startsWith("userdata")
 
     fun checkSockPath(path: String) {
         if (!path.startsWith("/")) throw Refused("socket path must be an absolute filesystem path")
