@@ -26,9 +26,9 @@ import org.robolectric.annotation.Config
  * Runs on the minSdk (24) and on 34 (the FGS-type rules).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [24, 34])
+@Config(sdk = [24, 34], application = E8App::class)
 class LifecycleE8Test {
-    private val app get() = ApplicationProvider.getApplicationContext<SpdhostApp>()
+    private val app get() = ApplicationProvider.getApplicationContext<SpdhostApp>() // an E8App
 
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
 

@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Process-wide holders: the USB broker and the last core probe survive Activity recreation. */
-class SpdhostApp : Application() {
+open class SpdhostApp : Application() {
     lateinit var broker: UsbBroker
         private set
 
