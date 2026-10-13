@@ -34,7 +34,8 @@ object SessionArgs {
     fun meta(dumpDir: String) = "$dumpDir/meta"
     fun partsFile(dumpDir: String) = "${meta(dumpDir)}/partition_list.txt"
 
-    fun hello(): List<String> = listOf("ping").also(EngineArgv::validate)
+    /** BootROM hello: menu.sh `run_session ping` -> `--timeout 3000 ping` (E2 golden hello). */
+    fun hello(): List<String> = listOf("--timeout", TIMEOUT_MS, "ping").also(EngineArgv::validate)
 
     fun parts(loaders: List<String>, dumpDir: String, ending: Ending): List<String> =
         (listOf("--timeout", TIMEOUT_MS, "--part-xml", meta(dumpDir)) + loaders +

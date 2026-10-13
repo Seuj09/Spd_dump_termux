@@ -168,7 +168,7 @@ private fun EngineCard(
         Text(text, color = color, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { onStart(listOf("ping")) },
+                onClick = { onStart(SessionArgs.hello()) },
                 enabled = !e.running && gate == null && usb is UsbState.Opened,
             ) { Text("BootROM hello (ping)") }
             OutlinedButton(onClick = onStop, enabled = e.running && !e.stopping) { Text("Stop") }
@@ -415,6 +415,9 @@ private fun ExportBlock(app: SpdhostApp, d: DumpState, shown: List<io.github.seu
     OutlinedButton(onClick = { pick.launch(null) }, enabled = dir != null && shown.isNotEmpty() && !running && !ex.running) {
         Text(if (ex.running) "Exporting…" else "Export (verify against SHA256SUMS)")
     }
-    if (ex.running) OutlinedButton(onClick = { app.exports.cancel() }) { Text("Cancel export") }
+    // #39 S3: after a tap the button says so and stays disabled until the worker stops.
+    if (ex.running) OutlinedButton(onClick = { app.exports.cancel() }, enabled = !ex.cancelling) {
+        Text(if (ex.cancelling) "Cancelling…" else "Cancel export")
+    }
     if (ex.lines.isNotEmpty()) Mono(ex.lines.joinToString("\n"))
 }
