@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,6 +42,8 @@ import io.github.seuj09.spdhost.SpdhostApp
 import io.github.seuj09.spdhost.engine.CoreProbe
 import io.github.seuj09.spdhost.engine.EngineGate
 import io.github.seuj09.spdhost.engine.EngineState
+import io.github.seuj09.spdhost.engine.SessionArgs
+import io.github.seuj09.spdhost.dump.DumpState
 import io.github.seuj09.spdhost.loader.LoaderPair
 import io.github.seuj09.spdhost.loader.LoaderPin
 import io.github.seuj09.spdhost.loader.LoaderState
@@ -86,12 +89,15 @@ private fun StatusScreen(app: SpdhostApp, modifier: Modifier, onStart: (List<Str
         CoreCard(core, onRetry = app::probeCore)
         EngineCard(engine, usb, core, onStart, onStop)
         LoaderCard(loaders, onImport, app.loaders::pick)
+        val dumps by app.dumps.state.collectAsStateWithLifecycle()
+        LaunchedEffect(engine.running) { if (!engine.running) app.dumps.refresh() }
+        DumpCard(app, dumps, engine, usb, core, loaders, onStart)
         Section("Events") {
             if (log.isEmpty()) Text("—") else Mono(log.joinToString("\n"))
         }
         Text(
-            "Read-only: this build runs only the BootROM hello (ping) through the engine " +
-                "service, and checks loader packs offline. No dump, write, misc or set-active.",
+            "Read-only: BootROM hello, partition table, dumps into the app's own folder, then " +
+                "reset or power-off. No write, misc or set-active.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -279,5 +285,91 @@ private fun Section(title: String, content: @Composable () -> Unit) {
 private fun Mono(text: String) {
     SelectionContainer {
         Text(text, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
+    }
+}
+
+/**
+ * P1-5: hello is the Engine card's ping; here: read the partition table
+ * (`parts`), dump one / all_lite / all with `ops dump` into
+ * getExternalFilesDir()/dumps/<time>, ending reset or power-off. Every session
+ * runs the picked model's loaders (selected only after `loaders check`).
+ */
+@Composable
+private fun DumpCard(
+    app: SpdhostApp, d: DumpState, e: EngineState, usb: UsbState, core: CoreProbe?,
+    loaders: LoaderState, onStart: (List<String>) -> Unit,
+) {
+    Section("Partition table and dump") {
+        var ending by rememberSaveable { mutableStateOf(SessionArgs.Ending.RESET) }
+        var one by rememberSaveable { mutableStateOf<String?>(null) }
+        var showJson by rememberSaveable { mutableStateOf(false) }
+        val caps = core?.caps?.caps.orEmpty()
+        val pair = loaders.selected
+        val ix = loaders.index
+        val why = when {
+            e.running -> "a session is running"
+            usb !is UsbState.Opened -> "open the device first"
+            pair == null || ix == null -> "pick a model (loaders check must pass)"
+            "ops-dump" !in caps -> "this core has no ops-dump cap"
+            else -> null
+        }
+        Text("Folder: ${d.dir?.absolutePath ?: "(created on first run)"}", style = MaterialTheme.typography.bodySmall)
+        d.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        why?.let { Text(it, color = Color.Gray) }
+        Text("Ending after the session:")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SessionArgs.Ending.values().forEach { en ->
+                if (en == ending) Button(onClick = {}) { Text(en.label) }
+                else OutlinedButton(onClick = { ending = en }) { Text(en.label) }
+            }
+        }
+        fun go(build: (List<String>, String) -> List<String>) {
+            val dir = app.dumps.dir() ?: return
+            val l = SessionArgs.loaders(app.loaders.root.absolutePath, ix!!, pair!!)
+            runCatching { build(l, dir.absolutePath) }
+                .onSuccess(onStart).onFailure { app.engine.refused(it.message ?: "refused") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { go { l, dir -> SessionArgs.parts(l, dir, ending) } }, enabled = why == null) { Text("Read partition table") }
+            OutlinedButton(onClick = { app.dumps.newFolder() }, enabled = !e.running) { Text("New folder") }
+        }
+        val table = d.table
+        if (table != null) {
+            Text("Table: ${table.rows.size} rows, unit shift ${table.shift ?: "?"}, " +
+                if (table.verified) "sizes verified" else "sizes NOT verified (estimate)")
+            OutlinedButton(onClick = { showJson = !showJson }) { Text(if (showJson) "Hide JSON" else "Show table JSON") }
+            if (showJson) Mono(table.toJson())
+            Text("Dump one partition:", style = MaterialTheme.typography.bodySmall)
+            table.rows.forEach { r ->
+                val label = "${r.index} ${r.name}" + (r.bytes?.let { " · ${it shr 20} MiB" } ?: "")
+                if (r.name.startsWith("userdata")) return@forEach
+                if (one == r.name) Button(onClick = { one = null }, modifier = Modifier.fillMaxWidth()) { Text("✓ $label") }
+                else OutlinedButton(onClick = { one = r.name }, modifier = Modifier.fillMaxWidth()) { Text(label) }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { one?.let { n -> go { l, dir -> SessionArgs.dump(l, dir, SessionArgs.Preset.One(n), ending) } } },
+                enabled = why == null && one != null) { Text("Dump ${one ?: "one"}") }
+            Button(onClick = { go { l, dir -> SessionArgs.dump(l, dir, SessionArgs.Preset.AllLite, ending) } }, enabled = why == null) { Text("all_lite") }
+            Button(onClick = { go { l, dir -> SessionArgs.dump(l, dir, SessionArgs.Preset.All, ending) } }, enabled = why == null) { Text("all") }
+        }
+        val v = e.view
+        val lines = buildList {
+            v.hello?.let { add(it) }
+            v.stage?.let { add("stage $it") }
+            v.progress?.let { add(it) }
+            v.preflight?.let { add(it.text()) }
+            v.files.forEach { f -> add("%-10s %-14s %s".format(f.state, f.name, f.bytes?.let { "${it shr 20} MiB" } ?: "")) }
+            v.dumpResult?.let { add(it) }
+            v.otherOp?.let { add("other op: $it") }
+        }
+        if (lines.isNotEmpty()) Mono(lines.joinToString("\n"))
+        val imgs = d.images
+        if (imgs != null) {
+            val shown = imgs.filterBy(table)
+            Text("Images in this folder (images list --json, filtered by the table): ${shown.size} of ${imgs.images.size}",
+                style = MaterialTheme.typography.bodySmall)
+            if (shown.isNotEmpty()) Mono(shown.joinToString("\n") { "%-14s %8d MiB %s".format(it.name, it.bytes shr 20, it.sha256?.take(12) ?: "no sha") })
+        }
     }
 }
