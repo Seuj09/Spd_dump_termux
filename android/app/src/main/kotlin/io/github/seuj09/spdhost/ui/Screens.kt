@@ -415,5 +415,6 @@ private fun ExportBlock(app: SpdhostApp, d: DumpState, shown: List<io.github.seu
     OutlinedButton(onClick = { pick.launch(null) }, enabled = dir != null && shown.isNotEmpty() && !running && !ex.running) {
         Text(if (ex.running) "Exporting…" else "Export (verify against SHA256SUMS)")
     }
+    if (ex.running) OutlinedButton(onClick = { app.exports.cancel() }) { Text("Cancel export") }
     if (ex.lines.isNotEmpty()) Mono(ex.lines.joinToString("\n"))
 }

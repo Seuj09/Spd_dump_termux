@@ -68,4 +68,31 @@ class ExportTest {
         assertEquals(listOf("boot_b.img.partial", "vbmeta.img.unverified"), DumpRepo.leftovers(d))
         d.deleteRecursively()
     }
+
+    @Test fun cancelledCopyReturnsCancelled() {
+        var calls = 0
+        val out = ByteArrayOutputStream()
+        val r = Exporter.copyVerified("x", ByteArrayInputStream(data), out, sha(data), data.size.toLong()) { ++calls > 1 }
+        assertTrue(r is Exporter.Result.Cancelled)
+        assertEquals((1 shl 20).toLong(), (r as Exporter.Result.Cancelled).bytes) // stopped after one buffer
+        assertTrue(Exporter.copyVerified("x", ByteArrayInputStream(data), ByteArrayOutputStream(), sha(data), data.size.toLong()) { true }
+            is Exporter.Result.Cancelled)
+    }
+
+    @Test fun filteredSumsAndFlatNames() {
+        val h = sha(data)
+        val text = Exporter.sumsFor(listOf("boot_a.img" to h))
+        assertEquals("$h  boot_a.img\n", text)
+        assertEquals(mapOf("boot_a.img" to h), Sums.parse(text)) // round-trips through the core format
+        assertTrue(Exporter.flatNameOk("boot_a.img"))
+        assertFalse(Exporter.flatNameOk("sub/boot_a.img"))
+        assertFalse(Exporter.flatNameOk(".."))
+    }
+
+    @Test fun exportRepoFailurePaths() {
+        val src = File("src/main/kotlin/io/github/seuj09/spdhost/dump/ExportRepo.kt").readText()
+        assertFalse("no 'w' fallback", Regex("openOutputStream\\([^)]*\"w\"\\)").containsMatchIn(src))
+        assertTrue(src.contains("target could NOT be deleted"))
+        assertTrue(src.contains("fun cancel()"))
+    }
 }
