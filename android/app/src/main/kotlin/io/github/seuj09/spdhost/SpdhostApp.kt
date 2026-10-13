@@ -2,6 +2,7 @@ package io.github.seuj09.spdhost
 
 import android.app.Application
 import io.github.seuj09.spdhost.engine.CoreProbe
+import io.github.seuj09.spdhost.engine.EngineController
 import io.github.seuj09.spdhost.engine.CoreRunner
 import io.github.seuj09.spdhost.usb.UsbBroker
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,6 +13,9 @@ import kotlinx.coroutines.flow.asStateFlow
 class SpdhostApp : Application() {
     lateinit var broker: UsbBroker
         private set
+
+    /** Engine session state (P1-3); the session itself runs in EngineService. */
+    val engine = EngineController()
 
     private val _core = MutableStateFlow<CoreProbe?>(null)
     val core: StateFlow<CoreProbe?> = _core.asStateFlow()

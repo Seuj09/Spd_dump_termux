@@ -32,7 +32,8 @@ import kotlinx.coroutines.flow.asStateFlow
  *    RECEIVER_NOT_EXPORTED); system USB broadcasts still reach them.
  *  - Opens the device with openDevice() to get the usbfs fd and keeps the
  *    UsbDeviceConnection open until the device leaves or the user closes it
- *    (later: until the core child exits). It never calls claimInterface():
+ *    (and, while a core session runs, until the child exits: see
+ *    [holdForEngine]). It never calls claimInterface():
  *    the core claims the interface itself through libusb.
  *
  * All state changes run on the main thread through [UsbStateMachine].
@@ -51,6 +52,15 @@ class UsbBroker(context: Context) {
 
     private var connection: UsbDeviceConnection? = null
     private var started = false
+
+    /**
+     * P1-3: while the core child runs, the connection is pinned. A close
+     * (user, detach, multiple devices) is deferred until [releaseFromEngine],
+     * so the fd the child holds a dup of is never closed under it by us.
+     */
+    @Volatile var engineHeld = false
+        private set
+    private var closePending = false
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -132,7 +142,42 @@ class UsbBroker(context: Context) {
         return PendingIntent.getBroadcast(app, 0, intent, flags)
     }
 
+    /**
+     * Pins the open connection for a core session and returns its fd, or
+     * null when nothing is open. Any thread; runs on the main thread.
+     */
+    fun holdForEngine(): Int? = onMain {
+        val c = connection
+        if (c == null || engineHeld) null else {
+            engineHeld = true
+            note("connection pinned for the core session")
+            c.fileDescriptor
+        }
+    }
+
+    /** The child exited: unpin, and carry out a close that was deferred. */
+    fun releaseFromEngine() {
+        onMain {
+            engineHeld = false
+            note("core session ended; connection unpinned")
+            if (closePending) { closePending = false; closeNow() }
+        }
+    }
+
+    private fun <T> onMain(body: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return body()
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var out: Result<T>? = null
+        main.post { out = runCatching(body); latch.countDown() }
+        latch.await()
+        return out!!.getOrThrow()
+    }
+
     private fun openNow(info: DeviceInfo) {
+        if (engineHeld) {
+            dispatch(UsbEvent.OpenFailed(info.name, "a core session is running"))
+            return
+        }
         val dev = find(info.name)
         if (dev == null) {
             dispatch(UsbEvent.OpenFailed(info.name, "device is gone"))
@@ -158,6 +203,11 @@ class UsbBroker(context: Context) {
     }
 
     private fun closeNow() {
+        if (engineHeld) {
+            closePending = true
+            note("close deferred until the core session ends")
+            return
+        }
         val c = connection ?: return
         connection = null
         c.close()

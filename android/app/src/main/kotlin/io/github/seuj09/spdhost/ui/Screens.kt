@@ -39,6 +39,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.seuj09.spdhost.BuildConfig
 import io.github.seuj09.spdhost.SpdhostApp
 import io.github.seuj09.spdhost.engine.CoreProbe
+import io.github.seuj09.spdhost.engine.EngineGate
+import io.github.seuj09.spdhost.engine.EngineState
 import io.github.seuj09.spdhost.usb.DeviceInfo
 import io.github.seuj09.spdhost.usb.UsbBroker
 import io.github.seuj09.spdhost.usb.UsbState
@@ -46,7 +48,7 @@ import io.github.seuj09.spdhost.usb.device
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRoot(app: SpdhostApp) {
+fun AppRoot(app: SpdhostApp, onStart: (List<String>) -> Unit, onStop: () -> Unit) {
     var showNotice by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showNotice) { showNotice = false }
     Scaffold(
@@ -62,27 +64,29 @@ fun AppRoot(app: SpdhostApp) {
         },
     ) { pad ->
         val mod = Modifier.padding(pad).fillMaxSize()
-        if (showNotice) NoticeScreen(mod) else StatusScreen(app, mod)
+        if (showNotice) NoticeScreen(mod) else StatusScreen(app, mod, onStart, onStop)
     }
 }
 
 @Composable
-private fun StatusScreen(app: SpdhostApp, modifier: Modifier) {
+private fun StatusScreen(app: SpdhostApp, modifier: Modifier, onStart: (List<String>) -> Unit, onStop: () -> Unit) {
     val usb by app.broker.state.collectAsStateWithLifecycle()
     val log by app.broker.log.collectAsStateWithLifecycle()
     val core by app.core.collectAsStateWithLifecycle()
+    val engine by app.engine.state.collectAsStateWithLifecycle()
     Column(
         modifier.verticalScroll(rememberScrollState()).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        UsbCard(usb, app.broker)
+        UsbCard(usb, app.broker, engine.running)
         CoreCard(core, onRetry = app::probeCore)
+        EngineCard(engine, usb, core, onStart, onStop)
         Section("Events") {
             if (log.isEmpty()) Text("—") else Mono(log.joinToString("\n"))
         }
         Text(
-            "Detection only. This build does not hand the USB fd to the core and runs no " +
-                "hello, dump or write: those come with the engine service (plan P0-5/P1-3).",
+            "Read-only: this build runs only the BootROM hello (ping) through the engine " +
+                "service. No dump, write, misc or set-active.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -102,7 +106,7 @@ private fun headline(s: UsbState): Pair<String, Color> = when (s) {
 }
 
 @Composable
-private fun UsbCard(s: UsbState, broker: UsbBroker) {
+private fun UsbCard(s: UsbState, broker: UsbBroker, engineRunning: Boolean) {
     Section("USB") {
         val (text, color) = headline(s)
         Text(text, color = color, fontWeight = FontWeight.Bold)
@@ -118,11 +122,44 @@ private fun UsbCard(s: UsbState, broker: UsbBroker) {
                 is UsbState.Granted, is UsbState.OpenFailed ->
                     Button(onClick = broker::open) { Text("Open") }
                 is UsbState.Opened ->
-                    OutlinedButton(onClick = broker::close) { Text("Close") }
+                    // Never close under a running core child (P1-3).
+                    OutlinedButton(onClick = broker::close, enabled = !engineRunning) { Text("Close") }
                 else -> Unit
             }
             OutlinedButton(onClick = broker::rescan) { Text("Rescan") }
         }
+    }
+}
+
+@Composable
+private fun EngineCard(
+    e: EngineState,
+    usb: UsbState,
+    core: CoreProbe?,
+    onStart: (List<String>) -> Unit,
+    onStop: () -> Unit,
+) {
+    Section("Engine session") {
+        val gate = EngineGate.refusal(core?.caps, BuildConfig.GIT_SHA)
+        val (text, color) = when {
+            e.stopping -> "Stopping (SIGINT sent)…" to Color(0xFFEF6C00)
+            e.running -> "Running: ${e.commands.joinToString(" ")}" to Color(0xFF1565C0)
+            e.refusal != null && e.lastRc == null -> "Refused: ${e.refusal}" to Color(0xFFC62828)
+            e.lastRc != null -> "Last run exited rc=${e.lastRc}" to if (e.lastRc == 0) Color(0xFF2E7D32) else Color(0xFFC62828)
+            gate != null -> "Caps gate: $gate" to Color(0xFFC62828)
+            usb !is UsbState.Opened -> "Open the device first" to Color.Gray
+            else -> "Ready" to Color(0xFF2E7D32)
+        }
+        Text(text, color = color, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { onStart(listOf("ping")) },
+                enabled = !e.running && gate == null && usb is UsbState.Opened,
+            ) { Text("BootROM hello (ping)") }
+            OutlinedButton(onClick = onStop, enabled = e.running && !e.stopping) { Text("Stop") }
+        }
+        if (e.events.isNotEmpty()) Mono(e.events.takeLast(30).joinToString("\n"))
+        if (e.log.isNotEmpty()) Mono(e.log.takeLast(30).joinToString("\n"))
     }
 }
 
