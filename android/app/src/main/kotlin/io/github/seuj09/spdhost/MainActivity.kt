@@ -50,6 +50,14 @@ class MainActivity : ComponentActivity() {
 
     fun stopEngine() = EngineService.stop(this)
 
+    // P1-4: SAF import of fdl-pack-<sha7>.zip. Copied into the app dir and
+    // verified against the pinned sha; the Uri itself is not kept.
+    private val packPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { app.loaders.import(it) }
+    }
+
+    fun importLoaderPack() = packPicker.launch(arrayOf("application/zip", "application/octet-stream", "application/x-zip-compressed"))
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -57,7 +65,7 @@ class MainActivity : ComponentActivity() {
         // (rotation) replays the old one, which the broker would just rescan.
         if (savedInstanceState == null) app.broker.handleIntent(intent)
         setContent {
-            SpdhostTheme { AppRoot(app, ::startEngine, ::stopEngine) }
+            SpdhostTheme { AppRoot(app, ::startEngine, ::stopEngine, ::importLoaderPack) }
         }
     }
 

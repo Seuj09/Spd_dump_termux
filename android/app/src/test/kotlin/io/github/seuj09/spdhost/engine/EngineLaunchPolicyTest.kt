@@ -45,5 +45,26 @@ class EngineLaunchPolicyTest {
         assertFalse(src.contains("setAction(ACTION_STOP)"))
     }
 
+    @Test fun refusalStillGoesForegroundOn26Plus() {
+        assertNull(EngineLaunchPolicy.refusalForegroundType(24))
+        assertNull(EngineLaunchPolicy.refusalForegroundType(25))
+        for (sdk in 26..33) assertEquals(0, EngineLaunchPolicy.refusalForegroundType(sdk))
+        for (sdk in 34..36) assertEquals(EngineLaunchPolicy.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE, EngineLaunchPolicy.refusalForegroundType(sdk))
+        assertEquals(2048, EngineLaunchPolicy.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
+    }
+
+    @Test fun everyRefusalInOnStartCommandGoesThroughRefuseForeground() {
+        val src = File("src/main/kotlin/io/github/seuj09/spdhost/engine/EngineService.kt").readText()
+        val body = src.substringAfter("override fun onStartCommand").substringBefore("// STOP / null / unknown")
+        assertFalse("bare stopSelf() in the START branch", body.contains("stopSelf()"))
+        assertEquals(2, Regex("""refuseForeground\(\)""").findAll(body).count())
+        val rf = src.substringAfter("private fun refuseForeground()").substringBefore("private fun createChannel")
+        assertTrue(rf.contains("refusalForegroundType(Build.VERSION.SDK_INT)"))
+        assertTrue(rf.contains("ServiceCompat.startForeground(this, NOTIFICATION_ID, n, type)"))
+        assertTrue(rf.indexOf("startForeground") < rf.indexOf("finish()"))
+        assertFalse(rf.contains("CONNECTED_DEVICE"))
+        assertTrue(src.contains("#36 S2"))
+    }
+
     companion object { val DEV = DeviceInfo("/dev/bus/usb/001/004", 0x1782, 0x4d00) }
 }

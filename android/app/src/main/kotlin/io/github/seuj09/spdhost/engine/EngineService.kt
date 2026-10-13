@@ -42,12 +42,12 @@ class EngineService : Service() {
             // D1: never startForeground(connectedDevice) without an open
             // device (34+ throws SecurityException without USB permission).
             val why = EngineLaunchPolicy.startRefusal(app.broker.state.value)
-            if (why != null) { app.engine.refused(why); stopSelf(); return START_NOT_STICKY }
+            if (why != null) { app.engine.refused(why); refuseForeground(); return START_NOT_STICKY }
             try {
                 goForeground()
             } catch (e: SecurityException) {
                 app.engine.refused("foreground service refused: ${e.message}")
-                stopSelf(); return START_NOT_STICKY
+                refuseForeground(); return START_NOT_STICKY
             }
             startSession(intent!!.getStringArrayListExtra(EXTRA_COMMANDS).orEmpty())
             return START_NOT_STICKY
@@ -88,6 +88,12 @@ class EngineService : Service() {
                             runCatching { app.broker.releaseFromEngine() }
                             runCatching { releaseWake() }
                         } finally {
+                            // #36 S2: finish() here is not coordinated with a
+                            // START that races in after the child exits. That
+                            // is fine while P1 is single-session (startSession
+                            // refuses a second session and the UI disables
+                            // Start while one runs); revisit before any
+                            // multi-session or reacquire (P2-R) work.
                             ctl.session = null
                             ctl.exited(rc)
                             finish()
@@ -110,12 +116,7 @@ class EngineService : Service() {
     }
 
     private fun goForeground() {
-        if (ApiGates.needsChannel(Build.VERSION.SDK_INT)) {
-            NotificationManagerCompat.from(this).createNotificationChannel(
-                NotificationChannelCompat.Builder(CHANNEL, NotificationManagerCompat.IMPORTANCE_LOW)
-                    .setName("Engine session").build()
-            )
-        }
+        if (ApiGates.needsChannel(Build.VERSION.SDK_INT)) createChannel()
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE, // minSdk 24 > 23; the content intent needs no extras
@@ -129,6 +130,37 @@ class EngineService : Service() {
             .build()
         val type = if (ApiGates.typeHonoured(Build.VERSION.SDK_INT)) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
         ServiceCompat.startForeground(this, NOTIFICATION_ID, n, type)
+    }
+
+    /**
+     * #36 S1: refusing a START that came through startForegroundService (26+)
+     * still owes the system a startForeground, else "did not call
+     * startForeground" kills the app (e.g. the device closed after the UI
+     * check). Go foreground briefly with a minimal notification of a type
+     * that needs no USB permission (EngineLaunchPolicy), then stop.
+     */
+    private fun refuseForeground() {
+        val type = EngineLaunchPolicy.refusalForegroundType(Build.VERSION.SDK_INT)
+        if (type != null) {
+            try {
+                if (ApiGates.needsChannel(Build.VERSION.SDK_INT)) createChannel()
+                val n = NotificationCompat.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle("spdhost session refused")
+                    .build()
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, n, type)
+            } catch (e: Exception) {
+                app.engine.log("minimal foreground failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        finish()
+    }
+
+    private fun createChannel() {
+        NotificationManagerCompat.from(this).createNotificationChannel(
+            NotificationChannelCompat.Builder(CHANNEL, NotificationManagerCompat.IMPORTANCE_LOW)
+                .setName("Engine session").build()
+        )
     }
 
     private fun acquireWake() {

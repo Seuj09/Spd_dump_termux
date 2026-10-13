@@ -47,10 +47,11 @@
         <!-- P1-3: owns one core session. Not exported; connectedDevice is
              honoured from 29 (ignored below), and on 34+ it needs
              FOREGROUND_SERVICE_CONNECTED_DEVICE plus the USB permission the
-             broker already holds. -->
+             broker already holds. shortService (34+, no permission) is used
+             only for the minimal notification of a refused START (#36 S1). -->
         <service
             android:name=".engine.EngineService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|shortService" />
     </application>
 </manifest>

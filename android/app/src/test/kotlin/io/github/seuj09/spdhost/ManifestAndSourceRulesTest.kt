@@ -96,6 +96,6 @@ class ManifestAndSourceRulesTest {
     @Test fun engineServiceIsPrivateConnectedDevice() {
         val svc = elements("service").single { it.getAttributeNS(ns, "name") == ".engine.EngineService" }
         assertEquals("false", svc.getAttributeNS(ns, "exported"))
-        assertEquals("connectedDevice", svc.getAttributeNS(ns, "foregroundServiceType"))
+        assertEquals("connectedDevice|shortService", svc.getAttributeNS(ns, "foregroundServiceType"))
     }
 }
