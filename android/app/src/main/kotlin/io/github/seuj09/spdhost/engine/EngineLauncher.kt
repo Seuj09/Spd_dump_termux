@@ -22,6 +22,15 @@ interface EngineLauncher {
     /** Blocking, off the main thread. Null = allowed; else why refused. */
     fun gateRefusal(ctx: Context): String?
 
+    /**
+     * Where the start work (caps gate, mkdirs, USB pin, spawn) runs: a daemon
+     * thread in the app. The E8 fake runs it inline on the main thread so the
+     * tests are deterministic, with no wall-clock waits (#41 note 4).
+     */
+    fun background(name: String, body: () -> Unit) {
+        Thread(body).apply { this.name = name; isDaemon = true; start() }
+    }
+
     fun create(
         ctx: Context,
         usbFd: Int,

@@ -1,6 +1,7 @@
 package io.github.seuj09.spdhost.e8
 
 import io.github.seuj09.spdhost.SpdhostApp
+import io.github.seuj09.spdhost.usb.UsbBroker
 import org.robolectric.Shadows.shadowOf
 
 /**
@@ -14,4 +15,6 @@ class E8App : SpdhostApp() {
         shadowOf(this).grantPermissions("$packageName.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION")
         super.onCreate()
     }
+
+    override fun newBroker(): UsbBroker = FakeUsbBroker(this)
 }

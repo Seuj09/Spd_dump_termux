@@ -98,16 +98,17 @@ dry_same() { # NAME
 	[[ -n $px ]] && mkdir -p "$px"
 	SPDHOST_PART_XML_DIR=$x timeout 60 "$tmp/spdhost" --dry-run "${m[@]}" >"$d/menu.out" 2>"$d/menu.err" </dev/null; rcm=$?
 	env -u SPDHOST_PART_XML_DIR timeout 60 "$tmp/spdhost" --dry-run "${a[@]}" >"$d/apk.out" 2>"$d/apk.err" </dev/null; rca=$?
-	# Difference 2 above: the menu's read-part misc 0x800 32 is a
-	# READ_START/READ_MIDST/READ_END triple (DRY CMD, CMD, CMD) the APK does not
-	# send; with the fake table it now really runs, so it is allowed only as
-	# exactly those three menu-only lines.
-	local extra=0
-	printf '%s\n' "${m[@]}" | grep -qx read-part && extra=3
-	if [[ $rcm == "$rca" ]] && [[ -s $d/apk.out ]] && cmp -s "$d/menu.out" "$d/apk.out"; then
+	# Difference 2 above: the menu's read-part misc 0x800 32 is READ_START misc,
+	# READ_MIDST 32@0x800, READ_END. With the fake table it really runs, so it
+	# is allowed only as one contiguous menu-only hunk of exactly those three
+	# frames (#41 note 3); any other difference fails.
+	local rp=0 dd
+	printf '%s\n' "${m[@]}" | grep -qx read-part && rp=1
+	dd=$(diff "$d/menu.out" "$d/apk.out")
+	if [[ $rcm == "$rca" ]] && [[ -s $d/apk.out ]] && [[ -z $dd ]]; then
 		ok "$name: --dry-run packet trace APK == menu ($(grep -c '^DRY' "$d/apk.out") packets, rc $rca)"
-	elif [[ $rcm == "$rca" && $extra -gt 0 ]] && ! diff "$d/menu.out" "$d/apk.out" | grep -q '^>' &&
-		[[ $(diff "$d/menu.out" "$d/apk.out" | grep -c '^< DRY CMD') == "$extra" && $(diff "$d/menu.out" "$d/apk.out" | grep -c '^<') == "$extra" ]]; then
+	elif [[ $rcm == "$rca" && $rp == 1 ]] && [[ $(sed -n 1p <<<"$dd") =~ ^([0-9]+),([0-9]+)d[0-9]+$ ]] &&
+		(( BASH_REMATCH[2] - BASH_REMATCH[1] == 2 )) && [[ $(sed 1d <<<"$dd") == "$MISC_READ" ]]; then
 		ok "$name: --dry-run packet trace APK == menu minus its misc read-part ($(grep -c '^DRY' "$d/apk.out") packets, rc $rca)"
 	else
 		bad "$name: --dry-run differs (rc menu $rcm apk $rca)"; diff "$d/menu.out" "$d/apk.out" | head -5
@@ -132,6 +133,8 @@ dry_same() { # NAME
 # eMMC FDL2. Rows are 1 MiB (a smaller row lowers spd_dump's size divisor).
 printf '%s\n' 'misc 1024' 'boot_a 1024' 'boot_b 1024' 'vbmeta_a 1024' 'vbmeta_b 1024' 'dtbo_a 1024' 'userdata 1024' > "$tmp/ptable"
 export SPDHOST_DRY_PTABLE=$tmp/ptable
+# The menu's misc slot read as diff shows it (frame hashes are deterministic).
+MISC_READ=$'< DRY CMD fnv=f0a4f1e6\n< DRY CMD fnv=3ed731c3\n< DRY CMD fnv=554c3d47'
 fix() { local v=$1; v=${v/#\/D/$2/D}; v=${v/#\/R/$root}; printf '%s' "$v"; }
 [[ ${1-} == --update ]] && UPDATE=1
 
@@ -142,6 +145,15 @@ BOOT_AFTER=reset;     trace dump-one-reset ops_dump_session boot_a
 BOOT_AFTER=power-off; trace dump-one-power-off ops_dump_session boot_a
 BOOT_AFTER=reset;     trace dump-all_lite-reset ops_dump_session all_lite
 BOOT_AFTER=power-off; trace dump-all-power-off ops_dump_session all
+
+# The fake table itself (#41 note 1): loaded once and logged; a size that does
+# not fit 32 bits refuses the whole table (plain ACKs -> no table).
+dry_parts() { SPDHOST_DRY_PTABLE=$1 timeout 30 "$tmp/spdhost" --dry-run --timeout 3000 fdl "$FDL1" "$FDL1_ADDR" fdl "$FDL2" "$FDL2_ADDR" parts "$tmp/pl.txt" >/dev/null 2>"$tmp/dp.err" </dev/null; }
+if dry_parts "$tmp/ptable" && [[ $(grep -c '^DRY ptable: 7 rows$' "$tmp/dp.err") == 1 ]]; then ok "dry ptable: loaded once, 7 rows"
+else bad "dry ptable: load/log"; tail -3 "$tmp/dp.err"; fi
+printf '%s\n' 'misc 1024' 'huge 4294967296' > "$tmp/ptable-big"
+if ! dry_parts "$tmp/ptable-big" && grep -q '^DRY ptable: row 2 (huge 4294967296 KiB) refused' "$tmp/dp.err"; then ok "dry ptable: >2^32-1 KiB row refused"
+else bad "dry ptable: overflow not refused"; tail -3 "$tmp/dp.err"; fi
 
 echo "menu-traces: $pass passed, $fail failed"
 (( fail == 0 ))
