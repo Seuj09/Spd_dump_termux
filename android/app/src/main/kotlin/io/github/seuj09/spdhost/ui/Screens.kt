@@ -41,6 +41,9 @@ import io.github.seuj09.spdhost.SpdhostApp
 import io.github.seuj09.spdhost.engine.CoreProbe
 import io.github.seuj09.spdhost.engine.EngineGate
 import io.github.seuj09.spdhost.engine.EngineState
+import io.github.seuj09.spdhost.loader.LoaderPair
+import io.github.seuj09.spdhost.loader.LoaderPin
+import io.github.seuj09.spdhost.loader.LoaderState
 import io.github.seuj09.spdhost.usb.DeviceInfo
 import io.github.seuj09.spdhost.usb.UsbBroker
 import io.github.seuj09.spdhost.usb.UsbState
@@ -48,7 +51,7 @@ import io.github.seuj09.spdhost.usb.device
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRoot(app: SpdhostApp, onStart: (List<String>) -> Unit, onStop: () -> Unit) {
+fun AppRoot(app: SpdhostApp, onStart: (List<String>) -> Unit, onStop: () -> Unit, onImport: () -> Unit) {
     var showNotice by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showNotice) { showNotice = false }
     Scaffold(
@@ -64,16 +67,17 @@ fun AppRoot(app: SpdhostApp, onStart: (List<String>) -> Unit, onStop: () -> Unit
         },
     ) { pad ->
         val mod = Modifier.padding(pad).fillMaxSize()
-        if (showNotice) NoticeScreen(mod) else StatusScreen(app, mod, onStart, onStop)
+        if (showNotice) NoticeScreen(mod) else StatusScreen(app, mod, onStart, onStop, onImport)
     }
 }
 
 @Composable
-private fun StatusScreen(app: SpdhostApp, modifier: Modifier, onStart: (List<String>) -> Unit, onStop: () -> Unit) {
+private fun StatusScreen(app: SpdhostApp, modifier: Modifier, onStart: (List<String>) -> Unit, onStop: () -> Unit, onImport: () -> Unit) {
     val usb by app.broker.state.collectAsStateWithLifecycle()
     val log by app.broker.log.collectAsStateWithLifecycle()
     val core by app.core.collectAsStateWithLifecycle()
     val engine by app.engine.state.collectAsStateWithLifecycle()
+    val loaders by app.loaders.state.collectAsStateWithLifecycle()
     Column(
         modifier.verticalScroll(rememberScrollState()).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -81,12 +85,13 @@ private fun StatusScreen(app: SpdhostApp, modifier: Modifier, onStart: (List<Str
         UsbCard(usb, app.broker, engine.running)
         CoreCard(core, onRetry = app::probeCore)
         EngineCard(engine, usb, core, onStart, onStop)
+        LoaderCard(loaders, onImport, app.loaders::pick)
         Section("Events") {
             if (log.isEmpty()) Text("—") else Mono(log.joinToString("\n"))
         }
         Text(
             "Read-only: this build runs only the BootROM hello (ping) through the engine " +
-                "service. No dump, write, misc or set-active.",
+                "service, and checks loader packs offline. No dump, write, misc or set-active.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -160,6 +165,28 @@ private fun EngineCard(
         }
         if (e.events.isNotEmpty()) Mono(e.events.takeLast(30).joinToString("\n"))
         if (e.log.isNotEmpty()) Mono(e.log.takeLast(30).joinToString("\n"))
+    }
+}
+
+@Composable
+private fun LoaderCard(s: LoaderState, onImport: () -> Unit, onPick: (LoaderPair) -> Unit) {
+    Section("Loaders (fdl pack)") {
+        s.message?.let { Text(it, color = if (s.error) Color(0xFFC62828) else Color.Unspecified, fontWeight = FontWeight.Bold) }
+        Mono("pinned pack  ${LoaderPin.PACK_SHA256.take(16)}…\npinned index ${LoaderPin.INDEX_SHA256.take(16)}…")
+        OutlinedButton(onClick = onImport, enabled = !s.busy) { Text("Import fdl-pack zip…") }
+        val ix = s.index ?: return@Section
+        Text("Model (pick yours; a model is used only after loaders check passes):", style = MaterialTheme.typography.bodySmall)
+        ix.pairs.forEach { p ->
+            val sel = s.selected == p
+            val label = (if (sel) "✓ " else "") + "${p.soc} · ${p.model}"
+            if (sel) Button(onClick = { onPick(p) }, enabled = !s.busy, modifier = Modifier.fillMaxWidth()) { Text(label) }
+            else OutlinedButton(onClick = { onPick(p) }, enabled = !s.busy, modifier = Modifier.fillMaxWidth()) { Text(label) }
+        }
+        s.lastCheck?.let { v ->
+            if (!v.ok) Mono("REFUSED:\n" + v.reasons.joinToString("\n"))
+            else Mono(listOf("pair", "soc", "fdl1_sha256", "fdl2_sha256", "exec", "stub_sha256")
+                .mapNotNull { k -> v.kv[k]?.let { "%-12s %s".format(k, it) } }.joinToString("\n"))
+        }
     }
 }
 

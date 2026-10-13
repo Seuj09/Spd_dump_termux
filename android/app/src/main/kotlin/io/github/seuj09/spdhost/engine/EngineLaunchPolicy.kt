@@ -18,4 +18,22 @@ object EngineLaunchPolicy {
 
     /** Whether onStartCommand for [action] goes foreground (connectedDevice). */
     fun goesForeground(action: String?): Boolean = action == EngineService.ACTION_START
+
+    /**
+     * #36 S1: a service started with startForegroundService (26+) must call
+     * startForeground even when it refuses, or the system kills the app
+     * ("did not call startForeground"). Null = no foreground needed (below
+     * 26: plain startService). Otherwise the FGS type for that minimal
+     * notification: on 34+ shortService (no permission precondition, unlike
+     * connectedDevice, which throws without USB permission); below, NONE (0)
+     * (types are only enforced from 34; ServiceCompat ignores them below 29).
+     */
+    fun refusalForegroundType(sdk: Int): Int? = when {
+        sdk < 26 -> null
+        sdk >= 34 -> FOREGROUND_SERVICE_TYPE_SHORT_SERVICE
+        else -> 0
+    }
+
+    /** ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE (API 34). */
+    const val FOREGROUND_SERVICE_TYPE_SHORT_SERVICE = 2048
 }
