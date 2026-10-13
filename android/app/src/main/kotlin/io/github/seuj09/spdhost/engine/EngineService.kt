@@ -9,14 +9,12 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.Process as AndroidProcess
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import io.github.seuj09.spdhost.ApiGates
-import io.github.seuj09.spdhost.BuildConfig
 import io.github.seuj09.spdhost.MainActivity
 import io.github.seuj09.spdhost.SpdhostApp
 
@@ -65,8 +63,7 @@ class EngineService : Service() {
         if (ctl.session != null) { ctl.log("a session is already running"); return }
         Thread {
             // Caps gate (blocking, offline: no USB).
-            val probe = CoreRunner.probeCaps(this)
-            val why = EngineGate.refusal(probe.caps, BuildConfig.GIT_SHA)
+            val why = launcher.gateRefusal(this)
             if (why != null) { ctl.refused(why); finish(); return@Thread }
             // P1-5: only the read-only grammar, and the --part-xml folder
             // (DIR/meta) must exist before the session: the core does not
@@ -82,10 +79,8 @@ class EngineService : Service() {
             acquireWake()
             ctl.started(commands)
             val s = try {
-                EngineSession(
-                    core = CoreRunner.corePath(this),
-                    runDir = java.io.File(noBackupFilesDir, "run"),
-                    myUid = AndroidProcess.myUid(),
+                launcher.create(
+                    ctx = this,
                     usbFd = fd,
                     commands = commands,
                     onLog = ctl::log,
@@ -203,6 +198,10 @@ class EngineService : Service() {
         private const val CHANNEL = "engine"
         private const val NOTIFICATION_ID = 1
         private const val WAKE_MAX_MS = 3L * 60 * 60 * 1000
+
+        /** Gate + child factory; E8 tests swap in a fake child (EngineLauncher). */
+        @androidx.annotation.VisibleForTesting
+        @Volatile var launcher: EngineLauncher = EngineLauncher.Default
 
         fun start(ctx: Context, commands: List<String>) {
             val i = Intent(ctx, EngineService::class.java).setAction(ACTION_START)

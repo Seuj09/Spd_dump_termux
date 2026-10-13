@@ -23,14 +23,14 @@ class EngineSession(
     private val onLog: (String) -> Unit,
     private val onEvent: (EngineEvent) -> Unit,
     private val onExit: (Int?) -> Unit,
-) {
+) : EngineChild {
     @Volatile private var process: Process? = null
     @Volatile private var pid: Int? = null
     @Volatile private var finished = false
     @Volatile var stopRequested = false
         private set
 
-    fun start() {
+    override fun start() {
         val n = Integer.toHexString((System.nanoTime() and 0xffffff).toInt())
         runDir.mkdirs()
         val sock = File(runDir, "s$n")
@@ -77,7 +77,7 @@ class EngineSession(
     }
 
     /** SIGINT, then destroy if it does not end. */
-    fun stop() {
+    override fun stop() {
         val p = process ?: return
         if (finished || stopRequested) return
         stopRequested = true
