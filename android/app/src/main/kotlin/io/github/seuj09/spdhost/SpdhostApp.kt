@@ -23,6 +23,7 @@ class SpdhostApp : Application() {
 
     /** Dump folder, saved table, images list (P1-5). */
     val dumps by lazy { io.github.seuj09.spdhost.dump.DumpRepo(this) }
+    val exports by lazy { io.github.seuj09.spdhost.dump.ExportRepo(this) }
 
     private val _core = MutableStateFlow<CoreProbe?>(null)
     val core: StateFlow<CoreProbe?> = _core.asStateFlow()

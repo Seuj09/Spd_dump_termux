@@ -1,6 +1,8 @@
 package io.github.seuj09.spdhost.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -40,7 +42,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.seuj09.spdhost.BuildConfig
 import io.github.seuj09.spdhost.SpdhostApp
 import io.github.seuj09.spdhost.engine.CoreProbe
+import io.github.seuj09.spdhost.engine.EngineArgv
 import io.github.seuj09.spdhost.engine.EngineGate
+import io.github.seuj09.spdhost.dump.Exporter
 import io.github.seuj09.spdhost.engine.EngineState
 import io.github.seuj09.spdhost.engine.SessionArgs
 import io.github.seuj09.spdhost.dump.DumpState
@@ -334,6 +338,8 @@ private fun DumpCard(
             OutlinedButton(onClick = { app.dumps.newFolder() }, enabled = !e.running) { Text("New folder") }
         }
         val table = d.table
+        // P1-5 note 3: a pick that is no longer a row of the current table is cleared.
+        LaunchedEffect(d.dir, table) { if (one != null && table?.names?.contains(one) != true) one = null }
         if (table != null) {
             Text("Table: ${table.rows.size} rows, unit shift ${table.shift ?: "?"}, " +
                 if (table.verified) "sizes verified" else "sizes NOT verified (estimate)")
@@ -343,6 +349,13 @@ private fun DumpCard(
             table.rows.forEach { r ->
                 val label = "${r.index} ${r.name}" + (r.bytes?.let { " · ${it shr 20} MiB" } ?: "")
                 if (r.name.startsWith("userdata")) return@forEach
+                // P1-5 note 2: rows the app's name rule refuses are shown greyed out with the reason.
+                if (!EngineArgv.partNameOk(r.name)) {
+                    OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
+                        Text("$label (name not allowed: letters, digits, _ only)")
+                    }
+                    return@forEach
+                }
                 if (one == r.name) Button(onClick = { one = null }, modifier = Modifier.fillMaxWidth()) { Text("✓ $label") }
                 else OutlinedButton(onClick = { one = r.name }, modifier = Modifier.fillMaxWidth()) { Text(label) }
             }
@@ -370,6 +383,37 @@ private fun DumpCard(
             Text("Images in this folder (images list --json, filtered by the table): ${shown.size} of ${imgs.images.size}",
                 style = MaterialTheme.typography.bodySmall)
             if (shown.isNotEmpty()) Mono(shown.joinToString("\n") { "%-14s %8d MiB %s".format(it.name, it.bytes shr 20, it.sha256?.take(12) ?: "no sha") })
+
+            ExportBlock(app, d, shown, e.running)
+        }
+        if (d.partials.isNotEmpty()) {
+            Text("Unfinished files (cancelled or failed dump, not exported):", color = Color(0xFFB00020),
+                style = MaterialTheme.typography.bodySmall)
+            Mono(d.partials.joinToString("\n") { "PARTIAL  $it" })
+            if (d.partials.any { it.endsWith(".partial") })
+                OutlinedButton(onClick = { app.dumps.deletePartials() }, enabled = !e.running) { Text("Delete *.partial files") }
         }
     }
+}
+
+/**
+ * P1-6: SAF export of the table-filtered images (images list --json). Each file
+ * is opened with "rwt" and verified against meta/SHA256SUMS while copied.
+ */
+@Composable
+private fun ExportBlock(app: SpdhostApp, d: DumpState, shown: List<io.github.seuj09.spdhost.dump.ImageFile>, running: Boolean) {
+    val ex by app.exports.state.collectAsStateWithLifecycle()
+    val dir = d.dir
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null && dir != null) app.exports.export(uri, dir, shown)
+    }
+    val big = shown.filter { Exporter.needsFat32Warning(it.bytes) }
+    if (big.isNotEmpty()) Text(
+        "Warning: ${big.joinToString { it.name }} ${if (big.size == 1) "is" else "are"} 4 GiB or larger. " +
+            "A FAT32 SD card or USB stick cannot hold such a file; pick exFAT/internal storage.",
+        color = Color(0xFFB00020), style = MaterialTheme.typography.bodySmall)
+    OutlinedButton(onClick = { pick.launch(null) }, enabled = dir != null && shown.isNotEmpty() && !running && !ex.running) {
+        Text(if (ex.running) "Exporting…" else "Export (verify against SHA256SUMS)")
+    }
+    if (ex.lines.isNotEmpty()) Mono(ex.lines.joinToString("\n"))
 }
