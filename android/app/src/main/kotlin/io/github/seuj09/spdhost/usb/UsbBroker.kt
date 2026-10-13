@@ -38,7 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * All state changes run on the main thread through [UsbStateMachine].
  */
-class UsbBroker(context: Context) {
+open class UsbBroker(context: Context) {
     private val app = context.applicationContext
     private val usb = app.getSystemService(Context.USB_SERVICE) as UsbManager
     private val main = Handler(Looper.getMainLooper())
@@ -51,8 +51,6 @@ class UsbBroker(context: Context) {
     val log: StateFlow<List<String>> = _log.asStateFlow()
 
     private var connection: UsbDeviceConnection? = null
-    /** E8 tests only (Robolectric has no USB host): an "open" fd with no connection. */
-    private var testFd: Int? = null
     private var started = false
 
     /**
@@ -149,7 +147,7 @@ class UsbBroker(context: Context) {
      * null when nothing is open. Any thread; runs on the main thread.
      */
     fun holdForEngine(): Int? = onMain {
-        val fd = connection?.fileDescriptor ?: testFd
+        val fd = openFd()
         if (fd == null || engineHeld) null else {
             engineHeld = true
             note("connection pinned for the core session")
@@ -157,12 +155,15 @@ class UsbBroker(context: Context) {
         }
     }
 
-    /** E8 tests: stand in for openNow with no UsbDeviceConnection behind [fd]. */
-    @androidx.annotation.VisibleForTesting
-    fun openForTest(info: DeviceInfo, fd: Int) = onMain {
-        testFd = fd
-        _state.value = UsbState.Opened(info, fd)
-    }
+    /**
+     * The fd of the open connection, or null. A seam only: the E8 tests'
+     * subclass (src/test, never in an APK) answers without a UsbDeviceConnection,
+     * since Robolectric has no USB host (#41 note 2).
+     */
+    protected open fun openFd(): Int? = connection?.fileDescriptor
+
+    /** For that subclass: publish a state on the main thread. */
+    protected fun publish(s: UsbState) = onMain { _state.value = s }
 
     /** The child exited: unpin, and carry out a close that was deferred. */
     fun releaseFromEngine() {
@@ -211,13 +212,16 @@ class UsbBroker(context: Context) {
         dispatch(UsbEvent.OpenSucceeded(info.name, fd, withSerial))
     }
 
+    /** A close went through (seam for the E8 subclass; nothing to do here). */
+    protected open fun onClosed() {}
+
     private fun closeNow() {
         if (engineHeld) {
             closePending = true
             note("close deferred until the core session ends")
             return
         }
-        testFd = null
+        onClosed()
         val c = connection ?: return
         connection = null
         c.close()

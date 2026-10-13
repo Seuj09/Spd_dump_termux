@@ -343,31 +343,70 @@ int spd_send(struct spd *io)
  * fake loader answer READ_PARTITION with that table and READ_MIDST with that
  * many zero bytes (READ_FLASH), so --dry-run walks ops dump's real reads
  * instead of stopping at the table. Unset: plain ACKs, as before. */
+/* The table file is read once per process (#41 note 1); a row whose KiB size
+ * does not fit the 32-bit field, a bad line or more than 64 rows refuses the
+ * whole table (the fake then gives plain ACKs, as with no table). */
+#define DRY_PT_MAX 64
+static struct { char name[36]; uint32_t kb; } dry_pt[DRY_PT_MAX];
+static int dry_pt_n = -1; /* -1 not loaded, -2 refused */
+
+static int dry_pt_load(const char *f)
+{
+	FILE *fp;
+	char name[40];
+	unsigned long long kb;
+	int n = 0, r;
+
+	if (dry_pt_n != -1)
+		return dry_pt_n;
+	dry_pt_n = -2;
+	fp = fopen(f, "r");
+	if (!fp) {
+		fprintf(stderr, "DRY ptable: open %s: %s\n", f, strerror(errno));
+		return dry_pt_n;
+	}
+	while ((r = fscanf(fp, "%35s %llu", name, &kb)) == 2) {
+		if (n == DRY_PT_MAX || kb == 0 || kb > 0xffffffffull) {
+			fprintf(stderr, "DRY ptable: row %d (%s %llu KiB) refused: %s\n", n + 1, name, kb,
+				n == DRY_PT_MAX ? "more than 64 rows" : "size must be 1..2^32-1 KiB");
+			fclose(fp);
+			return dry_pt_n;
+		}
+		memcpy(dry_pt[n].name, name, sizeof(dry_pt[n].name));
+		dry_pt[n].kb = (uint32_t)kb;
+		n++;
+	}
+	fclose(fp);
+	if (r != EOF) {
+		fprintf(stderr, "DRY ptable: bad line after row %d\n", n);
+		return dry_pt_n;
+	}
+	fprintf(stderr, "DRY ptable: %d rows\n", n);
+	return dry_pt_n = n;
+}
+
 static int dry_table_reply(struct spd *io)
 {
 	const char *f = getenv("SPDHOST_DRY_PTABLE");
 	if (!f || !*f)
 		return 0;
 	if (io->last_type == BSL_CMD_READ_PARTITION) {
-		FILE *fp = fopen(f, "r");
-		char name[40];
-		unsigned long kb;
-		unsigned n = 0, j;
-		if (!fp)
+		int n = dry_pt_load(f), k;
+		unsigned j;
+		if (n < 0)
 			return 0;
-		while (n < 64 && fscanf(fp, "%35s %lu", name, &kb) == 2) {
-			uint8_t *r = io->raw + 4 + n * 0x4c;
+		for (k = 0; k < n; k++) {
+			uint8_t *r = io->raw + 4 + k * 0x4c;
+			uint32_t kb = dry_pt[k].kb;
 			memset(r, 0, 0x4c);
-			for (j = 0; name[j]; j++)
-				r[2 * j] = (uint8_t)name[j];
+			for (j = 0; dry_pt[k].name[j]; j++)
+				r[2 * j] = (uint8_t)dry_pt[k].name[j];
 			r[0x48] = (uint8_t)kb; r[0x49] = (uint8_t)(kb >> 8);
 			r[0x4a] = (uint8_t)(kb >> 16); r[0x4b] = (uint8_t)(kb >> 24);
-			n++;
 		}
-		fclose(fp);
 		wr16be(io->raw, BSL_REP_READ_PARTITION);
-		wr16be(io->raw + 2, n * 0x4c);
-		io->raw_len = 4 + (int)(n * 0x4c) + 2;
+		wr16be(io->raw + 2, (unsigned)(n * 0x4c));
+		io->raw_len = 4 + n * 0x4c + 2;
 		return 1;
 	}
 	if (io->last_type == BSL_CMD_READ_MIDST && io->raw_len >= 4 + 4) {

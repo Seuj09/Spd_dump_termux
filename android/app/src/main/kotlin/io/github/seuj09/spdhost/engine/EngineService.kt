@@ -61,21 +61,21 @@ class EngineService : Service() {
     private fun startSession(commands: List<String>) {
         val ctl = app.engine
         if (ctl.session != null) { ctl.log("a session is already running"); return }
-        Thread {
+        launcher.background("engine-start") {
             // Caps gate (blocking, offline: no USB).
             val why = launcher.gateRefusal(this)
-            if (why != null) { ctl.refused(why); finish(); return@Thread }
+            if (why != null) { ctl.refused(why); finish(); return@background }
             // P1-5: only the read-only grammar, and the --part-xml folder
             // (DIR/meta) must exist before the session: the core does not
             // create it.
             val bad = runCatching { EngineArgv.validate(commands) }.exceptionOrNull()
-            if (bad != null) { ctl.refused(bad.message ?: "refused"); finish(); return@Thread }
+            if (bad != null) { ctl.refused(bad.message ?: "refused"); finish(); return@background }
             for (d in SessionArgs.dirsToCreate(commands)) {
                 val f = java.io.File(d)
-                if (!f.isDirectory && !f.mkdirs()) { ctl.refused("cannot create $d"); finish(); return@Thread }
+                if (!f.isDirectory && !f.mkdirs()) { ctl.refused("cannot create $d"); finish(); return@background }
             }
             val fd = app.broker.holdForEngine()
-            if (fd == null) { ctl.refused("the USB device is not open"); finish(); return@Thread }
+            if (fd == null) { ctl.refused("the USB device is not open"); finish(); return@background }
             acquireWake()
             ctl.started(commands)
             val s = try {
@@ -106,7 +106,7 @@ class EngineService : Service() {
                 )
             } catch (e: Exception) {
                 app.broker.releaseFromEngine(); releaseWake()
-                ctl.refused("${e.javaClass.simpleName}: ${e.message}"); finish(); return@Thread
+                ctl.refused("${e.javaClass.simpleName}: ${e.message}"); finish(); return@background
             }
             ctl.session = s
             try {
@@ -116,7 +116,7 @@ class EngineService : Service() {
                 app.broker.releaseFromEngine(); releaseWake()
                 ctl.refused("${e.javaClass.simpleName}: ${e.message}"); finish()
             }
-        }.apply { name = "engine-start"; isDaemon = true; start() }
+        }
     }
 
     private fun goForeground() {

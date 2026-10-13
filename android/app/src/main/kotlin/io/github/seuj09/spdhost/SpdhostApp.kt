@@ -31,10 +31,13 @@ open class SpdhostApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        broker = UsbBroker(this).also { it.start() }
+        broker = newBroker().also { it.start() }
         probeCore()
         loaders.load()
     }
+
+    /** The E8 test app swaps in a broker that fakes an open device. */
+    protected open fun newBroker(): UsbBroker = UsbBroker(this)
 
     /** Runs `libspdhost.so caps` off the main thread. */
     fun probeCore() {
